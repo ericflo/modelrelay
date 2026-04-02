@@ -1,5 +1,6 @@
 pub mod dispatch_harness;
 pub mod registration_harness;
+pub mod response_harness;
 
 /// Returns the pinned Katamari commit used as the starting behavior contract.
 #[must_use]
@@ -16,6 +17,9 @@ mod tests {
     use crate::registration_harness::{
         CloseCode, ConnectRequest, HandshakeFailure, ProviderConfig, RegisterAck, RegisterMessage,
         RegistrationHarness, ServerToWorker, WorkerToServer,
+    };
+    use crate::response_harness::{
+        CompletionMetadata, PassThroughOutcome, ResponseComplete, ResponseHarness, ResponseHeader,
     };
 
     #[test]
@@ -417,6 +421,88 @@ mod tests {
                 code: CloseCode::PolicyViolation,
                 reason: "provider `anthropic` is disabled".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn response_complete_preserves_status_headers_body_and_token_counts_for_success() {
+        let mut harness = ResponseHarness::new();
+        let request_id = harness.start_request("/v1/chat/completions");
+
+        let delivered = harness
+            .deliver_response_complete(
+                &request_id,
+                ResponseComplete::new(
+                    200,
+                    vec![
+                        ResponseHeader::new("content-type", "application/json"),
+                        ResponseHeader::new("x-request-id", "req_123"),
+                        ResponseHeader::new("set-cookie", "route=a"),
+                        ResponseHeader::new("set-cookie", "worker=box-01"),
+                    ],
+                    r#"{"id":"chatcmpl-123","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#,
+                )
+                .with_token_counts(12, 5, 17),
+            )
+            .expect("response_complete should resolve the client response");
+
+        assert_eq!(
+            delivered,
+            PassThroughOutcome {
+                status: 200,
+                headers: vec![
+                    ResponseHeader::new("content-type", "application/json"),
+                    ResponseHeader::new("x-request-id", "req_123"),
+                    ResponseHeader::new("set-cookie", "route=a"),
+                    ResponseHeader::new("set-cookie", "worker=box-01"),
+                ],
+                body: r#"{"id":"chatcmpl-123","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#.to_string(),
+                completion: Some(CompletionMetadata::new(12, 5, 17)),
+            }
+        );
+    }
+
+    #[test]
+    fn response_complete_preserves_upstream_error_body_without_flattening_headers() {
+        let mut harness = ResponseHarness::new();
+        let request_id = harness.start_request("/v1/responses");
+
+        let delivered = harness
+            .deliver_response_complete(
+                &request_id,
+                ResponseComplete::new(
+                    503,
+                    vec![
+                        ResponseHeader::new("content-type", "application/json"),
+                        ResponseHeader::new("retry-after", "15"),
+                        ResponseHeader::new("x-upstream-status", "overloaded"),
+                    ],
+                    r#"{"error":{"type":"server_error","message":"backend overloaded"}}"#,
+                )
+                .with_token_counts(321, 0, 321),
+            )
+            .expect("upstream errors should still produce a client response");
+
+        assert_eq!(delivered.status, 503);
+        assert_eq!(
+            delivered.headers,
+            vec![
+                ResponseHeader::new("content-type", "application/json"),
+                ResponseHeader::new("retry-after", "15"),
+                ResponseHeader::new("x-upstream-status", "overloaded"),
+            ]
+        );
+        assert_eq!(
+            delivered.body,
+            r#"{"error":{"type":"server_error","message":"backend overloaded"}}"#
+        );
+        assert_eq!(
+            delivered.completion,
+            Some(CompletionMetadata::new(321, 0, 321))
+        );
+        assert!(
+            !delivered.body.contains("prompt_tokens"),
+            "token counts stay in completion metadata rather than mutating the client-visible body"
         );
     }
 }
