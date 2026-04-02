@@ -19,7 +19,8 @@ mod tests {
         RegistrationHarness, ServerToWorker, WorkerToServer,
     };
     use crate::response_harness::{
-        CompletionMetadata, PassThroughOutcome, ResponseComplete, ResponseHarness, ResponseHeader,
+        CompletionMetadata, ForwardedChunk, PassThroughOutcome, ResponseChunk, ResponseComplete,
+        ResponseHarness, ResponseHeader, StreamChunkDelivery, StreamTermination,
     };
 
     #[test]
@@ -37,7 +38,8 @@ mod tests {
         assert!(doc.contains("First Characterization Tests To Write Next"));
         assert!(doc.contains("Immediate dispatch vs queue"));
         assert!(doc.contains("Worker registration handshake"));
-        assert!(doc.contains("Streaming pass-through"));
+        assert!(doc.contains("Client cancellation"));
+        assert!(!doc.contains("4. Streaming pass-through:"));
     }
 
     #[test]
@@ -458,6 +460,7 @@ mod tests {
                 ],
                 body: r#"{"id":"chatcmpl-123","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#.to_string(),
                 completion: Some(CompletionMetadata::new(12, 5, 17)),
+                streamed_chunks: Vec::new(),
             }
         );
     }
@@ -500,9 +503,146 @@ mod tests {
             delivered.completion,
             Some(CompletionMetadata::new(321, 0, 321))
         );
+        assert!(delivered.streamed_chunks.is_empty());
         assert!(
             !delivered.body.contains("prompt_tokens"),
             "token counts stay in completion metadata rather than mutating the client-visible body"
+        );
+    }
+
+    #[test]
+    fn streaming_pass_through_preserves_chunk_order_done_termination_and_completion_metadata() {
+        let mut harness = ResponseHarness::new();
+        let request_id = harness.start_request("/v1/chat/completions");
+
+        let first = harness.deliver_response_chunk(
+            &request_id,
+            ResponseChunk::new(
+                r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"Hel"}}]}\n\n"#,
+            ),
+        );
+        let second = harness.deliver_response_chunk(
+            &request_id,
+            ResponseChunk::new(
+                r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"lo"}}]}\n\n"#,
+            ),
+        );
+        let done =
+            harness.deliver_response_chunk(&request_id, ResponseChunk::new("data: [DONE]\n\n"));
+
+        assert_eq!(
+            first,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                1,
+                r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"Hel"}}]}\n\n"#,
+                true,
+            )))
+        );
+        assert_eq!(
+            second,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                2,
+                r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"lo"}}]}\n\n"#,
+                true,
+            )))
+        );
+        assert_eq!(
+            done,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                3,
+                "data: [DONE]\n\n",
+                true,
+            )))
+        );
+
+        let delivered = harness
+            .deliver_response_complete(
+                &request_id,
+                ResponseComplete::new(
+                    200,
+                    vec![
+                        ResponseHeader::new("content-type", "text/event-stream"),
+                        ResponseHeader::new("cache-control", "no-cache"),
+                    ],
+                    "",
+                )
+                .with_token_counts(12, 2, 14),
+            )
+            .expect("stream completion metadata should resolve the response");
+
+        assert_eq!(delivered.status, 200);
+        assert_eq!(
+            delivered.headers,
+            vec![
+                ResponseHeader::new("content-type", "text/event-stream"),
+                ResponseHeader::new("cache-control", "no-cache"),
+            ]
+        );
+        assert_eq!(delivered.body, "");
+        assert_eq!(
+            delivered.streamed_chunks,
+            vec![
+                ForwardedChunk::new(
+                    1,
+                    r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"Hel"}}]}\n\n"#,
+                    true,
+                ),
+                ForwardedChunk::new(
+                    2,
+                    r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"lo"}}]}\n\n"#,
+                    true,
+                ),
+                ForwardedChunk::new(3, "data: [DONE]\n\n", true),
+            ]
+        );
+        assert_eq!(
+            delivered.completion,
+            Some(CompletionMetadata::new(12, 2, 14))
+        );
+    }
+
+    #[test]
+    fn oversized_stream_emits_sse_error_and_terminates_without_delivering_completion() {
+        let first_chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n";
+        let oversized_chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"this pushes the stream over the configured limit\"}}]}\n\n";
+        let mut harness = ResponseHarness::with_max_stream_bytes(first_chunk.len() + 8);
+        let request_id = harness.start_request("/v1/chat/completions");
+
+        let first = harness.deliver_response_chunk(&request_id, ResponseChunk::new(first_chunk));
+        let terminated =
+            harness.deliver_response_chunk(&request_id, ResponseChunk::new(oversized_chunk));
+
+        assert_eq!(
+            first,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                1,
+                first_chunk,
+                true,
+            )))
+        );
+        assert_eq!(
+            terminated,
+            Some(StreamChunkDelivery::Terminated(
+                StreamTermination::oversized()
+            ))
+        );
+        assert_eq!(
+            harness.deliver_response_complete(
+                &request_id,
+                ResponseComplete::new(
+                    200,
+                    vec![ResponseHeader::new("content-type", "text/event-stream")],
+                    "",
+                )
+                .with_token_counts(12, 99, 111),
+            ),
+            None,
+            "oversized streams terminate before late completion metadata is delivered"
+        );
+        assert_eq!(
+            harness.deliver_response_chunk(&request_id, ResponseChunk::new("data: [DONE]\n\n")),
+            None,
+            "late chunks after oversized termination are dropped"
         );
     }
 }
