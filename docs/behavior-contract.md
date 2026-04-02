@@ -22,6 +22,7 @@ Source of truth:
 
 - Capability advertisement:
   After connect, the worker sends a `register` message containing `worker_name`, `models`, `max_concurrent`, and `protocol_version`. The server may sanitize or truncate these values and must send `register_ack` with the accepted worker ID, accepted model list, and warnings. Legacy workers omitting `protocol_version` are tolerated in Katamari unless explicitly rejected by config; mismatched protocol versions are closed with a protocol error.
+  The first Rust characterization harness makes that sanitization concrete by requiring the acked model list to trim whitespace, drop empty entries, de-duplicate exact duplicates while preserving first-seen order, and cap the accepted list at a provider-defined limit with warnings surfaced in `register_ack`.
 
 - Model advertisement and worker selection:
   Workers advertise exact model names, and the server routes only to workers that explicitly support the requested model. Katamari keeps an O(1) model-membership set per worker. Selection is "lowest load with round-robin tie breaking" among workers that support the model and can atomically reserve capacity.
@@ -109,4 +110,3 @@ Ordered by leverage:
 
 10. Graceful shutdown and drain:
    Worker receives shutdown, no new work is assigned, in-flight work is allowed to finish or timeout, and provider deletion drains queued work explicitly.
-
