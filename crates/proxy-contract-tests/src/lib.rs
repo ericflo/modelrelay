@@ -1,5 +1,6 @@
 pub mod dispatch_harness;
 pub mod registration_harness;
+pub mod response_harness;
 
 /// Returns the pinned Katamari commit used as the starting behavior contract.
 #[must_use]
@@ -16,6 +17,10 @@ mod tests {
     use crate::registration_harness::{
         CloseCode, ConnectRequest, HandshakeFailure, ProviderConfig, RegisterAck, RegisterMessage,
         RegistrationHarness, ServerToWorker, WorkerToServer,
+    };
+    use crate::response_harness::{
+        CompletionOutcome, Header, NonStreamingRequest, ResponseComplete, ResponseHarness,
+        TokenCounts,
     };
 
     #[test]
@@ -34,6 +39,105 @@ mod tests {
         assert!(doc.contains("Immediate dispatch vs queue"));
         assert!(doc.contains("Worker registration handshake"));
         assert!(doc.contains("Streaming pass-through"));
+    }
+
+    #[test]
+    fn successful_response_complete_preserves_status_headers_body_and_token_counts() {
+        let mut harness = ResponseHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let assignment = harness.submit_request(NonStreamingRequest::new(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            r#"{"model":"llama-3.1-70b","stream":false}"#,
+        ));
+
+        assert_eq!(assignment.worker_id, worker_id);
+
+        let outcome = harness
+            .complete_response(
+                &worker_id,
+                &assignment.request_id,
+                ResponseComplete::new(
+                    201,
+                    [
+                        Header::new("content-type", "application/json"),
+                        Header::new("x-upstream-request-id", "req-42"),
+                        Header::new("set-cookie", "route=a"),
+                        Header::new("set-cookie", "backend=worker-1"),
+                    ],
+                    r#"{"id":"chatcmpl-123","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"done"}}]}"#,
+                    TokenCounts::new(17, 29),
+                ),
+            )
+            .expect("non-streaming completion should produce a client-facing response");
+
+        assert_eq!(outcome.client_response.status, 201);
+        assert_eq!(
+            outcome.client_response.headers,
+            vec![
+                Header::new("content-type", "application/json"),
+                Header::new("x-upstream-request-id", "req-42"),
+                Header::new("set-cookie", "route=a"),
+                Header::new("set-cookie", "backend=worker-1"),
+            ]
+        );
+        assert_eq!(
+            outcome.client_response.body,
+            r#"{"id":"chatcmpl-123","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"done"}}]}"#
+        );
+        assert_eq!(outcome.completion.token_counts, TokenCounts::new(17, 29));
+    }
+
+    #[test]
+    fn upstream_error_response_complete_preserves_error_status_headers_body_and_token_counts() {
+        let mut harness = ResponseHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let assignment = harness.submit_request(NonStreamingRequest::new(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/responses",
+            r#"{"model":"llama-3.1-70b","stream":false}"#,
+        ));
+
+        assert_eq!(assignment.worker_id, worker_id);
+
+        let outcome = harness
+            .complete_response(
+                &worker_id,
+                &assignment.request_id,
+                ResponseComplete::new(
+                    503,
+                    [
+                        Header::new("content-type", "application/json"),
+                        Header::new("retry-after", "15"),
+                        Header::new("x-upstream-error", "overloaded"),
+                    ],
+                    r#"{"error":{"type":"overloaded_error","message":"backend overloaded"}}"#,
+                    TokenCounts::new(91, 0),
+                ),
+            )
+            .expect("upstream errors should still pass through as completed responses");
+
+        assert_eq!(
+            outcome,
+            CompletionOutcome::new(
+                503,
+                vec![
+                    Header::new("content-type", "application/json"),
+                    Header::new("retry-after", "15"),
+                    Header::new("x-upstream-error", "overloaded"),
+                ],
+                r#"{"error":{"type":"overloaded_error","message":"backend overloaded"}}"#,
+                TokenCounts::new(91, 0),
+            )
+        );
+        assert!(
+            !outcome.client_response.body.contains("prompt_tokens"),
+            "token counts belong in completion metadata, not the client-visible error body"
+        );
     }
 
     #[test]
