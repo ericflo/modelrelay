@@ -49,7 +49,8 @@ mod tests {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
         assert!(doc.contains("First Characterization Tests To Write Next"));
-        assert!(doc.contains("Dynamic model catalog updates and `/v1/models` coherence"));
+        assert!(doc.contains("OpenAI `/v1/responses` compatibility coverage"));
+        assert!(!doc.contains("Dynamic model catalog updates and `/v1/models` coherence"));
         assert!(!doc.contains("1. OpenAI-style and Anthropic-style compatibility:"));
         assert!(!doc.contains("1. Graceful shutdown and drain:"));
         assert!(!doc.contains("5. Queue timeout and queue-full surfaces:"));
@@ -238,6 +239,47 @@ mod tests {
         assert_eq!(
             harness.worker_in_flight_request_ids(&second_worker),
             vec!["request-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn models_update_immediately_changes_routing_without_worker_reconnect() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        assert_eq!(
+            harness.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-1".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        assert_eq!(
+            harness.update_worker_models(&worker_id, ["llama-3.1-70b", "mistral-large"]),
+            vec![DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: worker_id.clone(),
+            }]
+        );
+        assert!(harness.queued_request_ids("openai").is_empty());
+        assert_eq!(
+            harness.worker_in_flight_request_ids(&worker_id),
+            vec!["request-1".to_string()]
+        );
+
+        assert_eq!(harness.finish_request(&worker_id, "request-1"), None);
+        assert!(harness.has_worker(&worker_id));
+
+        assert!(harness
+            .update_worker_models(&worker_id, ["llama-3.1-70b"])
+            .is_empty());
+        assert_eq!(
+            harness.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
         );
     }
 
@@ -1235,6 +1277,62 @@ mod tests {
                     },
                     {
                         "id": "mistral-large",
+                        "object": "model",
+                        "owned_by": "worker-proxy"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn models_endpoint_tracks_live_worker_model_updates_without_stale_entries() {
+        let mut dispatch = DispatchHarness::new();
+        let first_worker = dispatch.register_worker("openai", ["llama-3.1-70b"], 1);
+        let second_worker = dispatch.register_worker("openai", ["mistral-large"], 1);
+
+        let initial =
+            HttpCompatibilityHarness::new(dispatch.provider_models("openai")).models_response();
+        assert_eq!(
+            initial.body,
+            json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "llama-3.1-70b",
+                        "object": "model",
+                        "owned_by": "worker-proxy"
+                    },
+                    {
+                        "id": "mistral-large",
+                        "object": "model",
+                        "owned_by": "worker-proxy"
+                    }
+                ]
+            })
+        );
+
+        assert!(dispatch
+            .update_worker_models(&first_worker, ["llama-3.1-70b", "gpt-oss-120b"])
+            .is_empty());
+        assert!(dispatch
+            .update_worker_models(&second_worker, ["gpt-oss-120b"])
+            .is_empty());
+
+        let updated =
+            HttpCompatibilityHarness::new(dispatch.provider_models("openai")).models_response();
+        assert_eq!(
+            updated.body,
+            json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "llama-3.1-70b",
+                        "object": "model",
+                        "owned_by": "worker-proxy"
+                    },
+                    {
+                        "id": "gpt-oss-120b",
                         "object": "model",
                         "owned_by": "worker-proxy"
                     }
