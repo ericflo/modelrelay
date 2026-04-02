@@ -74,6 +74,33 @@ impl DispatchHarness {
         worker_id
     }
 
+    pub fn update_worker_models(
+        &mut self,
+        worker_id: &str,
+        models: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Vec<DispatchAssignment> {
+        let updated_models = models.into_iter().map(Into::into).collect::<Vec<_>>();
+        let max_assignments = self
+            .workers
+            .get(worker_id)
+            .map_or(0, |worker| worker.max_concurrent);
+
+        let Some(worker) = self.workers.get_mut(worker_id) else {
+            return Vec::new();
+        };
+        worker.models = updated_models;
+
+        let mut assignments = Vec::new();
+        while assignments.len() < max_assignments {
+            let Some(assignment) = self.dispatch_next_compatible(worker_id) else {
+                break;
+            };
+            assignments.push(assignment);
+        }
+
+        assignments
+    }
+
     pub fn submit_request(
         &mut self,
         provider: impl Into<String>,
@@ -391,6 +418,20 @@ impl DispatchHarness {
             .get(worker_id)
             .map(|worker| worker.in_flight_requests.clone())
             .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn provider_models(&self, provider: &str) -> Vec<String> {
+        let mut seen = HashSet::new();
+
+        self.worker_order
+            .iter()
+            .filter_map(|worker_id| self.workers.get(worker_id))
+            .filter(|worker| worker.provider == provider)
+            .flat_map(|worker| worker.models.iter())
+            .filter(|model| seen.insert((*model).clone()))
+            .cloned()
+            .collect()
     }
 
     #[must_use]

@@ -81,5 +81,5 @@ Source of truth:
 
 Ordered by leverage:
 
-1. Dynamic model catalog updates and `/v1/models` coherence:
-   Worker `models_update` messages should immediately change routing eligibility and the public compatibility model catalog without requiring reconnects or serving stale `/v1/models` results.
+1. OpenAI `/v1/responses` compatibility coverage:
+   Add characterization tests proving the proxy preserves model extraction, streaming flags, and SSE termination semantics for `/v1/responses`, not just `/v1/chat/completions`.
