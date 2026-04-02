@@ -271,9 +271,11 @@ mod tests {
         assert_eq!(harness.finish_request(&worker_id, "request-1"), None);
         assert!(harness.has_worker(&worker_id));
 
-        assert!(harness
-            .update_worker_models(&worker_id, ["llama-3.1-70b"])
-            .is_empty());
+        assert!(
+            harness
+                .update_worker_models(&worker_id, ["llama-3.1-70b"])
+                .is_empty()
+        );
         assert_eq!(
             harness.submit_request("openai", "mistral-large"),
             SubmissionOutcome::Queued(QueuedAssignment {
@@ -1312,12 +1314,16 @@ mod tests {
             })
         );
 
-        assert!(dispatch
-            .update_worker_models(&first_worker, ["llama-3.1-70b", "gpt-oss-120b"])
-            .is_empty());
-        assert!(dispatch
-            .update_worker_models(&second_worker, ["gpt-oss-120b"])
-            .is_empty());
+        assert!(
+            dispatch
+                .update_worker_models(&first_worker, ["llama-3.1-70b", "gpt-oss-120b"])
+                .is_empty()
+        );
+        assert!(
+            dispatch
+                .update_worker_models(&second_worker, ["gpt-oss-120b"])
+                .is_empty()
+        );
 
         let updated =
             HttpCompatibilityHarness::new(dispatch.provider_models("openai")).models_response();
