@@ -1,3 +1,4 @@
+pub mod dispatch_harness;
 pub mod registration_harness;
 
 /// Returns the pinned Katamari commit used as the starting behavior contract.
@@ -9,6 +10,9 @@ pub fn source_behavior_commit() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::source_behavior_commit;
+    use crate::dispatch_harness::{
+        DispatchAssignment, DispatchHarness, QueuedAssignment, SubmissionOutcome,
+    };
     use crate::registration_harness::{
         CloseCode, ConnectRequest, HandshakeFailure, ProviderConfig, RegisterAck, RegisterMessage,
         RegistrationHarness, ServerToWorker, WorkerToServer,
@@ -27,8 +31,140 @@ mod tests {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
         assert!(doc.contains("First Characterization Tests To Write Next"));
+        assert!(doc.contains("Immediate dispatch vs queue"));
         assert!(doc.contains("Worker registration handshake"));
         assert!(doc.contains("Streaming pass-through"));
+    }
+
+    #[test]
+    fn request_for_supported_model_dispatches_immediately_without_queueing() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let outcome = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert_eq!(
+            outcome,
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: worker_id.clone(),
+            })
+        );
+        assert!(harness.queued_request_ids("openai").is_empty());
+        assert_eq!(
+            harness.worker_in_flight_request_ids(&worker_id),
+            vec!["request-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn request_queues_when_all_matching_workers_are_at_capacity() {
+        let mut harness = DispatchHarness::new();
+        let llama_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+        let _mistral_worker = harness.register_worker("openai", ["mistral-large"], 1);
+
+        let first = harness.submit_request("openai", "llama-3.1-70b");
+        let second = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert_eq!(
+            first,
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: llama_worker.clone(),
+            })
+        );
+        assert_eq!(
+            second,
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+        assert_eq!(
+            harness.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+        assert_eq!(
+            harness.worker_in_flight_request_ids(&llama_worker),
+            vec!["request-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn workers_without_the_exact_requested_model_do_not_receive_the_request() {
+        let mut harness = DispatchHarness::new();
+        let mismatched_worker = harness.register_worker("openai", ["llama-3.1-70b-q4"], 1);
+
+        let outcome = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert_eq!(
+            outcome,
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-1".to_string(),
+                queue_len: 1,
+            })
+        );
+        assert_eq!(
+            harness.worker_in_flight_request_ids(&mismatched_worker),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            harness.queued_request_ids("openai"),
+            vec!["request-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn queued_requests_are_fifo_within_a_provider_among_compatible_models() {
+        let mut harness = DispatchHarness::new();
+        let llama_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+        let mistral_worker = harness.register_worker("openai", ["mistral-large"], 1);
+
+        let initial_llama = harness.submit_request("openai", "llama-3.1-70b");
+        let initial_mistral = harness.submit_request("openai", "mistral-large");
+        let queued_mistral = harness.submit_request("openai", "mistral-large");
+        let queued_llama = harness.submit_request("openai", "llama-3.1-70b");
+        let queued_mistral_tail = harness.submit_request("openai", "mistral-large");
+
+        assert!(matches!(initial_llama, SubmissionOutcome::Dispatched(_)));
+        assert!(matches!(initial_mistral, SubmissionOutcome::Dispatched(_)));
+        assert!(matches!(queued_mistral, SubmissionOutcome::Queued(_)));
+        assert!(matches!(queued_llama, SubmissionOutcome::Queued(_)));
+        assert!(matches!(queued_mistral_tail, SubmissionOutcome::Queued(_)));
+        assert_eq!(
+            harness.queued_request_ids("openai"),
+            vec![
+                "request-3".to_string(),
+                "request-4".to_string(),
+                "request-5".to_string(),
+            ]
+        );
+
+        let next_for_llama = harness
+            .finish_request(&llama_worker, "request-1")
+            .expect("llama worker should take the earliest compatible queued request");
+        let next_for_mistral = harness
+            .finish_request(&mistral_worker, "request-2")
+            .expect("mistral worker should take the earliest compatible queued request");
+
+        assert_eq!(
+            next_for_llama,
+            DispatchAssignment {
+                request_id: "request-4".to_string(),
+                worker_id: llama_worker.clone(),
+            }
+        );
+        assert_eq!(
+            next_for_mistral,
+            DispatchAssignment {
+                request_id: "request-3".to_string(),
+                worker_id: mistral_worker.clone(),
+            }
+        );
+        assert_eq!(
+            harness.queued_request_ids("openai"),
+            vec!["request-5".to_string()]
+        );
     }
 
     #[test]
