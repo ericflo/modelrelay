@@ -5,6 +5,7 @@ pub struct DispatchHarness {
     next_request_id: usize,
     next_worker_id: usize,
     worker_order: Vec<String>,
+    next_tie_break_index: HashMap<(String, String), usize>,
     workers: HashMap<String, WorkerState>,
     provider_queues: HashMap<String, VecDeque<QueuedRequest>>,
 }
@@ -15,6 +16,7 @@ impl Default for DispatchHarness {
             next_request_id: 1,
             next_worker_id: 1,
             worker_order: Vec::new(),
+            next_tie_break_index: HashMap::new(),
             workers: HashMap::new(),
             provider_queues: HashMap::new(),
         }
@@ -140,21 +142,42 @@ impl DispatchHarness {
         })
     }
 
-    fn find_eligible_worker_id(&self, provider: &str, model: &str) -> Option<String> {
-        self.worker_order.iter().find_map(|worker_id| {
-            let worker = self.workers.get(worker_id)?;
-            let supports_model = worker
-                .models
-                .iter()
-                .any(|advertised_model| advertised_model == model);
-            let has_capacity = worker.in_flight_requests.len() < worker.max_concurrent;
+    fn find_eligible_worker_id(&mut self, provider: &str, model: &str) -> Option<String> {
+        let mut eligible = self
+            .worker_order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, worker_id)| {
+                let worker = self.workers.get(worker_id)?;
+                let supports_model = worker
+                    .models
+                    .iter()
+                    .any(|advertised_model| advertised_model == model);
+                let has_capacity = worker.in_flight_requests.len() < worker.max_concurrent;
 
-            if worker.provider == provider && supports_model && has_capacity {
-                Some(worker_id.clone())
-            } else {
-                None
-            }
-        })
+                if worker.provider == provider && supports_model && has_capacity {
+                    Some((index, worker_id.clone(), worker.in_flight_requests.len()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let lowest_load = eligible.iter().map(|(_, _, load)| *load).min()?;
+
+        eligible.retain(|(_, _, load)| *load == lowest_load);
+
+        let tie_break_key = (provider.to_string(), model.to_string());
+        let start_index = *self.next_tie_break_index.get(&tie_break_key).unwrap_or(&0);
+        let selected = eligible
+            .iter()
+            .find(|(index, _, _)| *index >= start_index)
+            .or_else(|| eligible.first())?;
+
+        self.next_tie_break_index
+            .insert(tie_break_key, selected.0.saturating_add(1));
+
+        Some(selected.1.clone())
     }
 
     fn assign_to_worker(&mut self, worker_id: &str, request_id: &str) {

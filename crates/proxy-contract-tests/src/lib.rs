@@ -115,6 +115,110 @@ mod tests {
     }
 
     #[test]
+    fn least_loaded_exact_model_worker_is_selected_first() {
+        let mut harness = DispatchHarness::new();
+        let busier_eligible_worker = harness.register_worker("openai", ["llama-3.1-70b"], 2);
+        let least_loaded_eligible_worker = harness.register_worker("openai", ["llama-3.1-70b"], 2);
+        let idle_but_ineligible_worker = harness.register_worker("openai", ["mistral-large"], 2);
+
+        let warm_up = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert_eq!(
+            warm_up,
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: busier_eligible_worker.clone(),
+            })
+        );
+
+        let outcome = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert_eq!(
+            outcome,
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-2".to_string(),
+                worker_id: least_loaded_eligible_worker.clone(),
+            })
+        );
+        assert_eq!(
+            harness.worker_in_flight_request_ids(&busier_eligible_worker),
+            vec!["request-1".to_string()]
+        );
+        assert_eq!(
+            harness.worker_in_flight_request_ids(&least_loaded_eligible_worker),
+            vec!["request-2".to_string()]
+        );
+        assert!(
+            harness
+                .worker_in_flight_request_ids(&idle_but_ineligible_worker)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn equally_loaded_exact_model_workers_rotate_instead_of_sticking_to_registration_order() {
+        let mut harness = DispatchHarness::new();
+        let first_worker = harness.register_worker("openai", ["llama-3.1-70b"], 3);
+        let second_worker = harness.register_worker("openai", ["llama-3.1-70b"], 3);
+
+        let first = harness.submit_request("openai", "llama-3.1-70b");
+        let second = harness.submit_request("openai", "llama-3.1-70b");
+        let third = harness.submit_request("openai", "llama-3.1-70b");
+        let fourth = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert_eq!(
+            first,
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: first_worker.clone(),
+            })
+        );
+        assert_eq!(
+            second,
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-2".to_string(),
+                worker_id: second_worker.clone(),
+            })
+        );
+        assert_eq!(
+            third,
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-3".to_string(),
+                worker_id: first_worker.clone(),
+            })
+        );
+        assert_eq!(
+            fourth,
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-4".to_string(),
+                worker_id: second_worker.clone(),
+            })
+        );
+    }
+
+    #[test]
+    fn idle_workers_without_the_exact_model_stay_ineligible_when_exact_matches_exist() {
+        let mut harness = DispatchHarness::new();
+        let mismatched_idle_worker = harness.register_worker("openai", ["llama-3.1-70b-q4"], 2);
+        let exact_match_worker = harness.register_worker("openai", ["llama-3.1-70b"], 2);
+
+        let outcome = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert_eq!(
+            outcome,
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: exact_match_worker.clone(),
+            })
+        );
+        assert!(
+            harness
+                .worker_in_flight_request_ids(&mismatched_idle_worker)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn queued_requests_are_fifo_within_a_provider_among_compatible_models() {
         let mut harness = DispatchHarness::new();
         let llama_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
