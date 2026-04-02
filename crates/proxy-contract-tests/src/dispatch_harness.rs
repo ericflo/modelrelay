@@ -74,6 +74,30 @@ impl DispatchHarness {
         worker_id
     }
 
+    pub fn update_worker_models(
+        &mut self,
+        worker_id: &str,
+        models: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Option<Vec<DispatchAssignment>> {
+        let available_slots = {
+            let worker = self.workers.get_mut(worker_id)?;
+            worker.models = models.into_iter().map(Into::into).collect();
+            worker
+                .max_concurrent
+                .saturating_sub(worker.in_flight_requests.len())
+        };
+
+        let mut assignments = Vec::new();
+        for _ in 0..available_slots {
+            let Some(assignment) = self.dispatch_next_compatible(worker_id) else {
+                break;
+            };
+            assignments.push(assignment);
+        }
+
+        Some(assignments)
+    }
+
     pub fn submit_request(
         &mut self,
         provider: impl Into<String>,
@@ -409,6 +433,26 @@ impl DispatchHarness {
     #[must_use]
     pub fn has_worker(&self, worker_id: &str) -> bool {
         self.workers.contains_key(worker_id)
+    }
+
+    #[must_use]
+    pub fn public_model_catalog(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
+
+        for worker_id in &self.worker_order {
+            let Some(worker) = self.workers.get(worker_id) else {
+                continue;
+            };
+
+            for model in &worker.models {
+                if seen.insert(model.clone()) {
+                    models.push(model.clone());
+                }
+            }
+        }
+
+        models
     }
 
     #[must_use]

@@ -49,7 +49,8 @@ mod tests {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
         assert!(doc.contains("First Characterization Tests To Write Next"));
-        assert!(doc.contains("Dynamic model catalog updates and `/v1/models` coherence"));
+        assert!(doc.contains("Worker request envelope fidelity and compatibility headers"));
+        assert!(!doc.contains("Dynamic model catalog updates and `/v1/models` coherence"));
         assert!(!doc.contains("1. OpenAI-style and Anthropic-style compatibility:"));
         assert!(!doc.contains("1. Graceful shutdown and drain:"));
         assert!(!doc.contains("5. Queue timeout and queue-full surfaces:"));
@@ -428,6 +429,133 @@ mod tests {
         assert_eq!(
             harness.queued_request_ids("openai"),
             vec!["request-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn models_update_immediately_dispatches_newly_supported_queued_requests_without_reconnect() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        assert_eq!(
+            harness.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-1".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        assert_eq!(
+            harness.update_worker_models(&worker_id, ["llama-3.1-70b", "mistral-large"]),
+            Some(vec![DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: worker_id.clone(),
+            }])
+        );
+        assert!(harness.queued_request_ids("openai").is_empty());
+        assert_eq!(
+            harness.worker_in_flight_request_ids(&worker_id),
+            vec!["request-1".to_string()]
+        );
+        assert_eq!(
+            harness.public_model_catalog(),
+            vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()]
+        );
+    }
+
+    #[test]
+    fn models_update_removes_routing_eligibility_without_reconnect() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b", "mistral-large"], 1);
+
+        assert_eq!(
+            harness.update_worker_models(&worker_id, ["llama-3.1-70b"]),
+            Some(vec![])
+        );
+
+        assert_eq!(
+            harness.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-1".to_string(),
+                queue_len: 1,
+            })
+        );
+        assert_eq!(
+            harness.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-2".to_string(),
+                worker_id,
+            })
+        );
+    }
+
+    #[test]
+    fn models_endpoint_stays_coherent_after_in_place_worker_catalog_updates() {
+        let mut harness = DispatchHarness::new();
+        let first_worker = harness.register_worker("openai", ["llama-3.1-70b", "mistral-large"], 1);
+        let second_worker = harness.register_worker("openai", ["mistral-large", "qwen-2.5"], 1);
+
+        assert_eq!(
+            HttpCompatibilityHarness::new(harness.public_model_catalog()).models_response(),
+            ModelsEndpointResponse {
+                status: 200,
+                body: json!({
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "llama-3.1-70b",
+                            "object": "model",
+                            "owned_by": "worker-proxy"
+                        },
+                        {
+                            "id": "mistral-large",
+                            "object": "model",
+                            "owned_by": "worker-proxy"
+                        },
+                        {
+                            "id": "qwen-2.5",
+                            "object": "model",
+                            "owned_by": "worker-proxy"
+                        }
+                    ]
+                })
+            }
+        );
+
+        assert_eq!(
+            harness.update_worker_models(&first_worker, ["llama-3.1-70b"]),
+            Some(vec![])
+        );
+        assert_eq!(
+            harness.update_worker_models(&second_worker, ["qwen-2.5", "gemma-3-27b"]),
+            Some(vec![])
+        );
+
+        assert_eq!(
+            HttpCompatibilityHarness::new(harness.public_model_catalog()).models_response(),
+            ModelsEndpointResponse {
+                status: 200,
+                body: json!({
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "llama-3.1-70b",
+                            "object": "model",
+                            "owned_by": "worker-proxy"
+                        },
+                        {
+                            "id": "qwen-2.5",
+                            "object": "model",
+                            "owned_by": "worker-proxy"
+                        },
+                        {
+                            "id": "gemma-3-27b",
+                            "object": "model",
+                            "owned_by": "worker-proxy"
+                        }
+                    ]
+                })
+            }
         );
     }
 

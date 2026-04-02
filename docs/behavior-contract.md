@@ -81,5 +81,5 @@ Source of truth:
 
 Ordered by leverage:
 
-1. Dynamic model catalog updates and `/v1/models` coherence:
-   Worker `models_update` messages should immediately change routing eligibility and the public compatibility model catalog without requiring reconnects or serving stale `/v1/models` results.
+1. Worker request envelope fidelity and compatibility headers:
+   The forwarded worker `request` message should preserve the exact target endpoint path, streaming flag, raw JSON body, and compatibility-critical headers so worker-side backend adapters do not need reconnect-specific special cases or lose client intent in transit.
