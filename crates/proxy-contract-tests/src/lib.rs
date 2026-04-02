@@ -12,9 +12,9 @@ pub fn source_behavior_commit() -> &'static str {
 mod tests {
     use super::source_behavior_commit;
     use crate::dispatch_harness::{
-        CancelReason, CancellationOutcome, ChunkDelivery, DisconnectFailureReason,
-        DispatchAssignment, DispatchHarness, QueuedAssignment, RequestFailure, SubmissionOutcome,
-        WorkerCancelSignal, WorkerDisconnectOutcome,
+        CancelReason, CancellationOutcome, ChunkDelivery, DispatchAssignment, DispatchHarness,
+        ProviderQueuePolicy, QueuedAssignment, RequestFailure, RequestFailureReason,
+        SubmissionOutcome, WorkerCancelSignal, WorkerDisconnectOutcome,
     };
     use crate::registration_harness::{
         CloseCode, ConnectRequest, HandshakeFailure, ProviderConfig, RegisterAck, RegisterMessage,
@@ -41,6 +41,8 @@ mod tests {
         assert!(doc.contains("Immediate dispatch vs queue"));
         assert!(doc.contains("Worker registration handshake"));
         assert!(doc.contains("Worker disconnect handling"));
+        assert!(doc.contains("Heartbeat and stale cleanup"));
+        assert!(!doc.contains("5. Queue timeout and queue-full surfaces:"));
         assert!(!doc.contains("4. Client cancellation:"));
         assert!(!doc.contains("4. Streaming pass-through:"));
     }
@@ -311,6 +313,83 @@ mod tests {
     }
 
     #[test]
+    fn queued_request_times_out_after_waiting_for_worker_capacity() {
+        let mut harness = DispatchHarness::new();
+        harness.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 2,
+                queue_timeout_ticks: Some(5),
+            },
+        );
+        harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let first = harness.submit_request("openai", "llama-3.1-70b");
+        let queued = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(first, SubmissionOutcome::Dispatched(_)));
+        assert_eq!(
+            queued,
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        harness.advance_time(5);
+
+        assert_eq!(
+            harness.expire_queue_timeouts(),
+            vec![RequestFailure {
+                request_id: "request-2".to_string(),
+                reason: RequestFailureReason::QueueTimedOut,
+            }]
+        );
+        assert!(
+            harness.queued_request_ids("openai").is_empty(),
+            "a timed-out queued request must leave the provider queue"
+        );
+    }
+
+    #[test]
+    fn queue_capacity_exhaustion_rejects_without_waiting_for_timeout() {
+        let mut harness = DispatchHarness::new();
+        harness.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: Some(30),
+            },
+        );
+        harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let first = harness.submit_request("openai", "llama-3.1-70b");
+        let queued = harness.submit_request("openai", "llama-3.1-70b");
+        let rejected = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(first, SubmissionOutcome::Dispatched(_)));
+        assert_eq!(
+            queued,
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+        assert_eq!(
+            rejected,
+            SubmissionOutcome::Rejected(RequestFailure {
+                request_id: "request-3".to_string(),
+                reason: RequestFailureReason::QueueFull,
+            })
+        );
+        assert_eq!(
+            harness.queued_request_ids("openai"),
+            vec!["request-2".to_string()],
+            "queue-full rejection must not displace or mutate already queued work"
+        );
+    }
+
+    #[test]
     fn canceling_an_in_flight_request_emits_a_worker_cancel_signal() {
         let mut harness = DispatchHarness::new();
         let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
@@ -417,7 +496,7 @@ mod tests {
                 requeued_request_ids: Vec::new(),
                 failed_requests: vec![RequestFailure {
                     request_id: "request-1".to_string(),
-                    reason: DisconnectFailureReason::RequestAlreadyCanceled,
+                    reason: RequestFailureReason::RequestAlreadyCanceled,
                 }],
             }
         );
@@ -492,7 +571,7 @@ mod tests {
                 requeued_request_ids: Vec::new(),
                 failed_requests: vec![RequestFailure {
                     request_id: "request-1".to_string(),
-                    reason: DisconnectFailureReason::MaxRequeuesExceeded,
+                    reason: RequestFailureReason::MaxRequeuesExceeded,
                 }],
             }
         );

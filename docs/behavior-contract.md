@@ -93,11 +93,8 @@ Ordered by leverage:
 4. Worker disconnect handling:
    Requeue live work when the client context is still valid, fail fast when it is not, and stop after the max requeue count.
 
-5. Queue timeout and queue-full surfaces:
-   Distinguish timeout waiting for a worker from queue capacity exhaustion.
-
-6. Heartbeat and stale cleanup:
+5. Heartbeat and stale cleanup:
    Update live load from `pong`, expire stale workers, and keep dead workers from being selected.
 
-7. Graceful shutdown and drain:
+6. Graceful shutdown and drain:
    Worker receives shutdown, no new work is assigned, in-flight work is allowed to finish or timeout, and provider deletion drains queued work explicitly.

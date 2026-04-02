@@ -6,9 +6,11 @@ const MAX_REQUEUE_COUNT: usize = 3;
 pub struct DispatchHarness {
     next_request_id: usize,
     next_worker_id: usize,
+    now_tick: usize,
     worker_order: Vec<String>,
     workers: HashMap<String, WorkerState>,
     provider_queues: HashMap<String, VecDeque<RequestRecord>>,
+    provider_policies: HashMap<String, ProviderQueuePolicy>,
     selection_cursors: HashMap<SelectionKey, usize>,
     active_requests: HashMap<String, ActiveRequestState>,
     canceled_requests: HashSet<String>,
@@ -21,9 +23,11 @@ impl Default for DispatchHarness {
         Self {
             next_request_id: 1,
             next_worker_id: 1,
+            now_tick: 0,
             worker_order: Vec::new(),
             workers: HashMap::new(),
             provider_queues: HashMap::new(),
+            provider_policies: HashMap::new(),
             selection_cursors: HashMap::new(),
             active_requests: HashMap::new(),
             canceled_requests: HashSet::new(),
@@ -37,6 +41,14 @@ impl DispatchHarness {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn configure_provider_queue(
+        &mut self,
+        provider: impl Into<String>,
+        policy: ProviderQueuePolicy,
+    ) {
+        self.provider_policies.insert(provider.into(), policy);
     }
 
     pub fn register_worker(
@@ -69,6 +81,7 @@ impl DispatchHarness {
             request_id: format!("request-{}", self.next_request_id),
             provider: provider.into(),
             model: model.into(),
+            queued_at_tick: self.now_tick,
             requeue_count: 0,
         };
         self.next_request_id += 1;
@@ -91,6 +104,20 @@ impl DispatchHarness {
             .provider_queues
             .entry(request.provider.clone())
             .or_default();
+        let provider_policy = self
+            .provider_policies
+            .get(&request.provider)
+            .copied()
+            .unwrap_or_default();
+
+        if provider_queue.len() >= provider_policy.max_queue_len {
+            self.active_requests.remove(&request.request_id);
+            return SubmissionOutcome::Rejected(RequestFailure {
+                request_id: request.request_id,
+                reason: RequestFailureReason::QueueFull,
+            });
+        }
+
         provider_queue.push_back(request.clone());
 
         SubmissionOutcome::Queued(QueuedAssignment {
@@ -136,7 +163,7 @@ impl DispatchHarness {
             if self.canceled_requests.contains(&request_id) {
                 failed_requests.push(RequestFailure {
                     request_id,
-                    reason: DisconnectFailureReason::RequestAlreadyCanceled,
+                    reason: RequestFailureReason::RequestAlreadyCanceled,
                 });
                 continue;
             }
@@ -144,7 +171,7 @@ impl DispatchHarness {
             if request.requeue_count >= MAX_REQUEUE_COUNT {
                 failed_requests.push(RequestFailure {
                     request_id,
-                    reason: DisconnectFailureReason::MaxRequeuesExceeded,
+                    reason: RequestFailureReason::MaxRequeuesExceeded,
                 });
                 continue;
             }
@@ -265,6 +292,44 @@ impl DispatchHarness {
         self.dispatch_next_compatible(worker_id)
     }
 
+    pub fn advance_time(&mut self, ticks: usize) {
+        self.now_tick += ticks;
+    }
+
+    #[must_use]
+    pub fn expire_queue_timeouts(&mut self) -> Vec<RequestFailure> {
+        let mut failures = Vec::new();
+
+        for (provider, queue) in &mut self.provider_queues {
+            let queue_timeout_ticks = self
+                .provider_policies
+                .get(provider)
+                .copied()
+                .unwrap_or_default()
+                .queue_timeout_ticks;
+
+            if let Some(timeout_ticks) = queue_timeout_ticks {
+                let mut retained_queue = VecDeque::with_capacity(queue.len());
+
+                while let Some(request) = queue.pop_front() {
+                    if self.now_tick.saturating_sub(request.queued_at_tick) >= timeout_ticks {
+                        self.active_requests.remove(&request.request_id);
+                        failures.push(RequestFailure {
+                            request_id: request.request_id,
+                            reason: RequestFailureReason::QueueTimedOut,
+                        });
+                    } else {
+                        retained_queue.push_back(request);
+                    }
+                }
+
+                *queue = retained_queue;
+            }
+        }
+
+        failures
+    }
+
     fn dispatch_next_compatible(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
         let (provider, models, has_capacity) = {
             let worker = self.workers.get(worker_id)?;
@@ -377,7 +442,23 @@ struct RequestRecord {
     request_id: String,
     provider: String,
     model: String,
+    queued_at_tick: usize,
     requeue_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderQueuePolicy {
+    pub max_queue_len: usize,
+    pub queue_timeout_ticks: Option<usize>,
+}
+
+impl Default for ProviderQueuePolicy {
+    fn default() -> Self {
+        Self {
+            max_queue_len: usize::MAX,
+            queue_timeout_ticks: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -395,6 +476,7 @@ enum ActiveRequestState {
 pub enum SubmissionOutcome {
     Dispatched(DispatchAssignment),
     Queued(QueuedAssignment),
+    Rejected(RequestFailure),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -437,13 +519,15 @@ pub struct WorkerDisconnectOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestFailure {
     pub request_id: String,
-    pub reason: DisconnectFailureReason,
+    pub reason: RequestFailureReason,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DisconnectFailureReason {
+pub enum RequestFailureReason {
     RequestAlreadyCanceled,
     MaxRequeuesExceeded,
+    QueueTimedOut,
+    QueueFull,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
