@@ -14,6 +14,7 @@ mod tests {
     use super::source_behavior_commit;
     use crate::dispatch_harness::{
         CancelReason, CancellationOutcome, ChunkDelivery, DispatchAssignment, DispatchHarness,
+        GracefulShutdownOutcome, GracefulShutdownSignal, ProviderDeletionOutcome,
         ProviderQueuePolicy, QueuedAssignment, RequestFailure, RequestFailureReason,
         SubmissionOutcome, WorkerCancelSignal, WorkerDisconnectOutcome,
     };
@@ -44,11 +45,108 @@ mod tests {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
         assert!(doc.contains("First Characterization Tests To Write Next"));
-        assert!(doc.contains("Graceful shutdown and drain"));
-        assert!(!doc.contains("5. Heartbeat and stale cleanup:"));
+        assert!(doc.contains("OpenAI-style and Anthropic-style compatibility"));
+        assert!(!doc.contains("1. Graceful shutdown and drain:"));
         assert!(!doc.contains("5. Queue timeout and queue-full surfaces:"));
         assert!(!doc.contains("4. Client cancellation:"));
         assert!(!doc.contains("4. Streaming pass-through:"));
+    }
+
+    #[test]
+    fn graceful_shutdown_stops_new_assignments_and_disconnects_after_in_flight_completion() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        assert!(matches!(
+            harness.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(_)
+        ));
+        assert_eq!(
+            harness.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        assert_eq!(
+            harness.begin_graceful_shutdown(5),
+            vec![GracefulShutdownSignal {
+                worker_id: worker_id.clone(),
+                disconnect_deadline_tick: 5,
+            }]
+        );
+        assert!(harness.worker_is_draining(&worker_id));
+
+        assert_eq!(
+            harness.finish_request(&worker_id, "request-1"),
+            None,
+            "a draining worker should disconnect instead of taking more queued work"
+        );
+        assert!(!harness.has_worker(&worker_id));
+        assert_eq!(
+            harness.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_times_out_in_flight_work_that_does_not_finish_before_deadline() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        assert!(matches!(
+            harness.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(_)
+        ));
+        assert_eq!(
+            harness.begin_graceful_shutdown(3),
+            vec![GracefulShutdownSignal {
+                worker_id: worker_id.clone(),
+                disconnect_deadline_tick: 3,
+            }]
+        );
+
+        harness.advance_time(3);
+
+        assert_eq!(
+            harness.expire_graceful_shutdown(),
+            GracefulShutdownOutcome {
+                disconnected_worker_ids: vec![worker_id.clone()],
+                failed_requests: vec![RequestFailure {
+                    request_id: "request-1".to_string(),
+                    reason: RequestFailureReason::GracefulShutdownTimedOut,
+                }],
+            }
+        );
+        assert!(!harness.has_worker(&worker_id));
+    }
+
+    #[test]
+    fn provider_deletion_drains_queued_requests_with_explicit_errors_and_closes_workers() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        assert_eq!(
+            harness.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-1".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        assert_eq!(
+            harness.delete_provider("openai"),
+            ProviderDeletionOutcome {
+                disconnected_worker_ids: vec![worker_id.clone()],
+                failed_requests: vec![RequestFailure {
+                    request_id: "request-1".to_string(),
+                    reason: RequestFailureReason::ProviderDeleted,
+                }],
+            }
+        );
+        assert!(harness.queued_request_ids("openai").is_empty());
+        assert!(!harness.has_worker(&worker_id));
     }
 
     #[test]
