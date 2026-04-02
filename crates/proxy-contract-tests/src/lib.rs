@@ -1164,7 +1164,6 @@ mod tests {
 
     #[test]
     fn openai_chat_completions_http_boundary_preserves_model_stream_flag_and_body() {
-        let harness = HttpCompatibilityHarness::new(["llama-3.1-70b"]);
         let body = json!({
             "model": "llama-3.1-70b",
             "messages": [
@@ -1175,9 +1174,9 @@ mod tests {
         })
         .to_string();
 
-        let forwarded = harness
-            .parse_client_request("/v1/chat/completions", &body)
-            .expect("OpenAI-style request should parse");
+        let forwarded =
+            HttpCompatibilityHarness::parse_client_request("/v1/chat/completions", &body)
+                .expect("OpenAI-style request should parse");
 
         assert_eq!(
             forwarded,
@@ -1192,7 +1191,6 @@ mod tests {
 
     #[test]
     fn anthropic_messages_http_boundary_preserves_model_stream_flag_and_body() {
-        let harness = HttpCompatibilityHarness::new(["claude-3-7-sonnet"]);
         let body = json!({
             "model": "claude-3-7-sonnet",
             "max_tokens": 256,
@@ -1203,8 +1201,7 @@ mod tests {
         })
         .to_string();
 
-        let forwarded = harness
-            .parse_client_request("/v1/messages", &body)
+        let forwarded = HttpCompatibilityHarness::parse_client_request("/v1/messages", &body)
             .expect("Anthropic-style request should parse");
 
         assert_eq!(
@@ -1429,7 +1426,6 @@ mod tests {
         }
 
         fn parse_client_request(
-            &self,
             path: &str,
             body: &str,
         ) -> Result<ForwardedHttpRequest, CompatibilityParseError> {
