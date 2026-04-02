@@ -81,5 +81,5 @@ Source of truth:
 
 Ordered by leverage:
 
-1. Graceful shutdown and drain:
-   Worker receives shutdown, no new work is assigned, in-flight work is allowed to finish or timeout, and provider deletion drains queued work explicitly.
+1. OpenAI-style and Anthropic-style compatibility:
+   The central HTTP boundary accepts realistic OpenAI-compatible and Anthropic-style requests, preserves the expected model and stream parsing behavior, and keeps SSE response semantics intact for existing clients.

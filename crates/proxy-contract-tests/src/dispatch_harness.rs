@@ -65,6 +65,8 @@ impl DispatchHarness {
             models: models.into_iter().map(Into::into).collect(),
             max_concurrent: max_concurrent.max(1),
             in_flight_requests: Vec::new(),
+            is_draining: false,
+            graceful_shutdown_deadline_tick: None,
         };
 
         self.worker_order.push(worker_id.clone());
@@ -131,15 +133,132 @@ impl DispatchHarness {
         worker_id: &str,
         request_id: &str,
     ) -> Option<DispatchAssignment> {
-        let worker = self.workers.get_mut(worker_id)?;
-        let position = worker
-            .in_flight_requests
-            .iter()
-            .position(|active_request_id| active_request_id == request_id)?;
-        worker.in_flight_requests.remove(position);
+        let should_disconnect_after_finish = {
+            let worker = self.workers.get_mut(worker_id)?;
+            let position = worker
+                .in_flight_requests
+                .iter()
+                .position(|active_request_id| active_request_id == request_id)?;
+            worker.in_flight_requests.remove(position);
+            worker.is_draining && worker.in_flight_requests.is_empty()
+        };
         self.active_requests.remove(request_id);
 
+        if should_disconnect_after_finish {
+            self.remove_worker(worker_id);
+            return None;
+        }
+
         self.dispatch_next_compatible(worker_id)
+    }
+
+    #[must_use]
+    pub fn begin_graceful_shutdown(&mut self, timeout_ticks: usize) -> Vec<GracefulShutdownSignal> {
+        let disconnect_deadline_tick = self.now_tick + timeout_ticks;
+        let worker_ids = self.worker_order.clone();
+        let mut signals = Vec::new();
+
+        for worker_id in worker_ids {
+            let Some(worker) = self.workers.get_mut(&worker_id) else {
+                continue;
+            };
+            worker.is_draining = true;
+            worker.graceful_shutdown_deadline_tick = Some(disconnect_deadline_tick);
+            signals.push(GracefulShutdownSignal {
+                worker_id,
+                disconnect_deadline_tick,
+            });
+        }
+
+        signals
+    }
+
+    #[must_use]
+    pub fn expire_graceful_shutdown(&mut self) -> GracefulShutdownOutcome {
+        let expiring_workers = self
+            .worker_order
+            .iter()
+            .filter_map(|worker_id| {
+                let worker = self.workers.get(worker_id)?;
+                let deadline = worker.graceful_shutdown_deadline_tick?;
+
+                (deadline <= self.now_tick).then(|| worker_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        let mut disconnected_worker_ids = Vec::new();
+        let mut failed_requests = Vec::new();
+
+        for worker_id in expiring_workers {
+            let Some(worker) = self.workers.get(&worker_id).cloned() else {
+                continue;
+            };
+
+            for request_id in &worker.in_flight_requests {
+                self.active_requests.remove(request_id);
+                failed_requests.push(RequestFailure {
+                    request_id: request_id.clone(),
+                    reason: RequestFailureReason::GracefulShutdownTimedOut,
+                });
+            }
+
+            self.remove_worker(&worker_id);
+            disconnected_worker_ids.push(worker_id);
+        }
+
+        GracefulShutdownOutcome {
+            disconnected_worker_ids,
+            failed_requests,
+        }
+    }
+
+    #[must_use]
+    pub fn delete_provider(&mut self, provider: &str) -> ProviderDeletionOutcome {
+        let mut failed_requests = self
+            .provider_queues
+            .remove(provider)
+            .into_iter()
+            .flat_map(std::iter::IntoIterator::into_iter)
+            .map(|request| {
+                self.active_requests.remove(&request.request_id);
+                RequestFailure {
+                    request_id: request.request_id,
+                    reason: RequestFailureReason::ProviderDeleted,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let worker_ids = self
+            .worker_order
+            .iter()
+            .filter_map(|worker_id| {
+                self.workers
+                    .get(worker_id)
+                    .filter(|worker| worker.provider == provider)
+                    .map(|_| worker_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for worker_id in &worker_ids {
+            let Some(worker) = self.workers.get(worker_id).cloned() else {
+                continue;
+            };
+
+            for request_id in worker.in_flight_requests {
+                self.active_requests.remove(&request_id);
+                failed_requests.push(RequestFailure {
+                    request_id,
+                    reason: RequestFailureReason::ProviderDeleted,
+                });
+            }
+
+            self.remove_worker(worker_id);
+        }
+
+        ProviderDeletionOutcome {
+            disconnected_worker_ids: worker_ids,
+            failed_requests,
+        }
     }
 
     pub fn disconnect_worker(&mut self, worker_id: &str) -> Option<WorkerDisconnectOutcome> {
@@ -288,6 +407,18 @@ impl DispatchHarness {
     }
 
     #[must_use]
+    pub fn has_worker(&self, worker_id: &str) -> bool {
+        self.workers.contains_key(worker_id)
+    }
+
+    #[must_use]
+    pub fn worker_is_draining(&self, worker_id: &str) -> bool {
+        self.workers
+            .get(worker_id)
+            .is_some_and(|worker| worker.is_draining)
+    }
+
+    #[must_use]
     pub fn dispatch_next_for_worker(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
         self.dispatch_next_compatible(worker_id)
     }
@@ -336,7 +467,7 @@ impl DispatchHarness {
             (
                 worker.provider.clone(),
                 worker.models.clone(),
-                worker.in_flight_requests.len() < worker.max_concurrent,
+                !worker.is_draining && worker.in_flight_requests.len() < worker.max_concurrent,
             )
         };
 
@@ -369,7 +500,8 @@ impl DispatchHarness {
                     .models
                     .iter()
                     .any(|advertised_model| advertised_model == model);
-                let has_capacity = worker.in_flight_requests.len() < worker.max_concurrent;
+                let has_capacity =
+                    !worker.is_draining && worker.in_flight_requests.len() < worker.max_concurrent;
 
                 if worker.provider == provider && supports_model && has_capacity {
                     Some((position, worker_id.clone(), worker.in_flight_requests.len()))
@@ -412,6 +544,12 @@ impl DispatchHarness {
             },
         );
     }
+
+    fn remove_worker(&mut self, worker_id: &str) {
+        self.workers.remove(worker_id);
+        self.worker_order
+            .retain(|registered_worker_id| registered_worker_id != worker_id);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -420,6 +558,8 @@ struct WorkerState {
     models: Vec<String>,
     max_concurrent: usize,
     in_flight_requests: Vec<String>,
+    is_draining: bool,
+    graceful_shutdown_deadline_tick: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -517,6 +657,24 @@ pub struct WorkerDisconnectOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GracefulShutdownSignal {
+    pub worker_id: String,
+    pub disconnect_deadline_tick: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GracefulShutdownOutcome {
+    pub disconnected_worker_ids: Vec<String>,
+    pub failed_requests: Vec<RequestFailure>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderDeletionOutcome {
+    pub disconnected_worker_ids: Vec<String>,
+    pub failed_requests: Vec<RequestFailure>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestFailure {
     pub request_id: String,
     pub reason: RequestFailureReason,
@@ -528,6 +686,8 @@ pub enum RequestFailureReason {
     MaxRequeuesExceeded,
     QueueTimedOut,
     QueueFull,
+    GracefulShutdownTimedOut,
+    ProviderDeleted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
