@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DispatchHarness {
@@ -8,6 +8,10 @@ pub struct DispatchHarness {
     workers: HashMap<String, WorkerState>,
     provider_queues: HashMap<String, VecDeque<QueuedRequest>>,
     selection_cursors: HashMap<SelectionKey, usize>,
+    active_requests: HashMap<String, ActiveRequestState>,
+    canceled_requests: HashSet<String>,
+    worker_cancel_signals: Vec<WorkerCancelSignal>,
+    forwarded_chunks: HashMap<String, Vec<ForwardedChunk>>,
 }
 
 impl Default for DispatchHarness {
@@ -19,6 +23,10 @@ impl Default for DispatchHarness {
             workers: HashMap::new(),
             provider_queues: HashMap::new(),
             selection_cursors: HashMap::new(),
+            active_requests: HashMap::new(),
+            canceled_requests: HashSet::new(),
+            worker_cancel_signals: Vec::new(),
+            forwarded_chunks: HashMap::new(),
         }
     }
 }
@@ -61,6 +69,12 @@ impl DispatchHarness {
             model: model.into(),
         };
         self.next_request_id += 1;
+        self.active_requests.insert(
+            request.request_id.clone(),
+            ActiveRequestState::Queued {
+                provider: request.provider.clone(),
+            },
+        );
 
         if let Some(worker_id) = self.find_eligible_worker_id(&request.provider, &request.model) {
             self.assign_to_worker(&worker_id, &request.request_id);
@@ -93,8 +107,65 @@ impl DispatchHarness {
             .iter()
             .position(|active_request_id| active_request_id == request_id)?;
         worker.in_flight_requests.remove(position);
+        self.active_requests.remove(request_id);
 
         self.dispatch_next_compatible(worker_id)
+    }
+
+    pub fn cancel_request(
+        &mut self,
+        request_id: &str,
+        reason: CancelReason,
+    ) -> Option<CancellationOutcome> {
+        match self.active_requests.get(request_id)?.clone() {
+            ActiveRequestState::Queued { provider } => {
+                let queue = self.provider_queues.get_mut(&provider)?;
+                let index = queue
+                    .iter()
+                    .position(|queued_request| queued_request.request_id == request_id)?;
+                queue.remove(index)?;
+                self.active_requests.remove(request_id);
+                self.canceled_requests.insert(request_id.to_string());
+
+                Some(CancellationOutcome::RemovedFromQueue {
+                    request_id: request_id.to_string(),
+                })
+            }
+            ActiveRequestState::InFlight { worker_id } => {
+                self.canceled_requests.insert(request_id.to_string());
+                let signal = WorkerCancelSignal {
+                    worker_id,
+                    request_id: request_id.to_string(),
+                    reason,
+                };
+                self.worker_cancel_signals.push(signal.clone());
+
+                Some(CancellationOutcome::WorkerCancelSent(signal))
+            }
+        }
+    }
+
+    pub fn deliver_worker_chunk(
+        &mut self,
+        request_id: &str,
+        chunk: impl Into<String>,
+    ) -> Option<ChunkDelivery> {
+        let _request_state = self.active_requests.get(request_id)?;
+
+        if self.canceled_requests.contains(request_id) {
+            return Some(ChunkDelivery::DroppedAfterCancellation);
+        }
+
+        let forwarded = ForwardedChunk {
+            request_id: request_id.to_string(),
+            data: chunk.into(),
+        };
+        self.forwarded_chunks
+            .entry(request_id.to_string())
+            .or_default()
+            .push(forwarded.clone());
+
+        Some(ChunkDelivery::Forwarded(forwarded))
     }
 
     #[must_use]
@@ -111,6 +182,19 @@ impl DispatchHarness {
         self.workers
             .get(worker_id)
             .map(|worker| worker.in_flight_requests.clone())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn worker_cancel_signals(&self) -> Vec<WorkerCancelSignal> {
+        self.worker_cancel_signals.clone()
+    }
+
+    #[must_use]
+    pub fn forwarded_chunks(&self, request_id: &str) -> Vec<ForwardedChunk> {
+        self.forwarded_chunks
+            .get(request_id)
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -188,6 +272,12 @@ impl DispatchHarness {
         if let Some(worker) = self.workers.get_mut(worker_id) {
             worker.in_flight_requests.push(request_id.to_string());
         }
+        self.active_requests.insert(
+            request_id.to_string(),
+            ActiveRequestState::InFlight {
+                worker_id: worker_id.to_string(),
+            },
+        );
     }
 }
 
@@ -222,6 +312,12 @@ struct QueuedRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ActiveRequestState {
+    Queued { provider: String },
+    InFlight { worker_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubmissionOutcome {
     Dispatched(DispatchAssignment),
     Queued(QueuedAssignment),
@@ -237,4 +333,35 @@ pub struct DispatchAssignment {
 pub struct QueuedAssignment {
     pub request_id: String,
     pub queue_len: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelReason {
+    ClientDisconnected,
+    RequestTimedOut,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CancellationOutcome {
+    RemovedFromQueue { request_id: String },
+    WorkerCancelSent(WorkerCancelSignal),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerCancelSignal {
+    pub worker_id: String,
+    pub request_id: String,
+    pub reason: CancelReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChunkDelivery {
+    Forwarded(ForwardedChunk),
+    DroppedAfterCancellation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardedChunk {
+    pub request_id: String,
+    pub data: String,
 }
