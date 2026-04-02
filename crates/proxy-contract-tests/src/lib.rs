@@ -12,8 +12,9 @@ pub fn source_behavior_commit() -> &'static str {
 mod tests {
     use super::source_behavior_commit;
     use crate::dispatch_harness::{
-        CancelReason, CancellationOutcome, ChunkDelivery, DispatchAssignment, DispatchHarness,
-        QueuedAssignment, SubmissionOutcome, WorkerCancelSignal,
+        CancelReason, CancellationOutcome, ChunkDelivery, DisconnectFailureReason,
+        DispatchAssignment, DispatchHarness, QueuedAssignment, RequestFailure, SubmissionOutcome,
+        WorkerCancelSignal, WorkerDisconnectOutcome,
     };
     use crate::registration_harness::{
         CloseCode, ConnectRequest, HandshakeFailure, ProviderConfig, RegisterAck, RegisterMessage,
@@ -364,6 +365,140 @@ mod tests {
         assert!(
             harness.forwarded_chunks("request-1").is_empty(),
             "late worker output should be ignored once the client has canceled"
+        );
+    }
+
+    #[test]
+    fn disconnecting_a_worker_requeues_a_live_in_flight_request() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let dispatched = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
+
+        let disconnect = harness
+            .disconnect_worker(&worker_id)
+            .expect("registered worker should disconnect cleanly");
+
+        assert_eq!(
+            disconnect,
+            WorkerDisconnectOutcome {
+                requeued_request_ids: vec!["request-1".to_string()],
+                failed_requests: Vec::new(),
+            }
+        );
+        assert_eq!(
+            harness.queued_request_ids("openai"),
+            vec!["request-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn disconnecting_a_worker_does_not_requeue_a_request_after_it_was_canceled() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let dispatched = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
+        assert!(matches!(
+            harness.cancel_request("request-1", CancelReason::RequestTimedOut),
+            Some(CancellationOutcome::WorkerCancelSent(_))
+        ));
+
+        let disconnect = harness
+            .disconnect_worker(&worker_id)
+            .expect("registered worker should disconnect cleanly");
+
+        assert_eq!(
+            disconnect,
+            WorkerDisconnectOutcome {
+                requeued_request_ids: Vec::new(),
+                failed_requests: vec![RequestFailure {
+                    request_id: "request-1".to_string(),
+                    reason: DisconnectFailureReason::RequestAlreadyCanceled,
+                }],
+            }
+        );
+        assert!(
+            harness.queued_request_ids("openai").is_empty(),
+            "a timed-out request must fail fast instead of returning to the queue"
+        );
+    }
+
+    #[test]
+    fn repeated_worker_disconnects_stop_requeueing_after_the_max_attempts() {
+        let mut harness = DispatchHarness::new();
+        let first_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let dispatched = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
+
+        let first_disconnect = harness
+            .disconnect_worker(&first_worker)
+            .expect("first worker should disconnect cleanly");
+        assert_eq!(
+            first_disconnect.requeued_request_ids,
+            vec!["request-1".to_string()]
+        );
+
+        for attempt in 2..=3 {
+            let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+            let redispatch = harness
+                .dispatch_next_for_worker(&worker_id)
+                .expect("requeued request should dispatch to the replacement worker");
+            assert_eq!(
+                redispatch,
+                DispatchAssignment {
+                    request_id: "request-1".to_string(),
+                    worker_id: worker_id.clone(),
+                }
+            );
+
+            let disconnect = harness
+                .disconnect_worker(&worker_id)
+                .expect("replacement worker should disconnect cleanly");
+            assert_eq!(
+                disconnect,
+                WorkerDisconnectOutcome {
+                    requeued_request_ids: vec!["request-1".to_string()],
+                    failed_requests: Vec::new(),
+                },
+                "disconnect attempt {attempt} should still remain under the requeue cap"
+            );
+        }
+
+        let final_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+        let final_redispatch = harness
+            .dispatch_next_for_worker(&final_worker)
+            .expect("the third requeue should still be dispatchable");
+        assert_eq!(
+            final_redispatch,
+            DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: final_worker.clone(),
+            }
+        );
+
+        let final_disconnect = harness
+            .disconnect_worker(&final_worker)
+            .expect("final worker should disconnect cleanly");
+
+        assert_eq!(
+            final_disconnect,
+            WorkerDisconnectOutcome {
+                requeued_request_ids: Vec::new(),
+                failed_requests: vec![RequestFailure {
+                    request_id: "request-1".to_string(),
+                    reason: DisconnectFailureReason::MaxRequeuesExceeded,
+                }],
+            }
+        );
+        assert!(
+            harness.queued_request_ids("openai").is_empty(),
+            "once the cap is hit, the request must fail instead of requeueing forever"
         );
     }
 

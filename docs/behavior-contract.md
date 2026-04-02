@@ -43,7 +43,7 @@ Source of truth:
   Client disconnect or request timeout must cancel the HTTP request context, remove queued work if still queued, or send a best-effort `cancel` message for active worker requests. Late chunks that arrive after cancellation are intentionally dropped. The worker protocol has explicit cancel reasons, including client disconnect and timeout.
 
 - Worker disconnect during active request:
-  On worker disconnect, active requests are examined one by one. If the request context is still alive, Katamari requeues it. If the request context is already canceled, the request fails immediately to the waiting client path instead. Requeue is capped at `MaxRequeueCount = 3`; after that the request fails with a service-unavailable style error instead of looping forever.
+  On worker disconnect, active requests are examined one by one. If the request context is still alive, Katamari requeues it onto the provider queue without resetting its lifetime. If the request context is already canceled or timed out, the request fails immediately to the waiting client path instead. Requeue is capped at `MaxRequeueCount = 3`; after that the request fails with a service-unavailable style error instead of looping forever.
 
 - Timeout behavior:
   Every provider has a request timeout used both for queue wait and overall request lifetime. Queue timeout produces a worker-unavailable style response. Streaming and non-streaming requests share the parent HTTP context, so client disconnect and timeout terminate the same request object. WebSocket heartbeats use ping every 15 seconds and a 45-second pong window.
