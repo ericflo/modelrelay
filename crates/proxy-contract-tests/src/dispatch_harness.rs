@@ -153,10 +153,7 @@ impl DispatchHarness {
     }
 
     #[must_use]
-    pub fn begin_graceful_shutdown(
-        &mut self,
-        timeout_ticks: usize,
-    ) -> Vec<GracefulShutdownSignal> {
+    pub fn begin_graceful_shutdown(&mut self, timeout_ticks: usize) -> Vec<GracefulShutdownSignal> {
         let disconnect_deadline_tick = self.now_tick + timeout_ticks;
         let worker_ids = self.worker_order.clone();
         let mut signals = Vec::new();
