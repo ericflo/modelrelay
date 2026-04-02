@@ -81,5 +81,5 @@ Source of truth:
 
 Ordered by leverage:
 
-1. OpenAI-style and Anthropic-style compatibility:
-   The central HTTP boundary accepts realistic OpenAI-compatible and Anthropic-style requests, preserves the expected model and stream parsing behavior, and keeps SSE response semantics intact for existing clients.
+1. Dynamic model catalog updates and `/v1/models` coherence:
+   Worker `models_update` messages should immediately change routing eligibility and the public compatibility model catalog without requiring reconnects or serving stale `/v1/models` results.

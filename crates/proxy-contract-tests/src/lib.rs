@@ -11,6 +11,10 @@ pub fn source_behavior_commit() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use serde_json::{Value, json};
+
     use super::source_behavior_commit;
     use crate::dispatch_harness::{
         CancelReason, CancellationOutcome, ChunkDelivery, DispatchAssignment, DispatchHarness,
@@ -45,7 +49,8 @@ mod tests {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
         assert!(doc.contains("First Characterization Tests To Write Next"));
-        assert!(doc.contains("OpenAI-style and Anthropic-style compatibility"));
+        assert!(doc.contains("Dynamic model catalog updates and `/v1/models` coherence"));
+        assert!(!doc.contains("1. OpenAI-style and Anthropic-style compatibility:"));
         assert!(!doc.contains("1. Graceful shutdown and drain:"));
         assert!(!doc.contains("5. Queue timeout and queue-full surfaces:"));
         assert!(!doc.contains("4. Client cancellation:"));
@@ -1155,5 +1160,349 @@ mod tests {
             None,
             "late chunks after oversized termination are dropped"
         );
+    }
+
+    #[test]
+    fn openai_chat_completions_http_boundary_preserves_model_stream_flag_and_body() {
+        let harness = HttpCompatibilityHarness::new(["llama-3.1-70b"]);
+        let body = json!({
+            "model": "llama-3.1-70b",
+            "messages": [
+                {"role": "system", "content": "You are terse."},
+                {"role": "user", "content": "say hi"}
+            ],
+            "stream": true
+        })
+        .to_string();
+
+        let forwarded = harness
+            .parse_client_request("/v1/chat/completions", &body)
+            .expect("OpenAI-style request should parse");
+
+        assert_eq!(
+            forwarded,
+            ForwardedHttpRequest {
+                path: "/v1/chat/completions".to_string(),
+                model: "llama-3.1-70b".to_string(),
+                is_streaming: true,
+                raw_body: body,
+            }
+        );
+    }
+
+    #[test]
+    fn anthropic_messages_http_boundary_preserves_model_stream_flag_and_body() {
+        let harness = HttpCompatibilityHarness::new(["claude-3-7-sonnet"]);
+        let body = json!({
+            "model": "claude-3-7-sonnet",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+            ],
+            "stream": true
+        })
+        .to_string();
+
+        let forwarded = harness
+            .parse_client_request("/v1/messages", &body)
+            .expect("Anthropic-style request should parse");
+
+        assert_eq!(
+            forwarded,
+            ForwardedHttpRequest {
+                path: "/v1/messages".to_string(),
+                model: "claude-3-7-sonnet".to_string(),
+                is_streaming: true,
+                raw_body: body,
+            }
+        );
+    }
+
+    #[test]
+    fn models_endpoint_returns_openai_compatible_catalog_shape_for_advertised_models() {
+        let harness =
+            HttpCompatibilityHarness::new(["llama-3.1-70b", "mistral-large", "llama-3.1-70b"]);
+
+        let response = harness.models_response();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body,
+            json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "llama-3.1-70b",
+                        "object": "model",
+                        "owned_by": "worker-proxy"
+                    },
+                    {
+                        "id": "mistral-large",
+                        "object": "model",
+                        "owned_by": "worker-proxy"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_streaming_http_boundary_preserves_sse_shape_and_done_marker() {
+        let mut harness = ResponseHarness::new();
+        let request_id = harness.start_request("/v1/chat/completions");
+
+        let first = harness.deliver_response_chunk(
+            &request_id,
+            ResponseChunk::new(
+                "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            ),
+        );
+        let second = harness.deliver_response_chunk(
+            &request_id,
+            ResponseChunk::new(
+                "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            ),
+        );
+        let done =
+            harness.deliver_response_chunk(&request_id, ResponseChunk::new("data: [DONE]\n\n"));
+
+        let delivered = harness
+            .deliver_response_complete(
+                &request_id,
+                ResponseComplete::new(
+                    200,
+                    vec![
+                        ResponseHeader::new("content-type", "text/event-stream"),
+                        ResponseHeader::new("cache-control", "no-cache"),
+                    ],
+                    "",
+                ),
+            )
+            .expect("stream completion should close the OpenAI SSE response");
+
+        assert_eq!(
+            first,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                1,
+                "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+                true,
+            )))
+        );
+        assert_eq!(
+            second,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                2,
+                "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                true,
+            )))
+        );
+        assert_eq!(
+            done,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                3,
+                "data: [DONE]\n\n",
+                true,
+            )))
+        );
+        assert_eq!(delivered.status, 200);
+        assert_eq!(
+            delivered.headers,
+            vec![
+                ResponseHeader::new("content-type", "text/event-stream"),
+                ResponseHeader::new("cache-control", "no-cache"),
+            ]
+        );
+        assert_eq!(delivered.body, "");
+        assert_eq!(
+            delivered.streamed_chunks,
+            vec![
+                ForwardedChunk::new(
+                    1,
+                    "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+                    true,
+                ),
+                ForwardedChunk::new(
+                    2,
+                    "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                    true,
+                ),
+                ForwardedChunk::new(3, "data: [DONE]\n\n", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn anthropic_streaming_http_boundary_preserves_event_sse_shape() {
+        let mut harness = ResponseHarness::new();
+        let request_id = harness.start_request("/v1/messages");
+
+        let start = harness.deliver_response_chunk(
+            &request_id,
+            ResponseChunk::new(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-3-7-sonnet\"}}\n\n",
+            ),
+        );
+        let delta = harness.deliver_response_chunk(
+            &request_id,
+            ResponseChunk::new(
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+            ),
+        );
+        let stop = harness.deliver_response_chunk(
+            &request_id,
+            ResponseChunk::new("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+        );
+
+        let delivered = harness
+            .deliver_response_complete(
+                &request_id,
+                ResponseComplete::new(
+                    200,
+                    vec![ResponseHeader::new("content-type", "text/event-stream")],
+                    "",
+                ),
+            )
+            .expect("stream completion should close the Anthropic SSE response");
+
+        assert_eq!(
+            start,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                1,
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-3-7-sonnet\"}}\n\n",
+                true,
+            )))
+        );
+        assert_eq!(
+            delta,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                2,
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+                true,
+            )))
+        );
+        assert_eq!(
+            stop,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                3,
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                true,
+            )))
+        );
+        assert_eq!(delivered.status, 200);
+        assert_eq!(
+            delivered.headers,
+            vec![ResponseHeader::new("content-type", "text/event-stream")]
+        );
+        assert_eq!(delivered.body, "");
+        assert_eq!(
+            delivered.streamed_chunks,
+            vec![
+                ForwardedChunk::new(
+                    1,
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-3-7-sonnet\"}}\n\n",
+                    true,
+                ),
+                ForwardedChunk::new(
+                    2,
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+                    true,
+                ),
+                ForwardedChunk::new(
+                    3,
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    true,
+                ),
+            ]
+        );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct HttpCompatibilityHarness {
+        advertised_models: Vec<String>,
+    }
+
+    impl HttpCompatibilityHarness {
+        fn new(models: impl IntoIterator<Item = impl Into<String>>) -> Self {
+            Self {
+                advertised_models: models.into_iter().map(Into::into).collect(),
+            }
+        }
+
+        fn parse_client_request(
+            &self,
+            path: &str,
+            body: &str,
+        ) -> Result<ForwardedHttpRequest, CompatibilityParseError> {
+            let payload: Value = serde_json::from_str(body)
+                .map_err(|error| CompatibilityParseError::InvalidJson(error.to_string()))?;
+
+            match path {
+                "/v1/chat/completions" | "/v1/responses" | "/v1/messages" => {
+                    let model = payload
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .ok_or(CompatibilityParseError::MissingModel)?;
+                    let is_streaming = payload
+                        .get("stream")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+
+                    Ok(ForwardedHttpRequest {
+                        path: path.to_string(),
+                        model: model.to_string(),
+                        is_streaming,
+                        raw_body: body.to_string(),
+                    })
+                }
+                unsupported => Err(CompatibilityParseError::UnsupportedPath(
+                    unsupported.to_string(),
+                )),
+            }
+        }
+
+        fn models_response(&self) -> ModelsEndpointResponse {
+            let mut seen = HashSet::new();
+            let models = self
+                .advertised_models
+                .iter()
+                .filter(|model| seen.insert((*model).clone()))
+                .map(|model| {
+                    json!({
+                        "id": model,
+                        "object": "model",
+                        "owned_by": "worker-proxy"
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            ModelsEndpointResponse {
+                status: 200,
+                body: json!({
+                    "object": "list",
+                    "data": models
+                }),
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ForwardedHttpRequest {
+        path: String,
+        model: String,
+        is_streaming: bool,
+        raw_body: String,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ModelsEndpointResponse {
+        status: u16,
+        body: Value,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum CompatibilityParseError {
+        InvalidJson(String),
+        MissingModel,
+        UnsupportedPath(String),
     }
 }
