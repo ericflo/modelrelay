@@ -12,7 +12,8 @@ pub fn source_behavior_commit() -> &'static str {
 mod tests {
     use super::source_behavior_commit;
     use crate::dispatch_harness::{
-        DispatchAssignment, DispatchHarness, QueuedAssignment, SubmissionOutcome,
+        CancelReason, CancellationOutcome, ChunkDelivery, DispatchAssignment, DispatchHarness,
+        QueuedAssignment, SubmissionOutcome, WorkerCancelSignal,
     };
     use crate::registration_harness::{
         CloseCode, ConnectRequest, HandshakeFailure, ProviderConfig, RegisterAck, RegisterMessage,
@@ -38,7 +39,8 @@ mod tests {
         assert!(doc.contains("First Characterization Tests To Write Next"));
         assert!(doc.contains("Immediate dispatch vs queue"));
         assert!(doc.contains("Worker registration handshake"));
-        assert!(doc.contains("Client cancellation"));
+        assert!(doc.contains("Worker disconnect handling"));
+        assert!(!doc.contains("4. Client cancellation:"));
         assert!(!doc.contains("4. Streaming pass-through:"));
     }
 
@@ -269,6 +271,99 @@ mod tests {
         assert_eq!(
             harness.queued_request_ids("openai"),
             vec!["request-5".to_string()]
+        );
+    }
+
+    #[test]
+    fn canceling_a_queued_request_removes_it_before_dispatch() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let first = harness.submit_request("openai", "llama-3.1-70b");
+        let queued = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(first, SubmissionOutcome::Dispatched(_)));
+        assert_eq!(
+            queued,
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        let cancellation = harness
+            .cancel_request("request-2", CancelReason::ClientDisconnected)
+            .expect("queued request should be canceled");
+
+        assert_eq!(
+            cancellation,
+            CancellationOutcome::RemovedFromQueue {
+                request_id: "request-2".to_string(),
+            }
+        );
+        assert!(harness.queued_request_ids("openai").is_empty());
+        assert_eq!(
+            harness.finish_request(&worker_id, "request-1"),
+            None,
+            "the canceled queued request must not dispatch after capacity frees up"
+        );
+    }
+
+    #[test]
+    fn canceling_an_in_flight_request_emits_a_worker_cancel_signal() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let dispatched = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
+
+        let cancellation = harness
+            .cancel_request("request-1", CancelReason::ClientDisconnected)
+            .expect("in-flight request should emit a cancel signal");
+
+        assert_eq!(
+            cancellation,
+            CancellationOutcome::WorkerCancelSent(WorkerCancelSignal {
+                worker_id: worker_id.clone(),
+                request_id: "request-1".to_string(),
+                reason: CancelReason::ClientDisconnected,
+            })
+        );
+        assert_eq!(
+            harness.worker_cancel_signals(),
+            vec![WorkerCancelSignal {
+                worker_id,
+                request_id: "request-1".to_string(),
+                reason: CancelReason::ClientDisconnected,
+            }]
+        );
+    }
+
+    #[test]
+    fn late_worker_chunks_are_dropped_after_the_request_is_canceled() {
+        let mut harness = DispatchHarness::new();
+        harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let dispatched = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
+
+        let cancellation = harness
+            .cancel_request("request-1", CancelReason::RequestTimedOut)
+            .expect("active request should still accept timeout cancellation");
+
+        assert!(matches!(
+            cancellation,
+            CancellationOutcome::WorkerCancelSent(_)
+        ));
+        assert_eq!(
+            harness.deliver_worker_chunk("request-1", "data: late-token\n\n"),
+            Some(ChunkDelivery::DroppedAfterCancellation)
+        );
+        assert!(
+            harness.forwarded_chunks("request-1").is_empty(),
+            "late worker output should be ignored once the client has canceled"
         );
     }
 
