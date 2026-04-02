@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+const MAX_REQUEUE_COUNT: usize = 3;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DispatchHarness {
     next_request_id: usize,
     next_worker_id: usize,
     worker_order: Vec<String>,
     workers: HashMap<String, WorkerState>,
-    provider_queues: HashMap<String, VecDeque<QueuedRequest>>,
+    provider_queues: HashMap<String, VecDeque<RequestRecord>>,
     selection_cursors: HashMap<SelectionKey, usize>,
     active_requests: HashMap<String, ActiveRequestState>,
     canceled_requests: HashSet<String>,
@@ -63,21 +65,22 @@ impl DispatchHarness {
         provider: impl Into<String>,
         model: impl Into<String>,
     ) -> SubmissionOutcome {
-        let request = QueuedRequest {
+        let request = RequestRecord {
             request_id: format!("request-{}", self.next_request_id),
             provider: provider.into(),
             model: model.into(),
+            requeue_count: 0,
         };
         self.next_request_id += 1;
         self.active_requests.insert(
             request.request_id.clone(),
             ActiveRequestState::Queued {
-                provider: request.provider.clone(),
+                request: request.clone(),
             },
         );
 
         if let Some(worker_id) = self.find_eligible_worker_id(&request.provider, &request.model) {
-            self.assign_to_worker(&worker_id, &request.request_id);
+            self.assign_to_worker(&worker_id, request.clone());
             return SubmissionOutcome::Dispatched(DispatchAssignment {
                 request_id: request.request_id,
                 worker_id,
@@ -112,14 +115,73 @@ impl DispatchHarness {
         self.dispatch_next_compatible(worker_id)
     }
 
+    pub fn disconnect_worker(&mut self, worker_id: &str) -> Option<WorkerDisconnectOutcome> {
+        let worker = self.workers.remove(worker_id)?;
+        self.worker_order
+            .retain(|registered_worker_id| registered_worker_id != worker_id);
+
+        let mut requeued_request_ids = Vec::new();
+        let mut failed_requests = Vec::new();
+        let mut requeued_requests = Vec::new();
+
+        for request_id in worker.in_flight_requests {
+            let Some(active_request) = self.active_requests.remove(&request_id) else {
+                continue;
+            };
+
+            let ActiveRequestState::InFlight { mut request, .. } = active_request else {
+                continue;
+            };
+
+            if self.canceled_requests.contains(&request_id) {
+                failed_requests.push(RequestFailure {
+                    request_id,
+                    reason: DisconnectFailureReason::RequestAlreadyCanceled,
+                });
+                continue;
+            }
+
+            if request.requeue_count >= MAX_REQUEUE_COUNT {
+                failed_requests.push(RequestFailure {
+                    request_id,
+                    reason: DisconnectFailureReason::MaxRequeuesExceeded,
+                });
+                continue;
+            }
+
+            request.requeue_count += 1;
+            requeued_request_ids.push(request.request_id.clone());
+            requeued_requests.push(request.clone());
+            self.active_requests.insert(
+                request.request_id.clone(),
+                ActiveRequestState::Queued { request },
+            );
+        }
+
+        let had_requeued_requests = !requeued_requests.is_empty();
+        if let Some(queue) = self.provider_queues.get_mut(&worker.provider) {
+            for request in requeued_requests.into_iter().rev() {
+                queue.push_front(request);
+            }
+        } else if had_requeued_requests {
+            self.provider_queues
+                .insert(worker.provider, requeued_requests.into_iter().collect());
+        }
+
+        Some(WorkerDisconnectOutcome {
+            requeued_request_ids,
+            failed_requests,
+        })
+    }
+
     pub fn cancel_request(
         &mut self,
         request_id: &str,
         reason: CancelReason,
     ) -> Option<CancellationOutcome> {
         match self.active_requests.get(request_id)?.clone() {
-            ActiveRequestState::Queued { provider } => {
-                let queue = self.provider_queues.get_mut(&provider)?;
+            ActiveRequestState::Queued { request } => {
+                let queue = self.provider_queues.get_mut(&request.provider)?;
                 let index = queue
                     .iter()
                     .position(|queued_request| queued_request.request_id == request_id)?;
@@ -131,7 +193,7 @@ impl DispatchHarness {
                     request_id: request_id.to_string(),
                 })
             }
-            ActiveRequestState::InFlight { worker_id } => {
+            ActiveRequestState::InFlight { worker_id, .. } => {
                 self.canceled_requests.insert(request_id.to_string());
                 let signal = WorkerCancelSignal {
                     worker_id,
@@ -198,6 +260,11 @@ impl DispatchHarness {
             .unwrap_or_default()
     }
 
+    #[must_use]
+    pub fn dispatch_next_for_worker(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
+        self.dispatch_next_compatible(worker_id)
+    }
+
     fn dispatch_next_compatible(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
         let (provider, models, has_capacity) = {
             let worker = self.workers.get(worker_id)?;
@@ -218,7 +285,7 @@ impl DispatchHarness {
             .position(|request| models.iter().any(|model| model == &request.model))?;
         let request = provider_queue.remove(queue_index)?;
 
-        self.assign_to_worker(worker_id, &request.request_id);
+        self.assign_to_worker(worker_id, request.clone());
 
         Some(DispatchAssignment {
             request_id: request.request_id,
@@ -268,13 +335,14 @@ impl DispatchHarness {
         Some(worker_id)
     }
 
-    fn assign_to_worker(&mut self, worker_id: &str, request_id: &str) {
+    fn assign_to_worker(&mut self, worker_id: &str, request: RequestRecord) {
         if let Some(worker) = self.workers.get_mut(worker_id) {
-            worker.in_flight_requests.push(request_id.to_string());
+            worker.in_flight_requests.push(request.request_id.clone());
         }
         self.active_requests.insert(
-            request_id.to_string(),
+            request.request_id.clone(),
             ActiveRequestState::InFlight {
+                request,
                 worker_id: worker_id.to_string(),
             },
         );
@@ -305,16 +373,22 @@ impl SelectionKey {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct QueuedRequest {
+struct RequestRecord {
     request_id: String,
     provider: String,
     model: String,
+    requeue_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ActiveRequestState {
-    Queued { provider: String },
-    InFlight { worker_id: String },
+    Queued {
+        request: RequestRecord,
+    },
+    InFlight {
+        request: RequestRecord,
+        worker_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -352,6 +426,24 @@ pub struct WorkerCancelSignal {
     pub worker_id: String,
     pub request_id: String,
     pub reason: CancelReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerDisconnectOutcome {
+    pub requeued_request_ids: Vec<String>,
+    pub failed_requests: Vec<RequestFailure>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestFailure {
+    pub request_id: String,
+    pub reason: DisconnectFailureReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisconnectFailureReason {
+    RequestAlreadyCanceled,
+    MaxRequeuesExceeded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
