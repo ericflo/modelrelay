@@ -1,4 +1,5 @@
 pub mod dispatch_harness;
+pub mod heartbeat_harness;
 pub mod registration_harness;
 pub mod response_harness;
 
@@ -15,6 +16,11 @@ mod tests {
         CancelReason, CancellationOutcome, ChunkDelivery, DispatchAssignment, DispatchHarness,
         ProviderQueuePolicy, QueuedAssignment, RequestFailure, RequestFailureReason,
         SubmissionOutcome, WorkerCancelSignal, WorkerDisconnectOutcome,
+    };
+    use crate::heartbeat_harness::{
+        DispatchAssignment as HeartbeatDispatchAssignment, ExpiredWorker, HeartbeatHarness,
+        PongReceipt, QueuedAssignment as HeartbeatQueuedAssignment, ServerPing,
+        SubmissionOutcome as HeartbeatSubmissionOutcome,
     };
     use crate::registration_harness::{
         CloseCode, ConnectRequest, HandshakeFailure, ProviderConfig, RegisterAck, RegisterMessage,
@@ -38,10 +44,8 @@ mod tests {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
         assert!(doc.contains("First Characterization Tests To Write Next"));
-        assert!(doc.contains("Immediate dispatch vs queue"));
-        assert!(doc.contains("Worker registration handshake"));
-        assert!(doc.contains("Worker disconnect handling"));
-        assert!(doc.contains("Heartbeat and stale cleanup"));
+        assert!(doc.contains("Graceful shutdown and drain"));
+        assert!(!doc.contains("5. Heartbeat and stale cleanup:"));
         assert!(!doc.contains("5. Queue timeout and queue-full surfaces:"));
         assert!(!doc.contains("4. Client cancellation:"));
         assert!(!doc.contains("4. Streaming pass-through:"));
@@ -168,6 +172,106 @@ mod tests {
                     worker_id: first_worker.clone(),
                 }),
             ]
+        );
+    }
+
+    #[test]
+    fn pong_updates_live_load_used_for_selection() {
+        let mut harness = HeartbeatHarness::new(3);
+        let first_worker = harness.register_worker("openai", ["llama-3.1-70b"], 2);
+        let second_worker = harness.register_worker("openai", ["llama-3.1-70b"], 2);
+
+        assert_eq!(
+            harness.send_ping(&first_worker),
+            Some(ServerPing {
+                worker_id: first_worker.clone(),
+            })
+        );
+        assert_eq!(
+            harness.send_ping(&second_worker),
+            Some(ServerPing {
+                worker_id: second_worker.clone(),
+            })
+        );
+
+        assert_eq!(
+            harness.receive_pong(&first_worker, 1),
+            Some(PongReceipt {
+                worker_id: first_worker.clone(),
+                reported_load: 1,
+                recorded_at_tick: 0,
+            })
+        );
+        assert_eq!(
+            harness.receive_pong(&second_worker, 0),
+            Some(PongReceipt {
+                worker_id: second_worker.clone(),
+                reported_load: 0,
+                recorded_at_tick: 0,
+            })
+        );
+        assert_eq!(harness.worker_reported_load(&first_worker), Some(1));
+        assert_eq!(harness.worker_reported_load(&second_worker), Some(0));
+
+        assert_eq!(
+            harness.submit_request("openai", "llama-3.1-70b"),
+            HeartbeatSubmissionOutcome::Dispatched(HeartbeatDispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: second_worker,
+            })
+        );
+    }
+
+    #[test]
+    fn stale_workers_are_expired_after_the_pong_window() {
+        let mut harness = HeartbeatHarness::new(3);
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        harness.advance_time(2);
+        let _fresh = harness.receive_pong(&worker_id, 0);
+
+        harness.advance_time(3);
+
+        assert_eq!(
+            harness.expire_stale_workers(),
+            vec![ExpiredWorker {
+                worker_id: worker_id.clone(),
+                last_heartbeat_tick: 2,
+            }]
+        );
+        assert!(!harness.has_worker(&worker_id));
+    }
+
+    #[test]
+    fn stale_workers_are_not_selected_for_new_requests() {
+        let mut harness = HeartbeatHarness::new(3);
+        let stale_worker = harness.register_worker("openai", ["llama-3.1-70b"], 2);
+        let fresh_worker = harness.register_worker("openai", ["llama-3.1-70b"], 2);
+
+        assert!(harness.receive_pong(&stale_worker, 0).is_some());
+        assert!(harness.receive_pong(&fresh_worker, 1).is_some());
+
+        harness.advance_time(3);
+        assert!(harness.receive_pong(&fresh_worker, 1).is_some());
+
+        assert_eq!(
+            harness.submit_request("openai", "llama-3.1-70b"),
+            HeartbeatSubmissionOutcome::Dispatched(HeartbeatDispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: fresh_worker.clone(),
+            })
+        );
+
+        let mut only_stale_harness = HeartbeatHarness::new(3);
+        let only_worker = only_stale_harness.register_worker("openai", ["llama-3.1-70b"], 1);
+        assert!(only_stale_harness.receive_pong(&only_worker, 0).is_some());
+        only_stale_harness.advance_time(3);
+
+        assert_eq!(
+            only_stale_harness.submit_request("openai", "llama-3.1-70b"),
+            HeartbeatSubmissionOutcome::Queued(HeartbeatQueuedAssignment {
+                request_id: "request-1".to_string(),
+            })
         );
     }
 
