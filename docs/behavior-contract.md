@@ -81,20 +81,5 @@ Source of truth:
 
 Ordered by leverage:
 
-1. Worker registration handshake:
-   Successful auth, `register`, sanitized `register_ack`, and protocol-version mismatch rejection.
-
-2. Immediate dispatch vs queue:
-   Request goes straight to an eligible idle worker; otherwise queues when no worker has capacity.
-
-3. Model-based routing:
-   Only workers advertising the exact requested model are eligible, with lowest-load round-robin tie breaking.
-
-4. Worker disconnect handling:
-   Requeue live work when the client context is still valid, fail fast when it is not, and stop after the max requeue count.
-
-5. Heartbeat and stale cleanup:
-   Update live load from `pong`, expire stale workers, and keep dead workers from being selected.
-
-6. Graceful shutdown and drain:
+1. Graceful shutdown and drain:
    Worker receives shutdown, no new work is assigned, in-flight work is allowed to finish or timeout, and provider deletion drains queued work explicitly.
