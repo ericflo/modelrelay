@@ -9,6 +9,7 @@ pub struct DispatchHarness {
     worker_order: Vec<String>,
     workers: HashMap<String, WorkerState>,
     provider_queues: HashMap<String, VecDeque<RequestRecord>>,
+    provider_queue_capacities: HashMap<String, usize>,
     selection_cursors: HashMap<SelectionKey, usize>,
     active_requests: HashMap<String, ActiveRequestState>,
     canceled_requests: HashSet<String>,
@@ -24,6 +25,7 @@ impl Default for DispatchHarness {
             worker_order: Vec::new(),
             workers: HashMap::new(),
             provider_queues: HashMap::new(),
+            provider_queue_capacities: HashMap::new(),
             selection_cursors: HashMap::new(),
             active_requests: HashMap::new(),
             canceled_requests: HashSet::new(),
@@ -37,6 +39,11 @@ impl DispatchHarness {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_provider_queue_capacity(&mut self, provider: impl Into<String>, capacity: usize) {
+        self.provider_queue_capacities
+            .insert(provider.into(), capacity);
     }
 
     pub fn register_worker(
@@ -87,10 +94,24 @@ impl DispatchHarness {
             });
         }
 
+        let queue_capacity = self
+            .provider_queue_capacities
+            .get(&request.provider)
+            .copied()
+            .unwrap_or(usize::MAX);
         let provider_queue = self
             .provider_queues
             .entry(request.provider.clone())
             .or_default();
+
+        if provider_queue.len() >= queue_capacity {
+            self.active_requests.remove(&request.request_id);
+            return SubmissionOutcome::Rejected(SubmissionFailure {
+                request_id: request.request_id,
+                reason: SubmissionFailureReason::QueueFull,
+            });
+        }
+
         provider_queue.push_back(request.clone());
 
         SubmissionOutcome::Queued(QueuedAssignment {
@@ -205,6 +226,25 @@ impl DispatchHarness {
                 Some(CancellationOutcome::WorkerCancelSent(signal))
             }
         }
+    }
+
+    pub fn timeout_queued_request(&mut self, request_id: &str) -> Option<SubmissionFailure> {
+        let ActiveRequestState::Queued { request } = self.active_requests.get(request_id)?.clone()
+        else {
+            return None;
+        };
+
+        let queue = self.provider_queues.get_mut(&request.provider)?;
+        let index = queue
+            .iter()
+            .position(|queued_request| queued_request.request_id == request_id)?;
+        queue.remove(index)?;
+        self.active_requests.remove(request_id);
+
+        Some(SubmissionFailure {
+            request_id: request_id.to_string(),
+            reason: SubmissionFailureReason::QueueTimedOut,
+        })
     }
 
     pub fn deliver_worker_chunk(
@@ -395,6 +435,7 @@ enum ActiveRequestState {
 pub enum SubmissionOutcome {
     Dispatched(DispatchAssignment),
     Queued(QueuedAssignment),
+    Rejected(SubmissionFailure),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -407,6 +448,18 @@ pub struct DispatchAssignment {
 pub struct QueuedAssignment {
     pub request_id: String,
     pub queue_len: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubmissionFailure {
+    pub request_id: String,
+    pub reason: SubmissionFailureReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubmissionFailureReason {
+    QueueFull,
+    QueueTimedOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

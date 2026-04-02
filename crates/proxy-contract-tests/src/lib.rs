@@ -13,8 +13,8 @@ mod tests {
     use super::source_behavior_commit;
     use crate::dispatch_harness::{
         CancelReason, CancellationOutcome, ChunkDelivery, DisconnectFailureReason,
-        DispatchAssignment, DispatchHarness, QueuedAssignment, RequestFailure, SubmissionOutcome,
-        WorkerCancelSignal, WorkerDisconnectOutcome,
+        DispatchAssignment, DispatchHarness, QueuedAssignment, RequestFailure, SubmissionFailure,
+        SubmissionFailureReason, SubmissionOutcome, WorkerCancelSignal, WorkerDisconnectOutcome,
     };
     use crate::registration_harness::{
         CloseCode, ConnectRequest, HandshakeFailure, ProviderConfig, RegisterAck, RegisterMessage,
@@ -41,8 +41,8 @@ mod tests {
         assert!(doc.contains("Immediate dispatch vs queue"));
         assert!(doc.contains("Worker registration handshake"));
         assert!(doc.contains("Worker disconnect handling"));
-        assert!(!doc.contains("4. Client cancellation:"));
-        assert!(!doc.contains("4. Streaming pass-through:"));
+        assert!(doc.contains("Heartbeat and stale cleanup"));
+        assert!(!doc.contains("Queue timeout and queue-full surfaces"));
     }
 
     #[test]
@@ -272,6 +272,81 @@ mod tests {
         assert_eq!(
             harness.queued_request_ids("openai"),
             vec!["request-5".to_string()]
+        );
+    }
+
+    #[test]
+    fn queued_request_times_out_without_becoming_a_queue_full_failure() {
+        let mut harness = DispatchHarness::new();
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let first = harness.submit_request("openai", "llama-3.1-70b");
+        let queued = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(first, SubmissionOutcome::Dispatched(_)));
+        assert_eq!(
+            queued,
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        let timeout = harness
+            .timeout_queued_request("request-2")
+            .expect("queued request should fail if it waits too long for worker capacity");
+
+        assert_eq!(
+            timeout,
+            SubmissionFailure {
+                request_id: "request-2".to_string(),
+                reason: SubmissionFailureReason::QueueTimedOut,
+            }
+        );
+        assert!(harness.queued_request_ids("openai").is_empty());
+        assert_eq!(
+            harness.finish_request(&worker_id, "request-1"),
+            None,
+            "a timed-out queued request must not dispatch once capacity becomes available"
+        );
+    }
+
+    #[test]
+    fn bounded_provider_queue_rejects_new_work_as_queue_full_before_timeout_logic_applies() {
+        let mut harness = DispatchHarness::new();
+        harness.set_provider_queue_capacity("openai", 1);
+        let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+
+        let first = harness.submit_request("openai", "llama-3.1-70b");
+        let queued = harness.submit_request("openai", "llama-3.1-70b");
+        let rejected = harness.submit_request("openai", "llama-3.1-70b");
+
+        assert!(matches!(first, SubmissionOutcome::Dispatched(_)));
+        assert_eq!(
+            queued,
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+        assert_eq!(
+            rejected,
+            SubmissionOutcome::Rejected(SubmissionFailure {
+                request_id: "request-3".to_string(),
+                reason: SubmissionFailureReason::QueueFull,
+            })
+        );
+        assert_eq!(
+            harness.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+        assert_eq!(
+            harness.finish_request(&worker_id, "request-1"),
+            Some(DispatchAssignment {
+                request_id: "request-2".to_string(),
+                worker_id,
+            }),
+            "queue-full rejection should not displace the earlier queued request"
         );
     }
 
