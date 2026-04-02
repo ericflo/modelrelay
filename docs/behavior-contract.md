@@ -90,20 +90,17 @@ Ordered by leverage:
 3. Model-based routing:
    Only workers advertising the exact requested model are eligible, with lowest-load round-robin tie breaking.
 
-4. Streaming pass-through:
-   Preserve chunk order, flush behavior, completion metadata, and SSE termination semantics.
-
-5. Client cancellation:
+4. Client cancellation:
    Cancel queued work before dispatch and send worker cancel for in-flight work after dispatch.
 
-6. Worker disconnect handling:
+5. Worker disconnect handling:
    Requeue live work when the client context is still valid, fail fast when it is not, and stop after the max requeue count.
 
-7. Queue timeout and queue-full surfaces:
+6. Queue timeout and queue-full surfaces:
    Distinguish timeout waiting for a worker from queue capacity exhaustion.
 
-8. Heartbeat and stale cleanup:
+7. Heartbeat and stale cleanup:
    Update live load from `pong`, expire stale workers, and keep dead workers from being selected.
 
-10. Graceful shutdown and drain:
+8. Graceful shutdown and drain:
    Worker receives shutdown, no new work is assigned, in-flight work is allowed to finish or timeout, and provider deletion drains queued work explicitly.
