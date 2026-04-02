@@ -218,7 +218,7 @@ impl DispatchHarness {
             .provider_queues
             .remove(provider)
             .into_iter()
-            .flat_map(|queue| queue.into_iter())
+            .flat_map(std::iter::IntoIterator::into_iter)
             .map(|request| {
                 self.active_requests.remove(&request.request_id);
                 RequestFailure {
@@ -415,8 +415,7 @@ impl DispatchHarness {
     pub fn worker_is_draining(&self, worker_id: &str) -> bool {
         self.workers
             .get(worker_id)
-            .map(|worker| worker.is_draining)
-            .unwrap_or(false)
+            .is_some_and(|worker| worker.is_draining)
     }
 
     #[must_use]
