@@ -248,11 +248,11 @@ mod tests {
         let stale_worker = harness.register_worker("openai", ["llama-3.1-70b"], 2);
         let fresh_worker = harness.register_worker("openai", ["llama-3.1-70b"], 2);
 
-        assert_eq!(harness.receive_pong(&stale_worker, 0).is_some(), true);
-        assert_eq!(harness.receive_pong(&fresh_worker, 1).is_some(), true);
+        assert!(harness.receive_pong(&stale_worker, 0).is_some());
+        assert!(harness.receive_pong(&fresh_worker, 1).is_some());
 
         harness.advance_time(3);
-        assert_eq!(harness.receive_pong(&fresh_worker, 1).is_some(), true);
+        assert!(harness.receive_pong(&fresh_worker, 1).is_some());
 
         assert_eq!(
             harness.submit_request("openai", "llama-3.1-70b"),
@@ -264,10 +264,7 @@ mod tests {
 
         let mut only_stale_harness = HeartbeatHarness::new(3);
         let only_worker = only_stale_harness.register_worker("openai", ["llama-3.1-70b"], 1);
-        assert_eq!(
-            only_stale_harness.receive_pong(&only_worker, 0).is_some(),
-            true
-        );
+        assert!(only_stale_harness.receive_pong(&only_worker, 0).is_some());
         only_stale_harness.advance_time(3);
 
         assert_eq!(

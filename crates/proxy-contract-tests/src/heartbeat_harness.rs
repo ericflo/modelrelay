@@ -47,6 +47,7 @@ impl HeartbeatHarness {
         worker_id
     }
 
+    #[must_use]
     pub fn send_ping(&self, worker_id: &str) -> Option<ServerPing> {
         self.workers.get(worker_id).map(|_| ServerPing {
             worker_id: worker_id.to_string(),
