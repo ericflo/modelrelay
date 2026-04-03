@@ -7,7 +7,17 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+tokio.workspace = true
 worker-protocol.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+http.workspace = true
+tokio-tungstenite.workspace = true
 
 [lints]
 workspace = true

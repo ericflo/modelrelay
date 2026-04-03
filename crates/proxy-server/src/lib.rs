@@ -1,6 +1,10 @@
+pub mod worker_socket;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use worker_protocol::{ModelsUpdateMessage, RegisterAck, RegisterMessage};
+
+pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
 
 const MAX_REQUEUE_COUNT: usize = 3;
 
