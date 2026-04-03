@@ -206,6 +206,35 @@ impl ProxyServerCore {
             .collect()
     }
 
+    #[must_use]
+    pub fn take_pending_worker_cancel_signals(
+        &mut self,
+        worker_id: &str,
+    ) -> Vec<WorkerCancelSignal> {
+        let mut pending = Vec::new();
+        let mut remaining = Vec::with_capacity(self.worker_cancel_signals.len());
+
+        for signal in self.worker_cancel_signals.drain(..) {
+            let is_still_pending = matches!(
+                self.active_requests.get(&signal.request_id),
+                Some(ActiveRequestState::InFlight {
+                    worker_id: active_worker_id,
+                    cancellation: Some(_),
+                    ..
+                }) if active_worker_id == &signal.worker_id
+            );
+
+            if signal.worker_id == worker_id && is_still_pending {
+                pending.push(signal);
+            } else if is_still_pending {
+                remaining.push(signal);
+            }
+        }
+
+        self.worker_cancel_signals = remaining;
+        pending
+    }
+
     pub fn disconnect_worker(&mut self, worker_id: &str) -> Option<WorkerDisconnectOutcome> {
         let worker = self.workers.remove(worker_id)?;
         self.worker_order

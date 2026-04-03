@@ -134,6 +134,71 @@ async fn send_response_chunk(socket: &mut TestSocket, request_id: &str, chunk: &
         .expect("send response_chunk");
 }
 
+async fn queue_cancel_test_requests(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    worker_id: &str,
+    second_headers: &HeaderMap,
+) {
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"cancel me"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+            request_id: "request-1".to_string(),
+            worker_id: worker_id.to_string(),
+        })
+    );
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after cancel"}]}"#,
+            second_headers.clone(),
+        ),
+        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            request_id: "request-2".to_string(),
+            queue_len: 1,
+        })
+    );
+}
+
+async fn cancel_in_flight_request(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.cancel_request("request-1", ProxyCancelReason::ClientDisconnected),
+        Some(proxy_server::CancellationOutcome::WorkerCancelSent(
+            proxy_server::WorkerCancelSignal {
+                worker_id: worker_id.to_string(),
+                request_id: "request-1".to_string(),
+                reason: ProxyCancelReason::ClientDisconnected,
+            }
+        ))
+    );
+}
+
+async fn assert_canceled_request_state(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+    let core = core.lock().await;
+    assert_eq!(
+        core.request_state("request-1"),
+        Some(RequestState::InFlight {
+            worker_id: worker_id.to_string(),
+            cancellation: Some(ProxyCancelReason::ClientDisconnected),
+        })
+    );
+    assert_eq!(
+        core.queued_request_ids("openai"),
+        vec!["request-2".to_string()]
+    );
+}
+
 #[tokio::test]
 async fn authenticated_worker_can_register_and_receive_register_ack() {
     let (addr, core) = spawn_server().await;
@@ -417,37 +482,7 @@ async fn canceling_in_flight_request_emits_single_worker_cancel_until_response_c
     let second_headers =
         HeaderMap::from([("x-trace-id".to_string(), "trace-after-cancel".to_string())]);
 
-    {
-        let mut core = core.lock().await;
-        assert_eq!(
-            core.submit_transport_request(
-                "openai",
-                "llama-3.1-70b",
-                "/v1/chat/completions",
-                false,
-                r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"cancel me"}]}"#,
-                HeaderMap::new(),
-            ),
-            SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
-                request_id: "request-1".to_string(),
-                worker_id: ack.worker_id.clone(),
-            })
-        );
-        assert_eq!(
-            core.submit_transport_request(
-                "openai",
-                "llama-3.1-70b",
-                "/v1/chat/completions",
-                false,
-                r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after cancel"}]}"#,
-                second_headers.clone(),
-            ),
-            SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
-                request_id: "request-2".to_string(),
-                queue_len: 1,
-            })
-        );
-    }
+    queue_cancel_test_requests(&core, &ack.worker_id, &second_headers).await;
 
     assert_eq!(
         next_server_message(&mut socket, "initial dispatched request").await,
@@ -458,30 +493,8 @@ async fn canceling_in_flight_request_emits_single_worker_cancel_until_response_c
         )
     );
 
-    {
-        let mut core = core.lock().await;
-        assert_eq!(
-            core.cancel_request("request-1", ProxyCancelReason::ClientDisconnected),
-            Some(proxy_server::CancellationOutcome::WorkerCancelSent(
-                proxy_server::WorkerCancelSignal {
-                    worker_id: ack.worker_id.clone(),
-                    request_id: "request-1".to_string(),
-                    reason: ProxyCancelReason::ClientDisconnected,
-                }
-            ))
-        );
-        assert_eq!(
-            core.request_state("request-1"),
-            Some(RequestState::InFlight {
-                worker_id: ack.worker_id.clone(),
-                cancellation: Some(ProxyCancelReason::ClientDisconnected),
-            })
-        );
-        assert_eq!(
-            core.queued_request_ids("openai"),
-            vec!["request-2".to_string()]
-        );
-    }
+    cancel_in_flight_request(&core, &ack.worker_id).await;
+    assert_canceled_request_state(&core, &ack.worker_id).await;
 
     assert_eq!(
         next_server_message(&mut socket, "worker cancel").await,
@@ -497,20 +510,7 @@ async fn canceling_in_flight_request_emits_single_worker_cancel_until_response_c
         "cancel should not duplicate or dispatch queued work before response_complete"
     );
 
-    {
-        let core = core.lock().await;
-        assert_eq!(
-            core.request_state("request-1"),
-            Some(RequestState::InFlight {
-                worker_id: ack.worker_id.clone(),
-                cancellation: Some(ProxyCancelReason::ClientDisconnected),
-            })
-        );
-        assert_eq!(
-            core.queued_request_ids("openai"),
-            vec!["request-2".to_string()]
-        );
-    }
+    assert_canceled_request_state(&core, &ack.worker_id).await;
 
     send_response_complete(&mut socket, "request-1").await;
     assert_eq!(
