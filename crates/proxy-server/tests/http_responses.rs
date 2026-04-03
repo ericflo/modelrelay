@@ -198,6 +198,30 @@ async fn read_until_contains(stream: &mut TcpStream, needle: &str) -> String {
     }
 }
 
+async fn assert_worker_socket_closes(socket: &mut TestSocket) {
+    loop {
+        let message = timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .expect("receive worker close frame before timeout")
+            .expect("socket message")
+            .expect("websocket message");
+
+        match message {
+            Message::Close(Some(close_frame)) => {
+                assert_eq!(u16::from(close_frame.code), 1000);
+                return;
+            }
+            Message::Text(payload) => match serde_json::from_str::<ServerToWorkerMessage>(&payload)
+                .expect("deserialize server message while waiting for close")
+            {
+                ServerToWorkerMessage::Ping(_) => {}
+                other => panic!("unexpected server message while waiting for close: {other:?}"),
+            },
+            other => panic!("unexpected websocket message while waiting for close: {other:?}"),
+        }
+    }
+}
+
 async fn send_response_chunk(socket: &mut TestSocket, request_id: &str, chunk: &str) {
     let message = WorkerToServerMessage::ResponseChunk(ResponseChunkMessage {
         request_id: request_id.to_string(),
@@ -589,6 +613,46 @@ async fn worker_backed_responses_route_returns_sanitized_provider_disabled_error
         !response.contains("virtual provider is disabled"),
         "the compatibility boundary should use the stable disabled message"
     );
+}
+
+#[tokio::test]
+async fn worker_backed_responses_route_returns_sanitized_provider_deleted_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"gpt-4.1-mini","input":"delete provider while in flight"}"#;
+    let http_request = tokio::spawn(post_responses(
+        addr,
+        body,
+        &[("OpenAI-Beta", "responses=v1")],
+    ));
+
+    let ServerToWorkerMessage::Request(_) =
+        next_server_message(&mut socket, "in-flight worker request").await
+    else {
+        panic!("expected in-flight worker request message");
+    };
+
+    {
+        let mut core = core.lock().await;
+        core.delete_provider("openai");
+    }
+
+    let response = http_request
+        .await
+        .expect("join provider-deleted http request");
+    assert_service_unavailable(&response, "Internal server error processing request");
+    assert!(
+        !response.contains("provider was deleted"),
+        "the compatibility boundary should not leak the internal provider-deletion reason"
+    );
+
+    assert_worker_socket_closes(&mut socket).await;
 }
 
 #[tokio::test]
