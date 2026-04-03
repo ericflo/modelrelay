@@ -1706,6 +1706,7 @@ name = "worker-daemon"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clap",
  "futures-util",
  "proxy-server",
  "reqwest",
