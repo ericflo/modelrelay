@@ -119,6 +119,54 @@ async fn wait_for_worker_reported_load(
     .unwrap_or_else(|_| panic!("worker {worker_id} reported load did not reach {expected_load}"));
 }
 
+async fn submit_heartbeat_initial_request(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"heartbeat me"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+            request_id: "request-1".to_string(),
+            worker_id: worker_id.to_string(),
+        })
+    );
+}
+
+async fn submit_heartbeat_follow_up_request(core: &Arc<Mutex<ProxyServerCore>>) {
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued until complete"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            request_id: "request-2".to_string(),
+            queue_len: 1,
+        })
+    );
+}
+
+async fn assert_heartbeat_ping(socket: &mut TestSocket) {
+    assert_eq!(
+        serde_json::from_str::<ServerToWorkerMessage>(
+            &next_text_message(socket, "heartbeat ping").await
+        )
+        .expect("deserialize heartbeat ping"),
+        ServerToWorkerMessage::Ping(PingMessage {
+            timestamp_unix_ms: None,
+        })
+    );
+}
+
 async fn register_test_worker(socket: &mut TestSocket) -> worker_protocol::RegisterAck {
     register_test_worker_with(socket, vec!["llama-3.1-70b".to_string()], 1, Some(0)).await
 }
@@ -671,23 +719,7 @@ async fn heartbeat_ping_pong_updates_live_worker_load_without_reconnect_or_early
     let ack =
         register_test_worker_with(&mut socket, vec!["llama-3.1-70b".to_string()], 2, Some(0)).await;
 
-    {
-        let mut core = core.lock().await;
-        assert_eq!(
-            core.submit_transport_request(
-                "openai",
-                "llama-3.1-70b",
-                "/v1/chat/completions",
-                false,
-                r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"heartbeat me"}]}"#,
-                HeaderMap::new(),
-            ),
-            SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
-                request_id: "request-1".to_string(),
-                worker_id: ack.worker_id.clone(),
-            })
-        );
-    }
+    submit_heartbeat_initial_request(&core, &ack.worker_id).await;
 
     assert_eq!(
         next_server_message(&mut socket, "initial request before heartbeat").await,
@@ -698,15 +730,7 @@ async fn heartbeat_ping_pong_updates_live_worker_load_without_reconnect_or_early
         )
     );
 
-    assert_eq!(
-        serde_json::from_str::<ServerToWorkerMessage>(
-            &next_text_message(&mut socket, "heartbeat ping").await
-        )
-        .expect("deserialize heartbeat ping"),
-        ServerToWorkerMessage::Ping(PingMessage {
-            timestamp_unix_ms: None,
-        })
-    );
+    assert_heartbeat_ping(&mut socket).await;
 
     let pong = WorkerToServerMessage::Pong(PongMessage {
         current_load: 2,
@@ -734,23 +758,7 @@ async fn heartbeat_ping_pong_updates_live_worker_load_without_reconnect_or_early
         );
     }
 
-    {
-        let mut core = core.lock().await;
-        assert_eq!(
-            core.submit_transport_request(
-                "openai",
-                "llama-3.1-70b",
-                "/v1/chat/completions",
-                false,
-                r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued until complete"}]}"#,
-                HeaderMap::new(),
-            ),
-            SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
-                request_id: "request-2".to_string(),
-                queue_len: 1,
-            })
-        );
-    }
+    submit_heartbeat_follow_up_request(&core).await;
 
     assert_no_non_heartbeat_message(&mut socket, std::time::Duration::from_millis(150)).await;
 

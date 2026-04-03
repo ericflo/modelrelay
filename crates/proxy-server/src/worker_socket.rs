@@ -305,7 +305,7 @@ async fn handle_worker_message(state: &WorkerSocketState, worker_id: &str, paylo
             }
             let _ = core.record_worker_pong(
                 worker_id,
-                PongMessage {
+                &PongMessage {
                     current_load,
                     timestamp_unix_ms,
                 },

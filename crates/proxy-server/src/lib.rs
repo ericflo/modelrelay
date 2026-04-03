@@ -105,7 +105,7 @@ impl ProxyServerCore {
     pub fn record_worker_pong(
         &mut self,
         worker_id: &str,
-        pong: PongMessage,
+        pong: &PongMessage,
     ) -> Vec<DispatchAssignment> {
         let Some(worker) = self.workers.get_mut(worker_id) else {
             return Vec::new();
