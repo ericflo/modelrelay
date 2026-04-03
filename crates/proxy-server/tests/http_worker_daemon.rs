@@ -24,6 +24,9 @@ struct ObservedBackendRequest {
     path: String,
     authorization: Option<String>,
     openai_organization: Option<String>,
+    x_api_key: Option<String>,
+    anthropic_version: Option<String>,
+    anthropic_beta: Option<String>,
     content_type: Option<String>,
     body: String,
 }
@@ -33,11 +36,16 @@ struct BackendState {
     observed_request_tx: Arc<Mutex<Option<oneshot::Sender<ObservedBackendRequest>>>>,
 }
 
-async fn spawn_proxy_server() -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
+async fn spawn_proxy_server(models_provider: &str) -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let worker_socket_app = WorkerSocketApp::new(core.clone())
+        .with_provider(
+            "anthropic",
+            WorkerSocketProviderConfig::enabled("top-secret"),
+        )
         .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
     let app = ProxyHttpApp::new(core.clone())
+        .with_models_provider(models_provider)
         .with_worker_socket_app(worker_socket_app)
         .router();
 
@@ -60,6 +68,7 @@ async fn spawn_mock_backend() -> (SocketAddr, oneshot::Receiver<ObservedBackendR
     };
     let app = Router::new()
         .route("/v1/chat/completions", post(mock_chat_completions_handler))
+        .route("/v1/messages", post(mock_messages_handler))
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -86,6 +95,9 @@ async fn mock_chat_completions_handler(
             path: "/v1/chat/completions".to_string(),
             authorization: header_value(&headers, "authorization"),
             openai_organization: header_value(&headers, "openai-organization"),
+            x_api_key: header_value(&headers, "x-api-key"),
+            anthropic_version: header_value(&headers, "anthropic-version"),
+            anthropic_beta: header_value(&headers, "anthropic-beta"),
             content_type: header_value(&headers, "content-type"),
             body,
         });
@@ -123,6 +135,36 @@ async fn mock_chat_completions_handler(
             ("x-backend-trace", "mock-backend"),
         ],
         r#"{"id":"resp_123","object":"chat.completion","model":"gpt-4.1-mini","choices":[{"index":0,"message":{"role":"assistant","content":"proxy success"},"finish_reason":"stop"}]}"#,
+    )
+        .into_response()
+}
+
+async fn mock_messages_handler(
+    State(state): State<BackendState>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    if let Some(observed_request_tx) = state.observed_request_tx.lock().await.take() {
+        let _ = observed_request_tx.send(ObservedBackendRequest {
+            path: "/v1/messages".to_string(),
+            authorization: header_value(&headers, "authorization"),
+            openai_organization: header_value(&headers, "openai-organization"),
+            x_api_key: header_value(&headers, "x-api-key"),
+            anthropic_version: header_value(&headers, "anthropic-version"),
+            anthropic_beta: header_value(&headers, "anthropic-beta"),
+            content_type: header_value(&headers, "content-type"),
+            body,
+        });
+    }
+
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/json"),
+            ("anthropic-beta", "tools-2024-04-04"),
+            ("x-backend-trace", "mock-anthropic-backend"),
+        ],
+        r#"{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"anthropic success"}]}"#,
     )
         .into_response()
 }
@@ -165,6 +207,17 @@ async fn post_chat_completions(addr: SocketAddr, body: &str, headers: &[(&str, &
     String::from_utf8(response).expect("proxy response is utf-8")
 }
 
+async fn post_messages(addr: SocketAddr, body: &str, headers: &[(&str, &str)]) -> String {
+    let mut stream = open_messages_request(addr, body, headers).await;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read messages response");
+
+    String::from_utf8(response).expect("proxy response is utf-8")
+}
+
 async fn open_chat_completions_request(
     addr: SocketAddr,
     body: &str,
@@ -187,6 +240,32 @@ async fn open_chat_completions_request(
         .write_all(request.as_bytes())
         .await
         .expect("write chat completions request");
+
+    stream
+}
+
+async fn open_messages_request(
+    addr: SocketAddr,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> TcpStream {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .expect("connect to proxy server");
+    let mut request = format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        write!(request, "{name}: {value}\r\n").expect("append request header");
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write messages request");
 
     stream
 }
@@ -249,7 +328,7 @@ async fn wait_for_registered_model(addr: SocketAddr, expected_model: &str) {
 
 #[tokio::test]
 async fn worker_daemon_forwards_non_streaming_openai_request_through_live_proxy() {
-    let (proxy_addr, _core) = spawn_proxy_server().await;
+    let (proxy_addr, _core) = spawn_proxy_server("openai").await;
     let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
 
     let daemon = WorkerDaemon::new(WorkerDaemonConfig {
@@ -289,6 +368,9 @@ async fn worker_daemon_forwards_non_streaming_openai_request_through_live_proxy(
             path: "/v1/chat/completions".to_string(),
             authorization: Some("Bearer client-token".to_string()),
             openai_organization: Some("org-demo".to_string()),
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
             content_type: Some("application/json".to_string()),
             body: request_body.to_string(),
         }
@@ -321,7 +403,7 @@ async fn worker_daemon_forwards_non_streaming_openai_request_through_live_proxy(
 
 #[tokio::test]
 async fn worker_daemon_forwards_streaming_openai_request_through_live_proxy() {
-    let (proxy_addr, _core) = spawn_proxy_server().await;
+    let (proxy_addr, _core) = spawn_proxy_server("openai").await;
     let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
 
     let daemon = WorkerDaemon::new(WorkerDaemonConfig {
@@ -366,6 +448,9 @@ async fn worker_daemon_forwards_streaming_openai_request_through_live_proxy() {
             path: "/v1/chat/completions".to_string(),
             authorization: Some("Bearer client-token".to_string()),
             openai_organization: Some("org-demo".to_string()),
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
             content_type: Some("application/json".to_string()),
             body: request_body.to_string(),
         }
@@ -395,6 +480,66 @@ async fn worker_daemon_forwards_streaming_openai_request_through_live_proxy() {
     assert!(hello_index < lo_index);
     assert!(lo_index < done_index);
     assert!(full_response.ends_with("0\r\n\r\n"));
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_forwards_anthropic_messages_request_through_live_proxy() {
+    let (proxy_addr, _core) = spawn_proxy_server("anthropic").await;
+    let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "anthropic".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["claude-3-5-sonnet-20241022".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "claude-3-5-sonnet-20241022").await;
+
+    let request_body = r#"{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"messages":[{"role":"user","content":"hello from proxy"}]}"#;
+    let response = post_messages(
+        proxy_addr,
+        request_body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "tools-2024-04-04"),
+        ],
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/messages".to_string(),
+            authorization: None,
+            openai_organization: None,
+            x_api_key: Some("test-anthropic-key".to_string()),
+            anthropic_version: Some("2023-06-01".to_string()),
+            anthropic_beta: Some("tools-2024-04-04".to_string()),
+            content_type: Some("application/json".to_string()),
+            body: request_body.to_string(),
+        }
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nanthropic-beta: tools-2024-04-04\r\n"));
+    assert!(response.contains("\r\nx-backend-trace: mock-anthropic-backend\r\n"));
+    assert!(response.ends_with(
+        r#"{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"anthropic success"}]}"#
+    ));
 
     daemon_handle.abort();
 }
