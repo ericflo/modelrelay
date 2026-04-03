@@ -396,6 +396,39 @@ async fn worker_backed_responses_route_cancels_in_flight_request_when_http_clien
 }
 
 #[tokio::test]
+async fn worker_backed_responses_route_returns_sanitized_no_workers_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 0,
+                queue_timeout_ticks: None,
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core, true).await;
+
+    let body = r#"{"model":"gpt-4.1-mini","input":"hello from responses"}"#;
+    let response = post_responses(
+        addr,
+        body,
+        &[
+            ("Authorization", "Bearer test-token"),
+            ("OpenAI-Beta", "responses=v1"),
+        ],
+    )
+    .await;
+
+    assert_service_unavailable(&response, "No workers available to handle request");
+    assert!(
+        !response.contains("queue is full"),
+        "the client boundary should not expose the internal queue rejection"
+    );
+}
+
+#[tokio::test]
 async fn worker_backed_responses_route_returns_sanitized_queue_timeout_error() {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     {
