@@ -689,7 +689,8 @@ async fn worker_daemon_forwards_streaming_openai_responses_request_through_live_
     wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
 
     let request_body =
-        json!({"model": "gpt-4.1-mini", "stream": true, "input": "hello from responses"}).to_string();
+        json!({"model": "gpt-4.1-mini", "stream": true, "input": "hello from responses"})
+            .to_string();
     let mut response_stream = open_responses_request(
         proxy_addr,
         &request_body,
@@ -729,11 +730,9 @@ async fn worker_daemon_forwards_streaming_openai_responses_request_through_live_
     );
     assert!(first_fragment.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(first_fragment.contains("\r\ncontent-type: text/event-stream\r\n"));
-    assert!(
-        first_fragment.contains(
-            "data: {\"id\":\"resp_123\",\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n"
-        )
-    );
+    assert!(first_fragment.contains(
+        "data: {\"id\":\"resp_123\",\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n"
+    ));
     assert!(!first_fragment.contains("data: [DONE]\n\n"));
 
     let mut rest = Vec::new();
