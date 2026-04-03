@@ -29,6 +29,7 @@ pub struct ProxyServerCore {
     pending_http_response_senders: HashMap<String, PendingHttpResponseSender>,
     worker_cancel_signals: Vec<WorkerCancelSignal>,
     worker_graceful_shutdown_signals: Vec<GracefulShutdownSignal>,
+    worker_models_refresh_signals: Vec<WorkerModelsRefreshSignal>,
     graceful_shutdown_disconnect_reasons: HashMap<String, GracefulShutdownDisconnectReason>,
 }
 
@@ -457,6 +458,43 @@ impl ProxyServerCore {
         pending
     }
 
+    pub fn request_worker_models_refresh(
+        &mut self,
+        worker_id: &str,
+        reason: Option<&str>,
+    ) -> Option<WorkerModelsRefreshSignal> {
+        if !self.workers.contains_key(worker_id) {
+            return None;
+        }
+
+        let signal = WorkerModelsRefreshSignal {
+            worker_id: worker_id.to_string(),
+            reason: reason.map(ToOwned::to_owned),
+        };
+        self.worker_models_refresh_signals.push(signal.clone());
+        Some(signal)
+    }
+
+    #[must_use]
+    pub fn take_pending_worker_models_refresh_signals(
+        &mut self,
+        worker_id: &str,
+    ) -> Vec<WorkerModelsRefreshSignal> {
+        let mut pending = Vec::new();
+        let mut remaining = Vec::with_capacity(self.worker_models_refresh_signals.len());
+
+        for signal in self.worker_models_refresh_signals.drain(..) {
+            if signal.worker_id == worker_id && self.workers.contains_key(&signal.worker_id) {
+                pending.push(signal);
+            } else if self.workers.contains_key(&signal.worker_id) {
+                remaining.push(signal);
+            }
+        }
+
+        self.worker_models_refresh_signals = remaining;
+        pending
+    }
+
     #[must_use]
     pub fn expire_graceful_shutdown(&mut self, now: Instant) -> GracefulShutdownOutcome {
         let expiring_workers = self
@@ -715,6 +753,19 @@ impl ProxyServerCore {
             .filter(|worker| worker.provider == provider)
             .flat_map(|worker| worker.models.iter())
             .filter(|model| seen.insert((*model).clone()))
+            .cloned()
+            .collect()
+    }
+
+    #[must_use]
+    pub fn worker_ids_for_provider(&self, provider: &str) -> Vec<String> {
+        self.worker_order
+            .iter()
+            .filter(|worker_id| {
+                self.workers
+                    .get(*worker_id)
+                    .is_some_and(|worker| worker.provider == provider)
+            })
             .cloned()
             .collect()
     }
@@ -1025,6 +1076,12 @@ pub struct GracefulShutdownSignal {
     pub worker_id: String,
     pub reason: Option<String>,
     pub drain_timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerModelsRefreshSignal {
+    pub worker_id: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

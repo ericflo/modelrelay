@@ -1,6 +1,12 @@
 use std::{collections::BTreeMap, fmt::Write as _, net::SocketAddr, sync::Arc};
 
-use axum::{Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post};
+use axum::{
+    Router,
+    extract::State,
+    http::HeaderMap,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use proxy_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
 use serde_json::{Value, json};
 use tokio::{
@@ -27,9 +33,10 @@ struct ObservedBackendRequest {
 #[derive(Clone)]
 struct BackendState {
     observed_request_tx: Arc<Mutex<Option<oneshot::Sender<ObservedBackendRequest>>>>,
+    advertised_models: Arc<Mutex<Vec<String>>>,
 }
 
-async fn spawn_proxy_server(models_provider: &str) -> SocketAddr {
+async fn spawn_proxy_server(models_provider: &str) -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let worker_socket_app = WorkerSocketApp::new(core.clone())
         .with_provider(
@@ -37,7 +44,7 @@ async fn spawn_proxy_server(models_provider: &str) -> SocketAddr {
             WorkerSocketProviderConfig::enabled("top-secret"),
         )
         .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
-    let app = ProxyHttpApp::new(core)
+    let app = ProxyHttpApp::new(core.clone())
         .with_models_provider(models_provider)
         .with_worker_socket_app(worker_socket_app)
         .router();
@@ -51,15 +58,25 @@ async fn spawn_proxy_server(models_provider: &str) -> SocketAddr {
         axum::serve(listener, app).await.expect("serve proxy app");
     });
 
-    addr
+    (addr, core)
 }
 
-async fn spawn_mock_backend() -> (SocketAddr, oneshot::Receiver<ObservedBackendRequest>) {
+async fn spawn_mock_backend() -> (
+    SocketAddr,
+    oneshot::Receiver<ObservedBackendRequest>,
+    Arc<Mutex<Vec<String>>>,
+) {
     let (observed_request_tx, observed_request_rx) = oneshot::channel();
+    let advertised_models = Arc::new(Mutex::new(vec![
+        "gpt-4.1-mini".to_string(),
+        "claude-3-7-sonnet-20250219".to_string(),
+    ]));
     let state = BackendState {
         observed_request_tx: Arc::new(Mutex::new(Some(observed_request_tx))),
+        advertised_models: advertised_models.clone(),
     };
     let app = Router::new()
+        .route("/v1/models", get(mock_models_handler))
         .route("/v1/responses", post(mock_responses_handler))
         .route("/v1/messages", post(mock_messages_handler))
         .with_state(state);
@@ -73,7 +90,31 @@ async fn spawn_mock_backend() -> (SocketAddr, oneshot::Receiver<ObservedBackendR
         axum::serve(listener, app).await.expect("serve backend app");
     });
 
-    (addr, observed_request_rx)
+    (addr, observed_request_rx, advertised_models)
+}
+
+async fn mock_models_handler(State(state): State<BackendState>) -> impl IntoResponse {
+    let models = state.advertised_models.lock().await.clone();
+    let data = models
+        .into_iter()
+        .map(|model| {
+            json!({
+                "id": model,
+                "object": "model",
+                "owned_by": "mock-backend"
+            })
+        })
+        .collect::<Vec<_>>();
+
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "application/json")],
+        json!({
+            "object": "list",
+            "data": data,
+        })
+        .to_string(),
+    )
 }
 
 async fn mock_messages_handler(
@@ -182,6 +223,26 @@ async fn wait_for_registered_model(addr: SocketAddr, expected_model: &str) {
     })
     .await
     .unwrap_or_else(|_| panic!("model {expected_model} was not registered"));
+}
+
+async fn wait_for_models_catalog(addr: SocketAddr, expected_models: &[&str]) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let (_, body) = get_models(addr).await;
+            let models = body["data"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .filter_map(|entry| entry["id"].as_str())
+                .collect::<Vec<_>>();
+            if models == expected_models {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("models catalog did not match {expected_models:?}"));
 }
 
 async fn post_messages(addr: SocketAddr, body: &str, headers: &[(&str, &str)]) -> String {
@@ -424,8 +485,8 @@ fn parse_json_response(response: &[u8]) -> (u16, Value) {
 
 #[tokio::test]
 async fn worker_daemon_forwards_anthropic_messages_request_through_live_proxy() {
-    let proxy_addr = spawn_proxy_server("anthropic").await;
-    let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
+    let (proxy_addr, _) = spawn_proxy_server("anthropic").await;
+    let (backend_addr, observed_request_rx, _) = spawn_mock_backend().await;
 
     let daemon = WorkerDaemon::new(WorkerDaemonConfig {
         proxy_base_url: format!("http://{proxy_addr}"),
@@ -491,8 +552,8 @@ async fn worker_daemon_forwards_anthropic_messages_request_through_live_proxy() 
 
 #[tokio::test]
 async fn worker_daemon_forwards_openai_responses_request_through_live_proxy() {
-    let proxy_addr = spawn_proxy_server("openai").await;
-    let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
+    let (proxy_addr, _) = spawn_proxy_server("openai").await;
+    let (backend_addr, observed_request_rx, _) = spawn_mock_backend().await;
 
     let daemon = WorkerDaemon::new(WorkerDaemonConfig {
         proxy_base_url: format!("http://{proxy_addr}"),
@@ -554,7 +615,7 @@ async fn worker_daemon_forwards_openai_responses_request_through_live_proxy() {
 
 #[tokio::test]
 async fn worker_daemon_cancels_in_flight_backend_request_when_proxy_client_disconnects() {
-    let proxy_addr = spawn_proxy_server("openai").await;
+    let (proxy_addr, _) = spawn_proxy_server("openai").await;
     let (backend_addr, observed_request_rx, cancelled_rx) = spawn_slow_cancellation_backend().await;
 
     let daemon = WorkerDaemon::new(WorkerDaemonConfig {
@@ -615,6 +676,59 @@ async fn worker_daemon_cancels_in_flight_backend_request_when_proxy_client_disco
         .expect("backend cancellation before timeout")
         .expect("backend cancellation result")
         .expect("backend request was canceled");
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_refreshes_models_catalog_without_reconnect() {
+    let (proxy_addr, core) = spawn_proxy_server("openai").await;
+    let (backend_addr, _observed_request_rx, advertised_models) = spawn_mock_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_models_catalog(proxy_addr, &["gpt-4.1-mini"]).await;
+
+    {
+        let mut models = advertised_models.lock().await;
+        *models = vec!["gpt-4.1-mini".to_string(), "gpt-oss-120b".to_string()];
+    }
+
+    let worker_id = timeout(Duration::from_secs(2), async {
+        loop {
+            let worker_id = {
+                let core = core.lock().await;
+                core.worker_ids_for_provider("openai").into_iter().next()
+            };
+            if let Some(worker_id) = worker_id {
+                break worker_id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker registered before timeout");
+
+    {
+        let mut core = core.lock().await;
+        let refresh = core.request_worker_models_refresh(&worker_id, Some("test catalog sync"));
+        assert!(
+            refresh.is_some(),
+            "refresh signal queued for connected worker"
+        );
+    }
+
+    wait_for_models_catalog(proxy_addr, &["gpt-4.1-mini", "gpt-oss-120b"]).await;
 
     daemon_handle.abort();
 }
