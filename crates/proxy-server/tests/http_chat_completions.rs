@@ -16,8 +16,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    CancelMessage, CancelReason, HeaderMap, RegisterMessage, ResponseChunkMessage,
-    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason, HeaderMap, ModelsUpdateMessage, RegisterMessage,
+    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -209,6 +209,19 @@ async fn send_response_chunk(socket: &mut TestSocket, request_id: &str, chunk: &
         .send(Message::Text(payload.into()))
         .await
         .expect("send response_chunk");
+}
+
+async fn send_models_update(socket: &mut TestSocket, models: Vec<String>, current_load: u32) {
+    let message = WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
+        models,
+        current_load,
+    });
+    let payload = serde_json::to_string(&message).expect("serialize models_update");
+
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .expect("send models_update");
 }
 
 #[tokio::test]
@@ -444,4 +457,76 @@ async fn worker_backed_chat_completions_route_returns_sanitized_queue_full_error
 
     first_request.abort();
     second_request.abort();
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_returns_sanitized_requeue_exhaustion_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let (mut socket_one, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect first websocket");
+    register_test_worker(&mut socket_one).await;
+
+    let body =
+        r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"keep retrying"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
+
+    let ServerToWorkerMessage::Request(first_request) =
+        next_server_message(&mut socket_one, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+
+    socket_one
+        .close(None)
+        .await
+        .expect("close first worker socket");
+    wait_for_request_state(&core, &first_request.request_id, RequestState::Queued).await;
+
+    for label in ["second", "third", "fourth"] {
+        let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+            .await
+            .unwrap_or_else(|_| panic!("connect {label} websocket"));
+        register_test_worker(&mut socket).await;
+        send_models_update(&mut socket, vec!["llama-3.1-70b".to_string()], 0).await;
+
+        let ServerToWorkerMessage::Request(requeued_request) =
+            next_server_message(&mut socket, &format!("{label} worker request")).await
+        else {
+            panic!("expected {label} worker request message");
+        };
+        assert_eq!(requeued_request.request_id, first_request.request_id);
+
+        socket
+            .close(None)
+            .await
+            .unwrap_or_else(|_| panic!("close {label} worker socket"));
+
+        if label != "fourth" {
+            wait_for_request_state(&core, &first_request.request_id, RequestState::Queued).await;
+        }
+    }
+
+    let response = timeout(std::time::Duration::from_secs(2), http_request)
+        .await
+        .expect("http request completed before timeout")
+        .expect("join http request task");
+    assert_service_unavailable(
+        &response,
+        "Request could not be processed after multiple attempts",
+    );
+    assert!(
+        !response.contains("MaxRequeuesExceeded"),
+        "the client boundary should not expose the internal failure enum"
+    );
+    assert!(
+        !response.to_ascii_lowercase().contains("requeue"),
+        "the client boundary should not expose raw requeue wording"
+    );
+    assert!(
+        !response.to_ascii_lowercase().contains("max retries"),
+        "the client boundary should not expose raw retry-limit wording"
+    );
 }
