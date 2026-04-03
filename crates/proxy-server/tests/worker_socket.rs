@@ -2,7 +2,8 @@ use std::{net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
 use proxy_server::{
-    ProxyServerCore, RequestState, SubmissionOutcome, WorkerSocketApp, WorkerSocketProviderConfig,
+    CancelReason as ProxyCancelReason, ProxyServerCore, RequestState, SubmissionOutcome,
+    WorkerSocketApp, WorkerSocketProviderConfig,
 };
 use tokio::{net::TcpListener, sync::Mutex, time::timeout};
 use tokio_tungstenite::{
@@ -10,8 +11,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    HeaderMap, RegisterMessage, ResponseChunkMessage, ResponseCompleteMessage,
-    ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason as ProtocolCancelReason, HeaderMap, RegisterMessage,
+    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -131,6 +132,71 @@ async fn send_response_chunk(socket: &mut TestSocket, request_id: &str, chunk: &
         .send(Message::Text(chunk_payload.into()))
         .await
         .expect("send response_chunk");
+}
+
+async fn queue_cancel_test_requests(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    worker_id: &str,
+    second_headers: &HeaderMap,
+) {
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"cancel me"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+            request_id: "request-1".to_string(),
+            worker_id: worker_id.to_string(),
+        })
+    );
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after cancel"}]}"#,
+            second_headers.clone(),
+        ),
+        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            request_id: "request-2".to_string(),
+            queue_len: 1,
+        })
+    );
+}
+
+async fn cancel_in_flight_request(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.cancel_request("request-1", ProxyCancelReason::ClientDisconnected),
+        Some(proxy_server::CancellationOutcome::WorkerCancelSent(
+            proxy_server::WorkerCancelSignal {
+                worker_id: worker_id.to_string(),
+                request_id: "request-1".to_string(),
+                reason: ProxyCancelReason::ClientDisconnected,
+            }
+        ))
+    );
+}
+
+async fn assert_canceled_request_state(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+    let core = core.lock().await;
+    assert_eq!(
+        core.request_state("request-1"),
+        Some(RequestState::InFlight {
+            worker_id: worker_id.to_string(),
+            cancellation: Some(ProxyCancelReason::ClientDisconnected),
+        })
+    );
+    assert_eq!(
+        core.queued_request_ids("openai"),
+        vec!["request-2".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -390,6 +456,68 @@ async fn streaming_response_chunks_preserve_in_flight_request_until_response_com
         expected_request_message(
             "request-2",
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after-stream"}]}"#,
+            second_headers,
+        )
+    );
+
+    let core = core.lock().await;
+    assert_eq!(core.request_state("request-1"), None);
+    assert_eq!(
+        core.request_state("request-2"),
+        Some(RequestState::InFlight {
+            worker_id: ack.worker_id,
+            cancellation: None,
+        })
+    );
+}
+
+#[tokio::test]
+async fn canceling_in_flight_request_emits_single_worker_cancel_until_response_complete() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack = register_test_worker(&mut socket).await;
+
+    let second_headers =
+        HeaderMap::from([("x-trace-id".to_string(), "trace-after-cancel".to_string())]);
+
+    queue_cancel_test_requests(&core, &ack.worker_id, &second_headers).await;
+
+    assert_eq!(
+        next_server_message(&mut socket, "initial dispatched request").await,
+        expected_request_message(
+            "request-1",
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"cancel me"}]}"#,
+            HeaderMap::new(),
+        )
+    );
+
+    cancel_in_flight_request(&core, &ack.worker_id).await;
+    assert_canceled_request_state(&core, &ack.worker_id).await;
+
+    assert_eq!(
+        next_server_message(&mut socket, "worker cancel").await,
+        ServerToWorkerMessage::Cancel(CancelMessage {
+            request_id: "request-1".to_string(),
+            reason: ProtocolCancelReason::ClientDisconnect,
+        })
+    );
+
+    let no_message = timeout(std::time::Duration::from_millis(150), socket.next()).await;
+    assert!(
+        no_message.is_err(),
+        "cancel should not duplicate or dispatch queued work before response_complete"
+    );
+
+    assert_canceled_request_state(&core, &ack.worker_id).await;
+
+    send_response_complete(&mut socket, "request-1").await;
+    assert_eq!(
+        next_server_message(&mut socket, "post-cancel queued dispatch").await,
+        expected_request_message(
+            "request-2",
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after cancel"}]}"#,
             second_headers,
         )
     );

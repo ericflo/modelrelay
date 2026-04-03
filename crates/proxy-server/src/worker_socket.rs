@@ -13,10 +13,11 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use worker_protocol::{
-    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason, ResponseChunkMessage, ResponseCompleteMessage,
+    ServerToWorkerMessage, WorkerToServerMessage,
 };
 
-use crate::ProxyServerCore;
+use crate::{ProxyServerCore, WorkerCancelSignal};
 
 const WORKER_SECRET_HEADER: &str = "x-worker-secret";
 const CLOSE_REASON_AUTH_FAILED: &str = "worker authentication failed";
@@ -287,6 +288,8 @@ async fn flush_pending_requests(
     state: &WorkerSocketState,
     worker_id: &str,
 ) -> Result<(), ()> {
+    flush_pending_cancels(socket, state, worker_id).await?;
+
     let requests = {
         let mut core = state.core.lock().await;
         core.take_pending_worker_requests(worker_id)
@@ -302,6 +305,37 @@ async fn flush_pending_requests(
     }
 
     Ok(())
+}
+
+async fn flush_pending_cancels(
+    socket: &mut WebSocket,
+    state: &WorkerSocketState,
+    worker_id: &str,
+) -> Result<(), ()> {
+    let cancels = {
+        let mut core = state.core.lock().await;
+        core.take_pending_worker_cancel_signals(worker_id)
+    };
+
+    for cancel in cancels {
+        let payload = serde_json::to_string(&cancel_message(cancel)).map_err(|_| ())?;
+        socket
+            .send(Message::Text(payload.into()))
+            .await
+            .map_err(|_| ())?;
+    }
+
+    Ok(())
+}
+
+fn cancel_message(cancel: WorkerCancelSignal) -> ServerToWorkerMessage {
+    ServerToWorkerMessage::Cancel(CancelMessage {
+        request_id: cancel.request_id,
+        reason: match cancel.reason {
+            crate::CancelReason::ClientDisconnected => CancelReason::ClientDisconnect,
+            crate::CancelReason::RequestTimedOut => CancelReason::Timeout,
+        },
+    })
 }
 
 async fn close_socket(mut socket: WebSocket, code: u16, reason: &'static str) {
