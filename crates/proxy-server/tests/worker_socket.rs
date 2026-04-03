@@ -20,9 +20,15 @@ type TestSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn spawn_server() -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
+    spawn_server_with_provider_config(WorkerSocketProviderConfig::enabled("top-secret")).await
+}
+
+async fn spawn_server_with_provider_config(
+    provider_config: WorkerSocketProviderConfig,
+) -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let app = WorkerSocketApp::new(core.clone())
-        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"))
+        .with_provider("openai", provider_config)
         .router();
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -48,6 +54,12 @@ fn worker_connect_request(addr: SocketAddr, secret: &str) -> http::Request<()> {
         secret.parse().expect("parse worker secret header"),
     );
     request
+}
+
+fn worker_connect_request_with_query_secret(addr: SocketAddr, secret: &str) -> http::Request<()> {
+    format!("ws://{addr}/v1/worker/connect?provider=openai&worker_secret={secret}")
+        .into_client_request()
+        .expect("build websocket request")
 }
 
 async fn next_text_message(socket: &mut TestSocket, context: &str) -> String {
@@ -450,6 +462,44 @@ async fn rejected_auth_connection_is_closed_with_policy_violation() {
     let Message::Close(Some(close_frame)) = close_message else {
         panic!("expected auth rejection close frame");
     };
+
+    assert_eq!(u16::from(close_frame.code), 1008);
+    assert_eq!(close_frame.reason, "worker authentication failed");
+
+    let core = core.lock().await;
+    assert!(core.provider_models("openai").is_empty());
+}
+
+#[tokio::test]
+async fn worker_secret_query_string_fallback_authenticates_connection() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request_with_query_secret(
+        addr,
+        "top-secret",
+    ))
+    .await
+    .expect("connect websocket");
+
+    let ack = register_test_worker(&mut socket).await;
+
+    let core = core.lock().await;
+    assert_eq!(ack.worker_id, "worker-1");
+    assert_eq!(
+        core.provider_models("openai"),
+        vec!["llama-3.1-70b".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn disabled_provider_connection_is_closed_with_policy_violation() {
+    let (addr, core) =
+        spawn_server_with_provider_config(WorkerSocketProviderConfig::disabled("top-secret"))
+            .await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+
+    let close_frame = next_close_message(&mut socket, "disabled provider rejection").await;
 
     assert_eq!(u16::from(close_frame.code), 1008);
     assert_eq!(close_frame.reason, "worker authentication failed");
