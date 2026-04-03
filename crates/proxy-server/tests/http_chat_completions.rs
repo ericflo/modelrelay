@@ -627,6 +627,178 @@ async fn worker_backed_chat_completions_route_requeues_live_request_after_worker
 }
 
 #[tokio::test]
+async fn worker_backed_chat_completions_route_drains_in_flight_request_before_redispatching_queued_work()
+ {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let (mut socket_one, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect first websocket");
+    register_test_worker(&mut socket_one).await;
+
+    let first_body =
+        r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"finish before drain"}]}"#;
+    let second_body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued during drain"}]}"#;
+
+    let first_http_request = tokio::spawn(post_chat_completions(addr, first_body, &[]));
+    let ServerToWorkerMessage::Request(first_request) =
+        next_server_message(&mut socket_one, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+    assert_eq!(first_request.body, first_body);
+
+    let mut second_http_stream = open_chat_completions_request(addr, second_body, &[]).await;
+    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
+
+    {
+        let mut core = core.lock().await;
+        let signals = core.begin_graceful_shutdown(
+            Some("proxy server shutting down"),
+            std::time::Duration::from_secs(1),
+        );
+        assert_eq!(signals.len(), 1);
+        assert!(core.worker_is_draining("worker-1"));
+    }
+
+    assert_eq!(
+        next_server_message(&mut socket_one, "graceful shutdown").await,
+        ServerToWorkerMessage::GracefulShutdown(worker_protocol::GracefulShutdownMessage {
+            reason: Some("proxy server shutting down".to_string()),
+            drain_timeout_secs: Some(1),
+        })
+    );
+
+    for _ in 0..2 {
+        let Ok(Some(message)) =
+            timeout(std::time::Duration::from_millis(60), socket_one.next()).await
+        else {
+            continue;
+        };
+        let message = message.expect("websocket message while draining");
+        let Message::Text(payload) = message else {
+            panic!("expected only text heartbeat messages before drain completion");
+        };
+        match serde_json::from_str::<ServerToWorkerMessage>(&payload)
+            .expect("deserialize server message while draining")
+        {
+            ServerToWorkerMessage::Ping(_) => {}
+            ServerToWorkerMessage::Request(_) => {
+                panic!("queued work should not dispatch to a draining worker");
+            }
+            _ => panic!("unexpected server message while worker is draining"),
+        }
+    }
+    assert!(
+        timeout(
+            std::time::Duration::from_millis(200),
+            read_until_contains(&mut second_http_stream, "HTTP/1.1"),
+        )
+        .await
+        .is_err(),
+        "queued HTTP client should remain pending until a replacement worker is available"
+    );
+
+    let first_complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+        request_id: first_request.request_id,
+        status_code: 200,
+        headers: HeaderMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("x-worker-backend".to_string(), "gpu-box-a".to_string()),
+        ]),
+        body: Some(
+            r#"{"id":"chatcmpl-drain-1","object":"chat.completion","choices":[]}"#.to_string(),
+        ),
+        token_counts: None,
+    });
+    let first_complete_payload =
+        serde_json::to_string(&first_complete).expect("serialize first response_complete");
+    socket_one
+        .send(Message::Text(first_complete_payload.into()))
+        .await
+        .expect("send first response_complete");
+
+    let first_response = timeout(std::time::Duration::from_secs(2), first_http_request)
+        .await
+        .expect("first http request completed before timeout")
+        .expect("join first http request task");
+    assert!(first_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(first_response.contains("\r\nx-worker-backend: gpu-box-a\r\n"));
+    assert!(
+        first_response
+            .ends_with(r#"{"id":"chatcmpl-drain-1","object":"chat.completion","choices":[]}"#)
+    );
+
+    let close_message = timeout(std::time::Duration::from_secs(2), socket_one.next())
+        .await
+        .expect("receive close frame before timeout")
+        .expect("socket message")
+        .expect("websocket message");
+    let Message::Close(Some(close_frame)) = close_message else {
+        panic!("expected post-drain close frame");
+    };
+    assert_eq!(u16::from(close_frame.code), 1000);
+    assert_eq!(close_frame.reason, "graceful shutdown complete");
+
+    {
+        let core = core.lock().await;
+        assert_eq!(core.request_state("request-2"), Some(RequestState::Queued));
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+    }
+
+    let (mut socket_two, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect second websocket");
+    register_test_worker(&mut socket_two).await;
+    send_models_update(&mut socket_two, vec!["llama-3.1-70b".to_string()], 0).await;
+
+    let ServerToWorkerMessage::Request(second_request) =
+        next_server_message(&mut socket_two, "queued worker request after drain").await
+    else {
+        panic!("expected queued worker request after drain");
+    };
+    assert_eq!(second_request.request_id, "request-2");
+    assert_eq!(second_request.endpoint_path, "/v1/chat/completions");
+    assert_eq!(second_request.body, second_body);
+
+    let second_complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+        request_id: second_request.request_id,
+        status_code: 200,
+        headers: HeaderMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("x-worker-backend".to_string(), "gpu-box-b".to_string()),
+        ]),
+        body: Some(
+            r#"{"id":"chatcmpl-drain-2","object":"chat.completion","choices":[]}"#.to_string(),
+        ),
+        token_counts: None,
+    });
+    let second_complete_payload =
+        serde_json::to_string(&second_complete).expect("serialize second response_complete");
+    socket_two
+        .send(Message::Text(second_complete_payload.into()))
+        .await
+        .expect("send second response_complete");
+
+    let mut second_response = Vec::new();
+    second_http_stream
+        .read_to_end(&mut second_response)
+        .await
+        .expect("read second http response");
+    let second_response = String::from_utf8(second_response).expect("second http response utf8");
+    assert!(second_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(second_response.contains("\r\nx-worker-backend: gpu-box-b\r\n"));
+    assert!(
+        second_response
+            .ends_with(r#"{"id":"chatcmpl-drain-2","object":"chat.completion","choices":[]}"#)
+    );
+}
+
+#[tokio::test]
 async fn worker_backed_chat_completions_route_returns_sanitized_requeue_exhaustion_error() {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let addr = spawn_server_with_core(core.clone(), true).await;
