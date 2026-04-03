@@ -4,7 +4,7 @@ pub mod worker_socket;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use worker_protocol::{
     HeaderMap, ModelsUpdateMessage, PongMessage, RegisterAck, RegisterMessage, RequestMessage,
     ResponseCompleteMessage,
@@ -26,7 +26,7 @@ pub struct ProxyServerCore {
     selection_cursors: HashMap<SelectionKey, usize>,
     active_requests: HashMap<String, ActiveRequestState>,
     pending_worker_requests: HashMap<String, VecDeque<RequestMessage>>,
-    pending_http_response_senders: HashMap<String, oneshot::Sender<ResponseCompleteMessage>>,
+    pending_http_response_senders: HashMap<String, PendingHttpResponseSender>,
     worker_cancel_signals: Vec<WorkerCancelSignal>,
     worker_graceful_shutdown_signals: Vec<GracefulShutdownSignal>,
     graceful_shutdown_disconnect_reasons: HashMap<String, GracefulShutdownDisconnectReason>,
@@ -265,13 +265,77 @@ impl ProxyServerCore {
             SubmissionOutcome::Rejected(failure) => return Err(failure),
         };
 
-        self.pending_http_response_senders
-            .insert(request_id.clone(), response_tx);
+        self.pending_http_response_senders.insert(
+            request_id.clone(),
+            PendingHttpResponseSender::Unary(response_tx),
+        );
 
         Ok(PendingHttpResponse {
             request_id,
             response_rx,
         })
+    }
+
+    /// Submits an HTTP-backed streaming request and returns a receiver for live body events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestFailure`] when the underlying transport submission is rejected
+    /// immediately, which currently happens if the provider queue is already full.
+    pub fn submit_http_streaming_request(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        body: impl Into<String>,
+        headers: HeaderMap,
+    ) -> Result<PendingStreamingHttpResponse, RequestFailure> {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let outcome =
+            self.submit_transport_request(provider, model, endpoint_path, true, body, headers);
+
+        let request_id = match outcome {
+            SubmissionOutcome::Dispatched(DispatchAssignment { request_id, .. })
+            | SubmissionOutcome::Queued(QueuedAssignment { request_id, .. }) => request_id,
+            SubmissionOutcome::Rejected(failure) => return Err(failure),
+        };
+
+        self.pending_http_response_senders.insert(
+            request_id.clone(),
+            PendingHttpResponseSender::Streaming(event_tx),
+        );
+
+        Ok(PendingStreamingHttpResponse {
+            request_id,
+            event_rx,
+        })
+    }
+
+    pub fn stream_http_response_chunk(
+        &mut self,
+        worker_id: &str,
+        request_id: &str,
+        chunk: String,
+    ) -> bool {
+        let is_valid_request = matches!(
+            self.request_state(request_id),
+            Some(RequestState::InFlight {
+                worker_id: active_worker_id,
+                ..
+            }) if active_worker_id == worker_id
+        );
+
+        if !is_valid_request {
+            return false;
+        }
+
+        if let Some(PendingHttpResponseSender::Streaming(sender)) =
+            self.pending_http_response_senders.get(request_id)
+        {
+            let _ = sender.send(HttpResponseEvent::Chunk(chunk));
+        }
+
+        true
     }
 
     pub fn complete_http_response(
@@ -286,7 +350,15 @@ impl ProxyServerCore {
 
         let finished = self.finish_request(worker_id, &request_id).is_some()
             || self.request_state(&request_id).is_none();
-        let _ = sender.send(response);
+
+        match sender {
+            PendingHttpResponseSender::Unary(sender) => {
+                let _ = sender.send(response);
+            }
+            PendingHttpResponseSender::Streaming(sender) => {
+                let _ = sender.send(HttpResponseEvent::Complete(response));
+            }
+        }
         finished
     }
 
@@ -804,6 +876,24 @@ pub enum SubmissionOutcome {
 pub struct PendingHttpResponse {
     pub request_id: String,
     pub response_rx: oneshot::Receiver<ResponseCompleteMessage>,
+}
+
+#[derive(Debug)]
+pub struct PendingStreamingHttpResponse {
+    pub request_id: String,
+    pub event_rx: mpsc::UnboundedReceiver<HttpResponseEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpResponseEvent {
+    Chunk(String),
+    Complete(ResponseCompleteMessage),
+}
+
+#[derive(Debug)]
+enum PendingHttpResponseSender {
+    Unary(oneshot::Sender<ResponseCompleteMessage>),
+    Streaming(mpsc::UnboundedSender<HttpResponseEvent>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

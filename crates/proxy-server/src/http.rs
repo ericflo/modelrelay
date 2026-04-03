@@ -2,19 +2,24 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
+    body::{Body, Bytes},
     extract::State,
     http::{
         HeaderMap as AxumHeaderMap, HeaderName, HeaderValue, StatusCode,
-        header::{CONNECTION, CONTENT_LENGTH, HOST},
+        header::{CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST},
     },
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use worker_protocol::{HeaderMap, ResponseCompleteMessage};
 
-use crate::{CancelReason, PendingHttpResponse, ProxyServerCore, WorkerSocketApp};
+use crate::{
+    CancelReason, HttpResponseEvent, PendingHttpResponse, PendingStreamingHttpResponse,
+    ProxyServerCore, WorkerSocketApp,
+};
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
 
@@ -145,7 +150,14 @@ async fn worker_backed_http_handler(
     };
 
     if request.stream {
-        return StatusCode::NOT_IMPLEMENTED.into_response();
+        return stream_worker_backed_http_response(
+            state,
+            headers,
+            request.model,
+            body,
+            endpoint_path,
+        )
+        .await;
     }
 
     let pending = {
@@ -172,6 +184,42 @@ async fn worker_backed_http_handler(
     }
 }
 
+async fn stream_worker_backed_http_response(
+    state: HttpState,
+    headers: AxumHeaderMap,
+    model: String,
+    body: String,
+    endpoint_path: &'static str,
+) -> Response {
+    let mut pending = {
+        let mut core = state.core.lock().await;
+        match core.submit_http_streaming_request(
+            &state.models_provider,
+            model,
+            endpoint_path,
+            body,
+            forwarded_request_headers(&headers),
+        ) {
+            Ok(pending) => pending,
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    };
+
+    let cancellation_guard =
+        HttpRequestCancellationGuard::new_streaming(state.core.clone(), &pending);
+    match pending.event_rx.recv().await {
+        Some(HttpResponseEvent::Chunk(first_chunk)) => {
+            streaming_http_response(first_chunk, pending, cancellation_guard)
+        }
+        Some(HttpResponseEvent::Complete(response)) => {
+            let mut guard = cancellation_guard;
+            guard.disarm();
+            response_complete_to_http_response(response)
+        }
+        None => StatusCode::BAD_GATEWAY.into_response(),
+    }
+}
+
 fn forwarded_request_headers(headers: &AxumHeaderMap) -> HeaderMap {
     headers
         .iter()
@@ -183,6 +231,45 @@ fn forwarded_request_headers(headers: &AxumHeaderMap) -> HeaderMap {
                 .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
         })
         .collect()
+}
+
+fn streaming_http_response(
+    first_chunk: String,
+    pending: PendingStreamingHttpResponse,
+    cancellation_guard: HttpRequestCancellationGuard,
+) -> Response {
+    let stream = stream::unfold(
+        (Some(first_chunk), pending.event_rx, cancellation_guard),
+        |(next_chunk, mut event_rx, mut cancellation_guard)| async move {
+            if let Some(chunk) = next_chunk {
+                return Some((
+                    Ok::<_, std::convert::Infallible>(Bytes::from(chunk)),
+                    (None, event_rx, cancellation_guard),
+                ));
+            }
+
+            match event_rx.recv().await {
+                Some(HttpResponseEvent::Chunk(chunk)) => {
+                    Some((Ok(Bytes::from(chunk)), (None, event_rx, cancellation_guard)))
+                }
+                Some(HttpResponseEvent::Complete(_)) => {
+                    cancellation_guard.disarm();
+                    None
+                }
+                None => None,
+            }
+        },
+    );
+
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
 }
 
 fn response_complete_to_http_response(response: ResponseCompleteMessage) -> Response {
@@ -213,6 +300,17 @@ struct HttpRequestCancellationGuard {
 
 impl HttpRequestCancellationGuard {
     fn new(core: Arc<Mutex<ProxyServerCore>>, pending: &PendingHttpResponse) -> Self {
+        Self {
+            core,
+            request_id: pending.request_id.clone(),
+            armed: true,
+        }
+    }
+
+    fn new_streaming(
+        core: Arc<Mutex<ProxyServerCore>>,
+        pending: &PendingStreamingHttpResponse,
+    ) -> Self {
         Self {
             core,
             request_id: pending.request_id.clone(),
