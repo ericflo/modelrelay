@@ -580,6 +580,32 @@ async fn spawn_non_success_responses_backend()
     (addr, observed_request_rx)
 }
 
+async fn spawn_non_success_messages_backend()
+-> (SocketAddr, oneshot::Receiver<ObservedBackendRequest>) {
+    let (observed_request_tx, observed_request_rx) = oneshot::channel();
+    let state = NonSuccessResponsesBackendState {
+        observed_request_tx: Arc::new(Mutex::new(Some(observed_request_tx))),
+    };
+    let app = Router::new()
+        .route("/v1/messages", post(non_success_messages_handler))
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind non-success backend listener");
+    let addr = listener
+        .local_addr()
+        .expect("non-success backend listener local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve non-success backend app");
+    });
+
+    (addr, observed_request_rx)
+}
+
 async fn delayed_responses_handler(
     State(state): State<DelayedResponsesBackendState>,
     headers: HeaderMap,
@@ -642,6 +668,38 @@ async fn non_success_responses_handler(
             ("x-backend-trace", "openai-responses-rate-limit"),
         ],
         r#"{"error":{"message":"backend overloaded","type":"rate_limit_error","code":"backend_overloaded"}}"#,
+    )
+}
+
+async fn non_success_messages_handler(
+    State(state): State<NonSuccessResponsesBackendState>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    if let Some(observed_request_tx) = state.observed_request_tx.lock().await.take() {
+        let _ = observed_request_tx.send(ObservedBackendRequest {
+            path: "/v1/messages".to_string(),
+            authorization: header_value(&headers, "authorization"),
+            openai_organization: header_value(&headers, "openai-organization"),
+            openai_beta: header_value(&headers, "openai-beta"),
+            x_api_key: header_value(&headers, "x-api-key"),
+            anthropic_version: header_value(&headers, "anthropic-version"),
+            anthropic_beta: header_value(&headers, "anthropic-beta"),
+            content_type: header_value(&headers, "content-type"),
+            body,
+        });
+    }
+
+    (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        [
+            ("content-type", "application/json"),
+            ("anthropic-version", "2023-06-01"),
+            ("retry-after", "17"),
+            ("request-id", "anthropic-rate-limit-123"),
+            ("x-backend-trace", "anthropic-messages-rate-limit"),
+        ],
+        r#"{"type":"error","error":{"type":"rate_limit_error","message":"backend overloaded","request_id":"anthropic-rate-limit-123"}}"#,
     )
 }
 
@@ -1213,6 +1271,75 @@ async fn worker_daemon_preserves_non_2xx_openai_responses_backend_response_throu
     assert!(response.contains("\r\nx-backend-trace: openai-responses-rate-limit\r\n"));
     assert!(response.ends_with(
         r#"{"error":{"message":"backend overloaded","type":"rate_limit_error","code":"backend_overloaded"}}"#
+    ));
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_preserves_non_2xx_anthropic_messages_backend_response_through_live_proxy() {
+    let (proxy_addr, _) = spawn_proxy_server("anthropic").await;
+    let (backend_addr, observed_request_rx) = spawn_non_success_messages_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "anthropic".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["claude-3-7-sonnet-20250219".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "claude-3-7-sonnet-20250219").await;
+
+    let request_body = json!({
+        "model": "claude-3-7-sonnet-20250219",
+        "max_tokens": 32,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "trigger backend overload"}]}]
+    })
+    .to_string();
+    let response = post_messages(
+        proxy_addr,
+        &request_body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "tools-2024-04-04"),
+            ("x-trace-id", "trace-429"),
+        ],
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/messages".to_string(),
+            authorization: None,
+            openai_organization: None,
+            openai_beta: None,
+            x_api_key: Some("test-anthropic-key".to_string()),
+            anthropic_version: Some("2023-06-01".to_string()),
+            anthropic_beta: Some("tools-2024-04-04".to_string()),
+            content_type: Some("application/json".to_string()),
+            body: request_body,
+        }
+    );
+    assert!(response.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nanthropic-version: 2023-06-01\r\n"));
+    assert!(response.contains("\r\nretry-after: 17\r\n"));
+    assert!(response.contains("\r\nrequest-id: anthropic-rate-limit-123\r\n"));
+    assert!(response.contains("\r\nx-backend-trace: anthropic-messages-rate-limit\r\n"));
+    assert!(response.ends_with(
+        r#"{"type":"error","error":{"type":"rate_limit_error","message":"backend overloaded","request_id":"anthropic-rate-limit-123"}}"#
     ));
 
     daemon_handle.abort();
