@@ -7,10 +7,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+clap = { version = "4", features = ["derive", "env"] }
 futures-util.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 tokio-tungstenite.workspace = true
 worker-protocol.workspace = true
 
