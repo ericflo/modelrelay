@@ -296,6 +296,33 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn assert_observed_openai_chat_request(
+    observed_request: &ObservedBackendRequest,
+    authorization: Option<&str>,
+    body: &str,
+) {
+    assert_eq!(
+        *observed_request,
+        ObservedBackendRequest {
+            path: "/v1/chat/completions".to_string(),
+            authorization: authorization.map(ToOwned::to_owned),
+            openai_organization: None,
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: body.to_string(),
+        }
+    );
+}
+
+fn assert_successful_chat_completion_response(response: &str, trace: &str, body: &str) {
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains(&format!("\r\nx-backend-trace: {trace}\r\n")));
+    assert!(response.ends_with(body));
+}
+
 async fn get_models(addr: SocketAddr) -> (u16, Value) {
     let mut stream = TcpStream::connect(addr)
         .await
@@ -483,6 +510,44 @@ async fn wait_for_queued_request_id(core: &Arc<Mutex<ProxyServerCore>>, provider
     })
     .await
     .unwrap_or_else(|_| panic!("provider {provider} never queued a request"))
+}
+
+async fn wait_for_worker_reported_load(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    worker_id: &str,
+    expected_load: usize,
+) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let reported_load = {
+                let core = core.lock().await;
+                core.worker_reported_load(worker_id)
+            };
+            if reported_load == Some(expected_load) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("worker {worker_id} never reported load {expected_load}"));
+}
+
+async fn wait_for_provider_worker_id(core: &Arc<Mutex<ProxyServerCore>>, provider: &str) -> String {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let worker_id = {
+                let core = core.lock().await;
+                core.worker_ids_for_provider(provider).into_iter().next()
+            };
+            if let Some(worker_id) = worker_id {
+                return worker_id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("provider {provider} never registered a worker"))
 }
 
 #[tokio::test]
@@ -968,4 +1033,123 @@ async fn worker_daemon_requeues_live_request_after_first_daemon_disconnect() {
 
     drop(first_backend_release_tx);
     replacement_daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_reports_live_in_flight_load_in_heartbeat_pongs() {
+    let (proxy_addr, core) = spawn_proxy_server("openai").await;
+    let response_body = r#"{"id":"chatcmpl-heartbeat","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"heartbeat success"},"finish_reason":"stop"}]}"#;
+
+    let (backend_release_tx, backend_release_rx) = oneshot::channel();
+    let (backend_addr, observed_request_rx) = spawn_controlled_chat_backend(
+        StatusCode::OK,
+        "heartbeat-backend",
+        response_body,
+        Some(backend_release_rx),
+    )
+    .await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+    let worker_id = wait_for_provider_worker_id(&core, "openai").await;
+
+    let first_request_body =
+        r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hold the worker busy"}]}"#;
+    let first_http_request = tokio::spawn(post_chat_completions(
+        proxy_addr,
+        first_request_body,
+        &[("Authorization", "Bearer client-token")],
+    ));
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+    assert_observed_openai_chat_request(
+        &observed_request,
+        Some("Bearer client-token"),
+        first_request_body,
+    );
+
+    wait_for_request_state(
+        &core,
+        "request-1",
+        RequestState::InFlight {
+            worker_id: worker_id.clone(),
+            cancellation: None,
+        },
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    wait_for_worker_reported_load(&core, &worker_id, 1).await;
+
+    {
+        let core = core.lock().await;
+        assert_eq!(core.worker_reported_load(&worker_id), Some(1));
+        assert_eq!(
+            core.worker_in_flight_request_ids(&worker_id),
+            vec!["request-1".to_string()]
+        );
+    }
+
+    let second_request_body = r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"stay queued until the heartbeat-reported load clears"}]}"#;
+    let mut second_http_request = tokio::spawn(post_chat_completions(
+        proxy_addr,
+        second_request_body,
+        &[("Authorization", "Bearer client-token")],
+    ));
+
+    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
+    wait_for_queued_request_id(&core, "openai").await;
+
+    {
+        let core = core.lock().await;
+        assert_eq!(core.worker_reported_load(&worker_id), Some(1));
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+        assert_eq!(
+            core.worker_in_flight_request_ids(&worker_id),
+            vec!["request-1".to_string()]
+        );
+    }
+
+    assert!(
+        timeout(Duration::from_millis(150), &mut second_http_request)
+            .await
+            .is_err(),
+        "the queued follow-up request should stay blocked while the heartbeat load reports the worker as full"
+    );
+
+    drop(backend_release_tx);
+
+    let first_response = timeout(Duration::from_secs(5), first_http_request)
+        .await
+        .expect("first http request completed before timeout")
+        .expect("join first http request task");
+    assert_successful_chat_completion_response(&first_response, "heartbeat-backend", response_body);
+
+    let second_response = timeout(Duration::from_secs(5), second_http_request)
+        .await
+        .expect("second http request completed before timeout")
+        .expect("join second http request task");
+    assert_successful_chat_completion_response(
+        &second_response,
+        "heartbeat-backend",
+        response_body,
+    );
+
+    daemon_handle.abort();
 }
