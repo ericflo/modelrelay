@@ -22,6 +22,8 @@ use crate::{
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
+const MAX_STREAM_RESPONSE_BYTES: usize = 64 * 1024;
+const OVERSIZED_STREAM_ERROR_SSE: &str = "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":\"stream exceeded size limit\"}}\n\n";
 
 #[derive(Clone)]
 pub struct ProxyHttpApp {
@@ -262,18 +264,51 @@ fn streaming_http_response(
     cancellation_guard: HttpRequestCancellationGuard,
 ) -> Response {
     let stream = stream::unfold(
-        (Some(first_chunk), pending.event_rx, cancellation_guard),
-        |(next_chunk, mut event_rx, mut cancellation_guard)| async move {
+        (
+            Some(first_chunk),
+            pending.event_rx,
+            cancellation_guard,
+            0_usize,
+            false,
+        ),
+        |(next_chunk, mut event_rx, mut cancellation_guard, streamed_bytes, terminated)| async move {
+            if terminated {
+                return None;
+            }
+
             if let Some(chunk) = next_chunk {
+                let next_total = streamed_bytes.saturating_add(chunk.len());
+                if next_total > MAX_STREAM_RESPONSE_BYTES {
+                    cancellation_guard.disarm();
+                    return Some((
+                        Ok::<_, std::convert::Infallible>(Bytes::from_static(
+                            OVERSIZED_STREAM_ERROR_SSE.as_bytes(),
+                        )),
+                        (None, event_rx, cancellation_guard, streamed_bytes, true),
+                    ));
+                }
+
                 return Some((
                     Ok::<_, std::convert::Infallible>(Bytes::from(chunk)),
-                    (None, event_rx, cancellation_guard),
+                    (None, event_rx, cancellation_guard, next_total, false),
                 ));
             }
 
             match event_rx.recv().await {
                 Some(HttpResponseEvent::Chunk(chunk)) => {
-                    Some((Ok(Bytes::from(chunk)), (None, event_rx, cancellation_guard)))
+                    let next_total = streamed_bytes.saturating_add(chunk.len());
+                    if next_total > MAX_STREAM_RESPONSE_BYTES {
+                        cancellation_guard.disarm();
+                        Some((
+                            Ok(Bytes::from_static(OVERSIZED_STREAM_ERROR_SSE.as_bytes())),
+                            (None, event_rx, cancellation_guard, streamed_bytes, true),
+                        ))
+                    } else {
+                        Some((
+                            Ok(Bytes::from(chunk)),
+                            (None, event_rx, cancellation_guard, next_total, false),
+                        ))
+                    }
                 }
                 Some(HttpResponseEvent::Complete(_) | HttpResponseEvent::Failure(_)) => {
                     cancellation_guard.disarm();
