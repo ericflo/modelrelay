@@ -377,6 +377,11 @@ impl ProxyServerCore {
     }
 
     #[must_use]
+    pub fn has_worker(&self, worker_id: &str) -> bool {
+        self.workers.contains_key(worker_id)
+    }
+
+    #[must_use]
     pub fn request_state(&self, request_id: &str) -> Option<RequestState> {
         match self.active_requests.get(request_id)? {
             ActiveRequestState::Queued { .. } => Some(RequestState::Queued),

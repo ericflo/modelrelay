@@ -11,8 +11,9 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    CancelMessage, CancelReason as ProtocolCancelReason, HeaderMap, RegisterMessage,
-    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason as ProtocolCancelReason, HeaderMap, ModelsUpdateMessage,
+    RegisterMessage, ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage,
+    WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -68,12 +69,21 @@ async fn next_server_message(socket: &mut TestSocket, context: &str) -> ServerTo
 }
 
 async fn register_test_worker(socket: &mut TestSocket) -> worker_protocol::RegisterAck {
+    register_test_worker_with(socket, vec!["llama-3.1-70b".to_string()], 1, Some(0)).await
+}
+
+async fn register_test_worker_with(
+    socket: &mut TestSocket,
+    models: Vec<String>,
+    max_concurrent: u32,
+    current_load: Option<u32>,
+) -> worker_protocol::RegisterAck {
     let register = WorkerToServerMessage::Register(RegisterMessage {
         worker_name: "gpu-box-a".to_string(),
-        models: vec!["llama-3.1-70b".to_string()],
-        max_concurrent: 1,
+        models,
+        max_concurrent,
         protocol_version: Some("2026-04-bridge-v1".to_string()),
-        current_load: Some(0),
+        current_load,
     });
     let register_payload = serde_json::to_string(&register).expect("serialize register");
 
@@ -364,6 +374,82 @@ async fn registered_worker_receives_request_and_response_complete_dispatches_nex
     assert_eq!(
         core.worker_in_flight_request_ids("worker-1"),
         vec!["request-2".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn worker_models_update_dispatches_newly_compatible_queued_request_without_reconnect() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack =
+        register_test_worker_with(&mut socket, vec!["llama-3.1-70b".to_string()], 1, Some(1)).await;
+
+    {
+        let mut core = core.lock().await;
+        assert_eq!(
+            core.submit_transport_request(
+                "openai",
+                "mistral-large",
+                "/v1/chat/completions",
+                false,
+                r#"{"model":"mistral-large","messages":[{"role":"user","content":"route after models_update"}]}"#,
+                HeaderMap::new(),
+            ),
+            SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+                request_id: "request-1".to_string(),
+                queue_len: 1,
+            })
+        );
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-1".to_string()]
+        );
+        assert_eq!(
+            core.worker_in_flight_request_ids(&ack.worker_id),
+            Vec::<String>::new()
+        );
+    }
+
+    let models_update = WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
+        models: vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()],
+        current_load: 0,
+    });
+    let update_payload = serde_json::to_string(&models_update).expect("serialize models_update");
+    socket
+        .send(Message::Text(update_payload.into()))
+        .await
+        .expect("send models_update");
+
+    assert_eq!(
+        next_server_message(&mut socket, "queued request after models_update").await,
+        ServerToWorkerMessage::Request(worker_protocol::RequestMessage {
+            request_id: "request-1".to_string(),
+            model: "mistral-large".to_string(),
+            endpoint_path: "/v1/chat/completions".to_string(),
+            is_streaming: false,
+            body: r#"{"model":"mistral-large","messages":[{"role":"user","content":"route after models_update"}]}"#.to_string(),
+            headers: HeaderMap::new(),
+        })
+    );
+
+    let core = core.lock().await;
+    assert_eq!(
+        core.provider_models("openai"),
+        vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()]
+    );
+    assert!(core.queued_request_ids("openai").is_empty());
+    assert_eq!(
+        core.request_state("request-1"),
+        Some(RequestState::InFlight {
+            worker_id: ack.worker_id.clone(),
+            cancellation: None,
+        })
+    );
+    assert_eq!(
+        core.worker_in_flight_request_ids(&ack.worker_id),
+        vec!["request-1".to_string()]
     );
 }
 
