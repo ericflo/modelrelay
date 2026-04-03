@@ -872,6 +872,132 @@ mod tests {
     }
 
     #[test]
+    fn register_ack_warns_when_worker_name_is_truncated() {
+        let mut harness =
+            RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
+
+        let connection = harness
+            .connect(ConnectRequest::with_header_secret("openai", "top-secret"))
+            .expect("worker should authenticate");
+
+        let ack = parse_register_ack(
+            &connection
+                .exchange_text(&serialize_register_message(RegisterMessage {
+                    worker_name: "gpu-box-a-with-a-name-that-is-far-too-long".to_string(),
+                    models: vec!["llama-3.1-70b".to_string()],
+                    max_concurrent: 2,
+                    protocol_version: None,
+                }))
+                .expect("registration should succeed"),
+        );
+
+        assert_eq!(ack.worker_name, "gpu-box-a-with-a-name-that-is-fa");
+        assert_eq!(
+            ack.warnings,
+            vec!["worker_name truncated to 32 characters".to_string()]
+        );
+    }
+
+    #[test]
+    fn register_ack_warns_when_model_list_is_truncated_after_sanitization() {
+        let mut harness =
+            RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
+
+        let connection = harness
+            .connect(ConnectRequest::with_header_secret("openai", "top-secret"))
+            .expect("worker should authenticate");
+
+        let ack = parse_register_ack(
+            &connection
+                .exchange_text(&serialize_register_message(RegisterMessage {
+                    worker_name: "gpu-box-a".to_string(),
+                    models: vec![
+                        " llama-3.1-70b ".to_string(),
+                        "llama-3.1-70b".to_string(),
+                        " ".to_string(),
+                        "mistral-large".to_string(),
+                        "claude-3-7-sonnet".to_string(),
+                        "gpt-4.1-mini".to_string(),
+                        "gemini-2.5-pro".to_string(),
+                    ],
+                    max_concurrent: 2,
+                    protocol_version: None,
+                }))
+                .expect("registration should succeed"),
+        );
+
+        assert_eq!(
+            ack.models,
+            vec![
+                "llama-3.1-70b".to_string(),
+                "mistral-large".to_string(),
+                "claude-3-7-sonnet".to_string(),
+                "gpt-4.1-mini".to_string(),
+            ]
+        );
+        assert_eq!(
+            ack.warnings,
+            vec!["model list truncated to 4 entries".to_string()]
+        );
+    }
+
+    #[test]
+    fn register_ack_warns_when_sanitization_accepts_no_models() {
+        let mut harness =
+            RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
+
+        let connection = harness
+            .connect(ConnectRequest::with_header_secret("openai", "top-secret"))
+            .expect("worker should authenticate");
+
+        let ack = parse_register_ack(
+            &connection
+                .exchange_text(&serialize_register_message(RegisterMessage {
+                    worker_name: "gpu-box-a".to_string(),
+                    models: vec![
+                        " ".to_string(),
+                        String::new(),
+                        "\t".to_string(),
+                        "   ".to_string(),
+                    ],
+                    max_concurrent: 2,
+                    protocol_version: None,
+                }))
+                .expect("registration should succeed"),
+        );
+
+        assert!(ack.models.is_empty());
+        assert_eq!(
+            ack.warnings,
+            vec!["worker registered without any accepted models".to_string()]
+        );
+    }
+
+    #[test]
+    fn register_ack_clamps_zero_max_concurrent_to_one() {
+        let mut harness =
+            RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
+
+        let connection = harness
+            .connect(ConnectRequest::with_header_secret("openai", "top-secret"))
+            .expect("worker should authenticate");
+
+        let ack = parse_register_ack(
+            &connection
+                .exchange_text(&serialize_register_message(RegisterMessage {
+                    worker_name: "gpu-box-a".to_string(),
+                    models: vec!["llama-3.1-70b".to_string()],
+                    max_concurrent: 0,
+                    protocol_version: None,
+                }))
+                .expect("registration should succeed"),
+        );
+
+        assert_eq!(ack.max_concurrent, 1);
+        assert!(ack.warnings.is_empty());
+    }
+
+    #[test]
     fn legacy_query_secret_can_authenticate_but_wrong_secret_is_rejected() {
         let mut harness =
             RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
