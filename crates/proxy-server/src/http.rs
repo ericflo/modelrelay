@@ -18,7 +18,7 @@ use worker_protocol::{HeaderMap, ResponseCompleteMessage};
 
 use crate::{
     CancelReason, HttpResponseEvent, PendingHttpResponse, PendingStreamingHttpResponse,
-    ProxyServerCore, WorkerSocketApp,
+    ProxyServerCore, RequestFailureReason, WorkerSocketApp,
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
@@ -27,6 +27,7 @@ const OPENAI_MODELS_PROVIDER: &str = "openai";
 pub struct ProxyHttpApp {
     core: Arc<Mutex<ProxyServerCore>>,
     models_provider: String,
+    provider_enabled: bool,
     worker_socket_app: Option<WorkerSocketApp>,
 }
 
@@ -36,6 +37,7 @@ impl ProxyHttpApp {
         Self {
             core,
             models_provider: OPENAI_MODELS_PROVIDER.to_string(),
+            provider_enabled: true,
             worker_socket_app: None,
         }
     }
@@ -52,6 +54,12 @@ impl ProxyHttpApp {
         self
     }
 
+    #[must_use]
+    pub fn with_provider_enabled(mut self, enabled: bool) -> Self {
+        self.provider_enabled = enabled;
+        self
+    }
+
     pub fn router(self) -> Router {
         let router = Router::new()
             .route("/v1/models", get(models_handler))
@@ -61,6 +69,7 @@ impl ProxyHttpApp {
             .with_state(HttpState {
                 core: self.core,
                 models_provider: self.models_provider,
+                provider_enabled: self.provider_enabled,
             });
 
         match self.worker_socket_app {
@@ -74,6 +83,7 @@ impl ProxyHttpApp {
 struct HttpState {
     core: Arc<Mutex<ProxyServerCore>>,
     models_provider: String,
+    provider_enabled: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -149,6 +159,10 @@ async fn worker_backed_http_handler(
         return StatusCode::BAD_REQUEST.into_response();
     };
 
+    if !state.provider_enabled {
+        return availability_failure_response(RequestFailureReason::ProviderDisabled);
+    }
+
     if request.stream {
         return stream_worker_backed_http_response(
             state,
@@ -170,15 +184,19 @@ async fn worker_backed_http_handler(
             forwarded_request_headers(&headers),
         ) {
             Ok(pending) => pending,
-            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            Err(failure) => return availability_failure_response(failure.reason),
         }
     };
 
     let mut cancellation_guard = HttpRequestCancellationGuard::new(state.core.clone(), &pending);
     match pending.response_rx.await {
-        Ok(response) => {
+        Ok(Ok(response)) => {
             cancellation_guard.disarm();
             response_complete_to_http_response(response)
+        }
+        Ok(Err(reason)) => {
+            cancellation_guard.disarm();
+            availability_failure_response(reason)
         }
         Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
@@ -191,6 +209,10 @@ async fn stream_worker_backed_http_response(
     body: String,
     endpoint_path: &'static str,
 ) -> Response {
+    if !state.provider_enabled {
+        return availability_failure_response(RequestFailureReason::ProviderDisabled);
+    }
+
     let mut pending = {
         let mut core = state.core.lock().await;
         match core.submit_http_streaming_request(
@@ -201,7 +223,7 @@ async fn stream_worker_backed_http_response(
             forwarded_request_headers(&headers),
         ) {
             Ok(pending) => pending,
-            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            Err(failure) => return availability_failure_response(failure.reason),
         }
     };
 
@@ -216,6 +238,7 @@ async fn stream_worker_backed_http_response(
             guard.disarm();
             response_complete_to_http_response(response)
         }
+        Some(HttpResponseEvent::Failure(reason)) => availability_failure_response(reason),
         None => StatusCode::BAD_GATEWAY.into_response(),
     }
 }
@@ -252,7 +275,7 @@ fn streaming_http_response(
                 Some(HttpResponseEvent::Chunk(chunk)) => {
                     Some((Ok(Bytes::from(chunk)), (None, event_rx, cancellation_guard)))
                 }
-                Some(HttpResponseEvent::Complete(_)) => {
+                Some(HttpResponseEvent::Complete(_) | HttpResponseEvent::Failure(_)) => {
                     cancellation_guard.disarm();
                     None
                 }
@@ -290,6 +313,39 @@ fn response_complete_to_http_response(response: ResponseCompleteMessage) -> Resp
     }
 
     http_response
+}
+
+fn availability_failure_response(reason: RequestFailureReason) -> Response {
+    let message = match reason {
+        RequestFailureReason::QueueTimedOut => "Request timed out waiting for worker",
+        RequestFailureReason::QueueFull => "Service temporarily at capacity, please retry",
+        RequestFailureReason::NoWorkersAvailable => "No workers available to handle request",
+        RequestFailureReason::ProviderDisabled => "Provider is currently disabled",
+        RequestFailureReason::MaxRequeuesExceeded => {
+            "Request could not be processed after multiple attempts"
+        }
+        RequestFailureReason::ProviderDeleted => "Internal server error processing request",
+        RequestFailureReason::GracefulShutdownTimedOut => {
+            "Service temporarily unavailable while workers shut down"
+        }
+        RequestFailureReason::RequestAlreadyCanceled => "Request was canceled",
+    };
+
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            ),
+            (
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        format!("{message}\n"),
+    )
+        .into_response()
 }
 
 struct HttpRequestCancellationGuard {

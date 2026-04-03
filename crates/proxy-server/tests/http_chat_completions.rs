@@ -1,7 +1,10 @@
 use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
-use proxy_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
+use proxy_server::{
+    ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp,
+    WorkerSocketProviderConfig,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -21,10 +24,17 @@ type TestSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn spawn_server() -> SocketAddr {
-    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    spawn_server_with_core(Arc::new(Mutex::new(ProxyServerCore::new())), true).await
+}
+
+async fn spawn_server_with_core(
+    core: Arc<Mutex<ProxyServerCore>>,
+    provider_enabled: bool,
+) -> SocketAddr {
     let worker_socket_app = WorkerSocketApp::new(core.clone())
         .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
     let app = ProxyHttpApp::new(core)
+        .with_provider_enabled(provider_enabled)
         .with_worker_socket_app(worker_socket_app)
         .router();
 
@@ -40,6 +50,33 @@ async fn spawn_server() -> SocketAddr {
     });
 
     addr
+}
+
+async fn wait_for_request_state(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    request_id: &str,
+    expected: RequestState,
+) {
+    timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            {
+                let core = core.lock().await;
+                if core.request_state(request_id) == Some(expected.clone()) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("request {request_id} did not reach expected state"));
+}
+
+fn assert_service_unavailable(response: &str, message: &str) {
+    assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(response.contains("\r\ncontent-type: text/plain; charset=utf-8\r\n"));
+    assert!(response.contains("\r\nx-content-type-options: nosniff\r\n"));
+    assert!(response.ends_with(&format!("{message}\n")));
 }
 
 fn worker_connect_request(addr: SocketAddr, secret: &str) -> http::Request<()> {
@@ -341,4 +378,70 @@ async fn worker_backed_chat_completions_route_cancels_in_flight_request_when_htt
             reason: CancelReason::ClientDisconnect,
         })
     );
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_returns_sanitized_no_workers_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 0,
+                queue_timeout_ticks: None,
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core, true).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hello"}]}"#;
+    let response = post_chat_completions(addr, body, &[]).await;
+
+    assert_service_unavailable(&response, "No workers available to handle request");
+    assert!(
+        !response.contains("queue is full"),
+        "the client boundary should not expose the internal queue rejection"
+    );
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_returns_sanitized_queue_full_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: None,
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core.clone(), true).await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hello"}]}"#;
+    let first_request = tokio::spawn(open_chat_completions_request(addr, body, &[]));
+    let ServerToWorkerMessage::Request(_) =
+        next_server_message(&mut socket, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+
+    let second_request = tokio::spawn(open_chat_completions_request(addr, body, &[]));
+    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
+
+    let response = post_chat_completions(addr, body, &[]).await;
+    assert_service_unavailable(&response, "Service temporarily at capacity, please retry");
+    assert!(
+        !response.contains("queue is full"),
+        "the client boundary should not expose the raw queue-full reason"
+    );
+
+    first_request.abort();
+    second_request.abort();
 }

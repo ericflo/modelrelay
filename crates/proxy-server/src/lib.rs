@@ -199,9 +199,14 @@ impl ProxyServerCore {
 
         if queue.len() >= policy.max_queue_len {
             self.active_requests.remove(&request.request_id);
+            let reason = if self.provider_has_compatible_worker(&request.provider, &request.model) {
+                RequestFailureReason::QueueFull
+            } else {
+                RequestFailureReason::NoWorkersAvailable
+            };
             return SubmissionOutcome::Rejected(RequestFailure {
                 request_id: request.request_id,
-                reason: RequestFailureReason::QueueFull,
+                reason,
             });
         }
 
@@ -353,7 +358,7 @@ impl ProxyServerCore {
 
         match sender {
             PendingHttpResponseSender::Unary(sender) => {
-                let _ = sender.send(response);
+                let _ = sender.send(Ok(response));
             }
             PendingHttpResponseSender::Streaming(sender) => {
                 let _ = sender.send(HttpResponseEvent::Complete(response));
@@ -474,7 +479,10 @@ impl ProxyServerCore {
 
             for request_id in &worker.in_flight_requests {
                 self.active_requests.remove(request_id);
-                self.pending_http_response_senders.remove(request_id);
+                self.fail_pending_http_response(
+                    request_id,
+                    RequestFailureReason::GracefulShutdownTimedOut,
+                );
                 failed_requests.push(RequestFailure {
                     request_id: request_id.clone(),
                     reason: RequestFailureReason::GracefulShutdownTimedOut,
@@ -498,6 +506,7 @@ impl ProxyServerCore {
     #[must_use]
     pub fn expire_queue_timeouts(&mut self, now: Instant) -> Vec<RequestFailure> {
         let mut failures = Vec::new();
+        let mut expired_request_ids = Vec::new();
 
         for (provider, queue) in &mut self.provider_queues {
             let Some(timeout) = self
@@ -516,8 +525,7 @@ impl ProxyServerCore {
             while let Some(request) = queue.pop_front() {
                 if now.saturating_duration_since(request.queued_at) >= timeout {
                     self.active_requests.remove(&request.request_id);
-                    self.pending_http_response_senders
-                        .remove(&request.request_id);
+                    expired_request_ids.push(request.request_id.clone());
                     failures.push(RequestFailure {
                         request_id: request.request_id,
                         reason: RequestFailureReason::QueueTimedOut,
@@ -528,6 +536,10 @@ impl ProxyServerCore {
             }
 
             *queue = retained_queue;
+        }
+
+        for request_id in expired_request_ids {
+            self.fail_pending_http_response(&request_id, RequestFailureReason::QueueTimedOut);
         }
 
         failures
@@ -555,7 +567,10 @@ impl ProxyServerCore {
             };
 
             if cancellation.is_some() {
-                self.pending_http_response_senders.remove(&request_id);
+                self.fail_pending_http_response(
+                    &request_id,
+                    RequestFailureReason::RequestAlreadyCanceled,
+                );
                 failed_requests.push(RequestFailure {
                     request_id,
                     reason: RequestFailureReason::RequestAlreadyCanceled,
@@ -564,7 +579,10 @@ impl ProxyServerCore {
             }
 
             if request.requeue_count >= MAX_REQUEUE_COUNT {
-                self.pending_http_response_senders.remove(&request_id);
+                self.fail_pending_http_response(
+                    &request_id,
+                    RequestFailureReason::MaxRequeuesExceeded,
+                );
                 failed_requests.push(RequestFailure {
                     request_id,
                     reason: RequestFailureReason::MaxRequeuesExceeded,
@@ -831,6 +849,31 @@ impl ProxyServerCore {
         })
     }
 
+    fn provider_has_compatible_worker(&self, provider: &str, model: &str) -> bool {
+        self.workers.values().any(|worker| {
+            worker.provider == provider
+                && !worker.is_draining
+                && worker.models.iter().any(|supported| supported == model)
+        })
+    }
+
+    fn fail_pending_http_response(
+        &mut self,
+        request_id: &str,
+        reason: RequestFailureReason,
+    ) -> bool {
+        let Some(sender) = self.pending_http_response_senders.remove(request_id) else {
+            return false;
+        };
+
+        match sender {
+            PendingHttpResponseSender::Unary(sender) => sender.send(Err(reason)).is_ok(),
+            PendingHttpResponseSender::Streaming(sender) => {
+                sender.send(HttpResponseEvent::Failure(reason)).is_ok()
+            }
+        }
+    }
+
     fn remove_worker(&mut self, worker_id: &str) -> Option<WorkerState> {
         let worker = self.workers.remove(worker_id)?;
         self.worker_order
@@ -875,7 +918,7 @@ pub enum SubmissionOutcome {
 #[derive(Debug)]
 pub struct PendingHttpResponse {
     pub request_id: String,
-    pub response_rx: oneshot::Receiver<ResponseCompleteMessage>,
+    pub response_rx: oneshot::Receiver<Result<ResponseCompleteMessage, RequestFailureReason>>,
 }
 
 #[derive(Debug)]
@@ -888,11 +931,12 @@ pub struct PendingStreamingHttpResponse {
 pub enum HttpResponseEvent {
     Chunk(String),
     Complete(ResponseCompleteMessage),
+    Failure(RequestFailureReason),
 }
 
 #[derive(Debug)]
 enum PendingHttpResponseSender {
-    Unary(oneshot::Sender<ResponseCompleteMessage>),
+    Unary(oneshot::Sender<Result<ResponseCompleteMessage, RequestFailureReason>>),
     Streaming(mpsc::UnboundedSender<HttpResponseEvent>),
 }
 
@@ -973,6 +1017,9 @@ pub enum RequestFailureReason {
     MaxRequeuesExceeded,
     QueueTimedOut,
     QueueFull,
+    NoWorkersAvailable,
+    ProviderDisabled,
+    ProviderDeleted,
     GracefulShutdownTimedOut,
 }
 
