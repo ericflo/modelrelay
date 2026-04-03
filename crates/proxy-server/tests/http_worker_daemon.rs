@@ -1035,6 +1035,171 @@ async fn worker_daemon_requeues_live_request_after_first_daemon_disconnect() {
     replacement_daemon_handle.abort();
 }
 
+async fn wait_for_worker_count(core: &Arc<Mutex<ProxyServerCore>>, provider: &str, count: usize) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let current = {
+                let core = core.lock().await;
+                core.worker_ids_for_provider(provider).len()
+            };
+            if current >= count {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("provider {provider} never reached {count} registered workers"));
+}
+
+#[tokio::test]
+#[allow(clippy::similar_names, clippy::too_many_lines)]
+async fn two_worker_daemons_receive_concurrent_requests_via_load_balanced_routing() {
+    let (proxy_addr, core) = spawn_proxy_server("openai").await;
+
+    // Backend A: holds the request until released
+    let (backend_a_gate_tx, backend_a_gate_rx) = oneshot::channel::<()>();
+    let (backend_a_addr, backend_a_observed_rx) = spawn_controlled_chat_backend(
+        StatusCode::OK,
+        "worker-a-backend",
+        r#"{"id":"chatcmpl-a","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"response from worker a"},"finish_reason":"stop"}]}"#,
+        Some(backend_a_gate_rx),
+    )
+    .await;
+
+    // Backend B: holds the request until released
+    let (backend_b_gate_tx, backend_b_gate_rx) = oneshot::channel::<()>();
+    let (backend_b_addr, backend_b_observed_rx) = spawn_controlled_chat_backend(
+        StatusCode::OK,
+        "worker-b-backend",
+        r#"{"id":"chatcmpl-b","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"response from worker b"},"finish_reason":"stop"}]}"#,
+        Some(backend_b_gate_rx),
+    )
+    .await;
+
+    // Start both worker daemons, each with capacity=1 pointing to its own backend
+    let daemon_a = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_a_addr}"),
+    });
+    let daemon_a_handle = tokio::spawn(async move { daemon_a.run().await });
+
+    let daemon_b = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-b".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_b_addr}"),
+    });
+    let daemon_b_handle = tokio::spawn(async move { daemon_b.run().await });
+
+    // Wait until both workers have registered their model with the proxy
+    wait_for_worker_count(&core, "openai", 2).await;
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    // Send two concurrent requests; both workers have capacity so neither should queue
+    let request_body_1 =
+        r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"request for worker a"}]}"#;
+    let request_body_2 =
+        r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"request for worker b"}]}"#;
+
+    let http_request_1 = tokio::spawn(post_chat_completions(
+        proxy_addr,
+        request_body_1,
+        &[("Authorization", "Bearer client-token")],
+    ));
+    let http_request_2 = tokio::spawn(post_chat_completions(
+        proxy_addr,
+        request_body_2,
+        &[("Authorization", "Bearer client-token")],
+    ));
+
+    // Both backends must each receive exactly one request
+    let observed_a = timeout(Duration::from_secs(5), backend_a_observed_rx)
+        .await
+        .expect("backend A observed its request before timeout")
+        .expect("backend A observed request channel intact");
+    let observed_b = timeout(Duration::from_secs(5), backend_b_observed_rx)
+        .await
+        .expect("backend B observed its request before timeout")
+        .expect("backend B observed request channel intact");
+
+    assert_eq!(observed_a.path, "/v1/chat/completions");
+    assert_eq!(observed_b.path, "/v1/chat/completions");
+
+    // Verify the proxy routed one request in-flight to each worker
+    let worker_ids = {
+        let core = core.lock().await;
+        core.worker_ids_for_provider("openai")
+    };
+    assert_eq!(
+        worker_ids.len(),
+        2,
+        "expected exactly two workers registered"
+    );
+    {
+        let core = core.lock().await;
+        let in_flight_a = core.worker_in_flight_request_ids(&worker_ids[0]);
+        let in_flight_b = core.worker_in_flight_request_ids(&worker_ids[1]);
+        assert_eq!(
+            in_flight_a.len() + in_flight_b.len(),
+            2,
+            "both requests must be in-flight across the two workers"
+        );
+        assert!(
+            in_flight_a.len() <= 1 && in_flight_b.len() <= 1,
+            "each worker must hold at most one request (capacity=1): worker-a={in_flight_a:?}, worker-b={in_flight_b:?}"
+        );
+        assert_eq!(
+            core.queued_request_ids("openai").len(),
+            0,
+            "no requests should be queued when both workers have capacity"
+        );
+    }
+
+    // Release both backends and collect the HTTP responses
+    let _ = backend_a_gate_tx.send(());
+    let _ = backend_b_gate_tx.send(());
+
+    let response_1 = timeout(Duration::from_secs(5), http_request_1)
+        .await
+        .expect("first HTTP request completed before timeout")
+        .expect("join first HTTP request task");
+    let response_2 = timeout(Duration::from_secs(5), http_request_2)
+        .await
+        .expect("second HTTP request completed before timeout")
+        .expect("join second HTTP request task");
+
+    assert!(
+        response_1.starts_with("HTTP/1.1 200 OK\r\n"),
+        "first response should be 200: {response_1}"
+    );
+    assert!(
+        response_2.starts_with("HTTP/1.1 200 OK\r\n"),
+        "second response should be 200: {response_2}"
+    );
+
+    // The two responses must come from different backends (load-balanced)
+    let trace_a_in_1 = response_1.contains("\r\nx-backend-trace: worker-a-backend\r\n");
+    let trace_b_in_1 = response_1.contains("\r\nx-backend-trace: worker-b-backend\r\n");
+    let trace_a_in_2 = response_2.contains("\r\nx-backend-trace: worker-a-backend\r\n");
+    let trace_b_in_2 = response_2.contains("\r\nx-backend-trace: worker-b-backend\r\n");
+    assert!(
+        (trace_a_in_1 && trace_b_in_2) || (trace_b_in_1 && trace_a_in_2),
+        "the two responses must come from different backends (load balanced); response_1 traces: a={trace_a_in_1} b={trace_b_in_1}, response_2 traces: a={trace_a_in_2} b={trace_b_in_2}"
+    );
+
+    daemon_a_handle.abort();
+    daemon_b_handle.abort();
+}
+
 #[tokio::test]
 async fn worker_daemon_reports_live_in_flight_load_in_heartbeat_pongs() {
     let (proxy_addr, core) = spawn_proxy_server("openai").await;
