@@ -14,5 +14,10 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 worker-protocol.workspace = true
 
+[dev-dependencies]
+axum.workspace = true
+proxy-server = { path = "../proxy-server" }
+serde_json.workspace = true
+
 [lints]
 workspace = true
