@@ -11,6 +11,8 @@ pub struct ProxyServerCore {
     provider_queues: HashMap<String, VecDeque<RequestRecord>>,
     provider_queue_policies: HashMap<String, ProviderQueuePolicy>,
     selection_cursors: HashMap<SelectionKey, usize>,
+    active_requests: HashMap<String, ActiveRequestState>,
+    worker_cancel_signals: Vec<WorkerCancelSignal>,
 }
 
 impl ProxyServerCore {
@@ -102,9 +104,15 @@ impl ProxyServerCore {
             model: model.into(),
         };
         self.next_request_id += 1;
+        self.active_requests.insert(
+            request.request_id.clone(),
+            ActiveRequestState::Queued {
+                request: request.clone(),
+            },
+        );
 
         if let Some(worker_id) = self.find_eligible_worker_id(&request.provider, &request.model) {
-            self.assign_to_worker(&worker_id, &request.request_id);
+            self.assign_to_worker(&worker_id, request.clone());
             return SubmissionOutcome::Dispatched(DispatchAssignment {
                 request_id: request.request_id,
                 worker_id,
@@ -122,6 +130,7 @@ impl ProxyServerCore {
             .unwrap_or_default();
 
         if queue.len() >= policy.max_queue_len {
+            self.active_requests.remove(&request.request_id);
             return SubmissionOutcome::Rejected(RequestFailure {
                 request_id: request.request_id,
                 reason: RequestFailureReason::QueueFull,
@@ -147,8 +156,55 @@ impl ProxyServerCore {
             .position(|active_request_id| active_request_id == request_id)?;
         worker.in_flight_requests.remove(position);
         worker.reported_load = worker.reported_load.saturating_sub(1);
+        self.active_requests.remove(request_id);
 
         self.dispatch_next_compatible(worker_id)
+    }
+
+    pub fn cancel_request(
+        &mut self,
+        request_id: &str,
+        reason: CancelReason,
+    ) -> Option<CancellationOutcome> {
+        match self.active_requests.get(request_id)?.clone() {
+            ActiveRequestState::Queued { request } => {
+                let queue = self.provider_queues.get_mut(&request.provider)?;
+                let index = queue
+                    .iter()
+                    .position(|queued_request| queued_request.request_id == request_id)?;
+                queue.remove(index)?;
+                self.active_requests.remove(request_id);
+
+                Some(CancellationOutcome::RemovedFromQueue {
+                    request_id: request_id.to_string(),
+                })
+            }
+            ActiveRequestState::InFlight {
+                worker_id,
+                cancellation,
+                ..
+            } => {
+                let effective_reason = cancellation.unwrap_or(reason);
+                if cancellation.is_none() {
+                    if let Some(ActiveRequestState::InFlight { cancellation, .. }) =
+                        self.active_requests.get_mut(request_id)
+                    {
+                        *cancellation = Some(reason);
+                    }
+                    self.worker_cancel_signals.push(WorkerCancelSignal {
+                        worker_id: worker_id.clone(),
+                        request_id: request_id.to_string(),
+                        reason,
+                    });
+                }
+
+                Some(CancellationOutcome::WorkerCancelSent(WorkerCancelSignal {
+                    worker_id,
+                    request_id: request_id.to_string(),
+                    reason: effective_reason,
+                }))
+            }
+        }
     }
 
     #[must_use]
@@ -182,6 +238,26 @@ impl ProxyServerCore {
             .unwrap_or_default()
     }
 
+    #[must_use]
+    pub fn request_state(&self, request_id: &str) -> Option<RequestState> {
+        match self.active_requests.get(request_id)? {
+            ActiveRequestState::Queued { .. } => Some(RequestState::Queued),
+            ActiveRequestState::InFlight {
+                worker_id,
+                cancellation,
+                ..
+            } => Some(RequestState::InFlight {
+                worker_id: worker_id.clone(),
+                cancellation: *cancellation,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn worker_cancel_signals(&self) -> Vec<WorkerCancelSignal> {
+        self.worker_cancel_signals.clone()
+    }
+
     fn dispatch_next_compatible(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
         let (provider, models) = {
             let worker = self.workers.get(worker_id)?;
@@ -198,7 +274,7 @@ impl ProxyServerCore {
             .position(|request| models.iter().any(|model| model == &request.model))?;
         let request = queue.remove(queue_index)?;
 
-        self.assign_to_worker(worker_id, &request.request_id);
+        self.assign_to_worker(worker_id, request.clone());
         Some(DispatchAssignment {
             request_id: request.request_id,
             worker_id: worker_id.to_string(),
@@ -246,11 +322,19 @@ impl ProxyServerCore {
         Some(worker_id)
     }
 
-    fn assign_to_worker(&mut self, worker_id: &str, request_id: &str) {
+    fn assign_to_worker(&mut self, worker_id: &str, request: RequestRecord) {
         if let Some(worker) = self.workers.get_mut(worker_id) {
-            worker.in_flight_requests.push(request_id.to_string());
+            worker.in_flight_requests.push(request.request_id.clone());
             worker.reported_load = worker.reported_load.saturating_add(1);
         }
+        self.active_requests.insert(
+            request.request_id.clone(),
+            ActiveRequestState::InFlight {
+                request,
+                worker_id: worker_id.to_string(),
+                cancellation: None,
+            },
+        );
     }
 
     fn worker_has_capacity(&self, worker_id: &str) -> bool {
@@ -298,6 +382,34 @@ pub struct QueuedAssignment {
     pub queue_len: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelReason {
+    ClientDisconnected,
+    RequestTimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancellationOutcome {
+    RemovedFromQueue { request_id: String },
+    WorkerCancelSent(WorkerCancelSignal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerCancelSignal {
+    pub worker_id: String,
+    pub request_id: String,
+    pub reason: CancelReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestState {
+    Queued,
+    InFlight {
+        worker_id: String,
+        cancellation: Option<CancelReason>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestFailure {
     pub request_id: String,
@@ -330,6 +442,18 @@ struct RequestRecord {
     request_id: String,
     provider: String,
     model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActiveRequestState {
+    Queued {
+        request: RequestRecord,
+    },
+    InFlight {
+        request: RequestRecord,
+        worker_id: String,
+        cancellation: Option<CancelReason>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -381,8 +505,9 @@ fn registration_warnings(worker_name: &str, sanitized_models: &[String]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        DispatchAssignment, ProviderQueuePolicy, ProxyServerCore, QueuedAssignment, RequestFailure,
-        RequestFailureReason, SubmissionOutcome,
+        CancelReason, CancellationOutcome, DispatchAssignment, ProviderQueuePolicy,
+        ProxyServerCore, QueuedAssignment, RequestFailure, RequestFailureReason, RequestState,
+        SubmissionOutcome, WorkerCancelSignal,
     };
     use worker_protocol::{ModelsUpdateMessage, RegisterMessage};
 
@@ -631,6 +756,109 @@ mod tests {
         assert_eq!(
             core.queued_request_ids("openai"),
             vec!["request-5".to_string()]
+        );
+    }
+
+    #[test]
+    fn canceling_queued_request_removes_it_before_dispatch() {
+        let mut core = ProxyServerCore::new();
+        let worker_id = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert!(matches!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(_)
+        ));
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        assert_eq!(
+            core.cancel_request("request-2", CancelReason::ClientDisconnected),
+            Some(CancellationOutcome::RemovedFromQueue {
+                request_id: "request-2".to_string(),
+            })
+        );
+        assert!(core.queued_request_ids("openai").is_empty());
+        assert_eq!(core.request_state("request-2"), None);
+        assert_eq!(core.finish_request(&worker_id, "request-1"), None);
+        assert!(core.worker_in_flight_request_ids(&worker_id).is_empty());
+    }
+
+    #[test]
+    fn canceling_in_flight_request_records_worker_signal_until_finish() {
+        let mut core = ProxyServerCore::new();
+        let worker_id = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: worker_id.clone(),
+            })
+        );
+        assert_eq!(
+            core.request_state("request-1"),
+            Some(RequestState::InFlight {
+                worker_id: worker_id.clone(),
+                cancellation: None,
+            })
+        );
+        assert_eq!(
+            core.cancel_request("request-1", CancelReason::ClientDisconnected),
+            Some(CancellationOutcome::WorkerCancelSent(WorkerCancelSignal {
+                worker_id: worker_id.clone(),
+                request_id: "request-1".to_string(),
+                reason: CancelReason::ClientDisconnected,
+            }))
+        );
+        assert_eq!(
+            core.request_state("request-1"),
+            Some(RequestState::InFlight {
+                worker_id: worker_id.clone(),
+                cancellation: Some(CancelReason::ClientDisconnected),
+            })
+        );
+        assert_eq!(
+            core.worker_cancel_signals(),
+            vec![WorkerCancelSignal {
+                worker_id: worker_id.clone(),
+                request_id: "request-1".to_string(),
+                reason: CancelReason::ClientDisconnected,
+            }]
+        );
+
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+        assert_eq!(
+            core.finish_request(&worker_id, "request-1"),
+            Some(DispatchAssignment {
+                request_id: "request-2".to_string(),
+                worker_id: worker_id.clone(),
+            })
+        );
+        assert_eq!(core.request_state("request-1"), None);
+        assert_eq!(
+            core.worker_in_flight_request_ids(&worker_id),
+            vec!["request-2".to_string()]
         );
     }
 }
