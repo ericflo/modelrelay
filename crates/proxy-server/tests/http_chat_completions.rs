@@ -9,7 +9,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Mutex,
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tokio_tungstenite::{
     connect_async,
@@ -109,6 +109,22 @@ async fn next_server_message(socket: &mut TestSocket, context: &str) -> ServerTo
 
         return server_message;
     }
+}
+
+async fn next_close_frame(
+    socket: &mut TestSocket,
+    context: &str,
+) -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    let message = timeout(std::time::Duration::from_secs(2), socket.next())
+        .await
+        .unwrap_or_else(|_| panic!("receive {context} before timeout"))
+        .expect("socket message")
+        .expect("websocket message");
+    let Message::Close(Some(close_frame)) = message else {
+        panic!("expected close frame for {context}");
+    };
+
+    close_frame.clone()
 }
 
 async fn register_test_worker(socket: &mut TestSocket) {
@@ -900,6 +916,68 @@ async fn worker_backed_chat_completions_route_returns_sanitized_provider_deleted
     );
 
     assert_worker_socket_closes(&mut socket).await;
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_recovers_after_worker_auth_rate_limit_window_expires()
+{
+    let addr = spawn_server().await;
+
+    for _ in 0..3 {
+        let (mut socket, _) = connect_async(worker_connect_request(addr, "wrong-secret"))
+            .await
+            .expect("connect websocket");
+        let close_frame = next_close_frame(&mut socket, "bad secret rejection").await;
+        assert_eq!(u16::from(close_frame.code), 1008);
+        assert_eq!(close_frame.reason, "worker authentication failed");
+    }
+
+    let (mut throttled_socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let close_frame = next_close_frame(&mut throttled_socket, "auth rate limit rejection").await;
+    assert_eq!(u16::from(close_frame.code), 1008);
+    assert_eq!(
+        close_frame.reason,
+        "worker authentication temporarily rate limited"
+    );
+
+    sleep(std::time::Duration::from_millis(300)).await;
+
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"auth cooldown expired"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
+
+    let ServerToWorkerMessage::Request(request) =
+        next_server_message(&mut socket, "chat completions request after auth cooldown").await
+    else {
+        panic!("expected request message");
+    };
+    assert_eq!(request.endpoint_path, "/v1/chat/completions");
+    assert_eq!(request.body, body);
+    assert_eq!(
+        request.headers,
+        HeaderMap::from([("content-type".to_string(), "application/json".to_string()),])
+    );
+
+    send_response_complete(
+        &mut socket,
+        &request.request_id,
+        "gpu-box-a",
+        r#"{"id":"chatcmpl-auth-expiry","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"worker re-authenticated"},"finish_reason":"stop"}]}"#,
+    )
+    .await;
+
+    let response = http_request.await.expect("join http request");
+    assert_chat_completion_response(
+        &response,
+        "gpu-box-a",
+        r#"{"id":"chatcmpl-auth-expiry","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"worker re-authenticated"},"finish_reason":"stop"}]}"#,
+    );
 }
 
 #[tokio::test]
