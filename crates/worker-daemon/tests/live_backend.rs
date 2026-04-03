@@ -1400,6 +1400,78 @@ async fn worker_daemon_disconnects_promptly_when_graceful_shutdown_arrives_while
 }
 
 #[tokio::test]
+async fn worker_daemon_disconnects_in_flight_backend_request_when_proxy_graceful_shutdown_times_out()
+ {
+    let (proxy_addr, core) = spawn_proxy_server("openai").await;
+    let (backend_addr, observed_request_rx, cancelled_rx) = spawn_slow_cancellation_backend().await;
+
+    let daemon_handle = spawn_openai_daemon(proxy_addr, "gpu-box-a", backend_addr);
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+    let worker_id = wait_for_worker_id(&core, "openai").await;
+
+    let request_body =
+        json!({"model": "gpt-4.1-mini", "input": "hang until drain timeout"}).to_string();
+    let response_task = tokio::spawn({
+        let request_body = request_body.clone();
+        async move {
+            post_responses(
+                proxy_addr,
+                &request_body,
+                &[
+                    ("Authorization", "Bearer test-openai-key"),
+                    ("OpenAI-Beta", "responses=v1"),
+                ],
+            )
+            .await
+        }
+    });
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+    assert_openai_responses_request(&observed_request, "Bearer test-openai-key", &request_body);
+
+    {
+        let mut core = core.lock().await;
+        let signals =
+            core.begin_graceful_shutdown(Some("proxy server draining"), Duration::from_millis(50));
+        assert_eq!(signals.len(), 1);
+        assert!(core.worker_is_draining(&worker_id));
+    }
+
+    timeout(Duration::from_secs(2), daemon_handle)
+        .await
+        .expect("drain-timeout daemon exited before timeout")
+        .expect("join drain-timeout daemon task")
+        .expect("drain-timeout daemon exited cleanly");
+    wait_for_worker_disconnect(&core, &worker_id).await;
+    wait_for_models_catalog(proxy_addr, &[]).await;
+
+    timeout(Duration::from_secs(2), cancelled_rx)
+        .await
+        .expect("backend cancellation before timeout")
+        .expect("backend cancellation result")
+        .expect("backend request was canceled");
+
+    let response = timeout(Duration::from_secs(2), response_task)
+        .await
+        .expect("proxy client request completed before timeout")
+        .expect("join proxy client request");
+    assert!(
+        !response.is_empty(),
+        "client path should fail with a terminal HTTP response instead of hanging"
+    );
+
+    {
+        let core = core.lock().await;
+        assert_eq!(core.request_state("request-1"), None);
+        assert!(core.queued_request_ids("openai").is_empty());
+    }
+}
+
+#[tokio::test]
 async fn worker_daemon_recovers_after_worker_auth_rate_limit_window_expires() {
     let (proxy_addr, _) = spawn_proxy_server("openai").await;
     let (backend_addr, observed_request_rx, _) = spawn_mock_backend().await;
