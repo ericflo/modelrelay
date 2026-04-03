@@ -344,27 +344,35 @@ async fn queue_cancel_test_requests(
     );
 }
 
-async fn cancel_in_flight_request(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+async fn cancel_in_flight_request(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    worker_id: &str,
+    reason: ProxyCancelReason,
+) {
     let mut core = core.lock().await;
     assert_eq!(
-        core.cancel_request("request-1", ProxyCancelReason::ClientDisconnected),
+        core.cancel_request("request-1", reason),
         Some(proxy_server::CancellationOutcome::WorkerCancelSent(
             proxy_server::WorkerCancelSignal {
                 worker_id: worker_id.to_string(),
                 request_id: "request-1".to_string(),
-                reason: ProxyCancelReason::ClientDisconnected,
+                reason,
             }
         ))
     );
 }
 
-async fn assert_canceled_request_state(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+async fn assert_canceled_request_state(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    worker_id: &str,
+    reason: ProxyCancelReason,
+) {
     let core = core.lock().await;
     assert_eq!(
         core.request_state("request-1"),
         Some(RequestState::InFlight {
             worker_id: worker_id.to_string(),
-            cancellation: Some(ProxyCancelReason::ClientDisconnected),
+            cancellation: Some(reason),
         })
     );
     assert_eq!(
@@ -835,8 +843,9 @@ async fn canceling_in_flight_request_emits_single_worker_cancel_until_response_c
         )
     );
 
-    cancel_in_flight_request(&core, &ack.worker_id).await;
-    assert_canceled_request_state(&core, &ack.worker_id).await;
+    cancel_in_flight_request(&core, &ack.worker_id, ProxyCancelReason::ClientDisconnected).await;
+    assert_canceled_request_state(&core, &ack.worker_id, ProxyCancelReason::ClientDisconnected)
+        .await;
 
     assert_eq!(
         next_server_message(&mut socket, "worker cancel").await,
@@ -848,11 +857,70 @@ async fn canceling_in_flight_request_emits_single_worker_cancel_until_response_c
 
     assert_no_non_heartbeat_message(&mut socket, std::time::Duration::from_millis(150)).await;
 
-    assert_canceled_request_state(&core, &ack.worker_id).await;
+    assert_canceled_request_state(&core, &ack.worker_id, ProxyCancelReason::ClientDisconnected)
+        .await;
 
     send_response_complete(&mut socket, "request-1").await;
     assert_eq!(
         next_server_message(&mut socket, "post-cancel queued dispatch").await,
+        expected_request_message(
+            "request-2",
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after cancel"}]}"#,
+            second_headers,
+        )
+    );
+
+    let core = core.lock().await;
+    assert_eq!(core.request_state("request-1"), None);
+    assert_eq!(
+        core.request_state("request-2"),
+        Some(RequestState::InFlight {
+            worker_id: ack.worker_id,
+            cancellation: None,
+        })
+    );
+}
+
+#[tokio::test]
+async fn timing_out_in_flight_request_emits_single_worker_cancel_until_response_complete() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack = register_test_worker(&mut socket).await;
+
+    let second_headers =
+        HeaderMap::from([("x-trace-id".to_string(), "trace-after-timeout".to_string())]);
+
+    queue_cancel_test_requests(&core, &ack.worker_id, &second_headers).await;
+
+    assert_eq!(
+        next_server_message(&mut socket, "initial dispatched request").await,
+        expected_request_message(
+            "request-1",
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"cancel me"}]}"#,
+            HeaderMap::new(),
+        )
+    );
+
+    cancel_in_flight_request(&core, &ack.worker_id, ProxyCancelReason::RequestTimedOut).await;
+    assert_canceled_request_state(&core, &ack.worker_id, ProxyCancelReason::RequestTimedOut).await;
+
+    assert_eq!(
+        next_server_message(&mut socket, "worker timeout cancel").await,
+        ServerToWorkerMessage::Cancel(CancelMessage {
+            request_id: "request-1".to_string(),
+            reason: ProtocolCancelReason::Timeout,
+        })
+    );
+
+    assert_no_non_heartbeat_message(&mut socket, std::time::Duration::from_millis(150)).await;
+
+    assert_canceled_request_state(&core, &ack.worker_id, ProxyCancelReason::RequestTimedOut).await;
+
+    send_response_complete(&mut socket, "request-1").await;
+    assert_eq!(
+        next_server_message(&mut socket, "post-timeout queued dispatch").await,
         expected_request_message(
             "request-2",
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after cancel"}]}"#,
