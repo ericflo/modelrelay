@@ -1373,6 +1373,33 @@ async fn worker_daemon_drains_in_flight_request_before_replacement_receives_queu
 }
 
 #[tokio::test]
+async fn worker_daemon_disconnects_promptly_when_graceful_shutdown_arrives_while_idle() {
+    let (proxy_addr, core) = spawn_proxy_server("openai").await;
+    let (backend_addr, _observed_request_rx, _) = spawn_mock_backend().await;
+
+    let daemon_handle = spawn_openai_daemon(proxy_addr, "gpu-box-a", backend_addr);
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+    let worker_id = wait_for_worker_id(&core, "openai").await;
+
+    {
+        let core = core.lock().await;
+        assert!(core.worker_in_flight_request_ids(&worker_id).is_empty());
+        assert_eq!(core.queued_request_ids("openai"), Vec::<String>::new());
+    }
+
+    begin_graceful_shutdown(&core, &worker_id).await;
+
+    timeout(Duration::from_secs(2), daemon_handle)
+        .await
+        .expect("idle daemon exited before timeout")
+        .expect("join idle daemon task")
+        .expect("idle daemon exited cleanly");
+    wait_for_worker_disconnect(&core, &worker_id).await;
+    wait_for_models_catalog(proxy_addr, &[]).await;
+}
+
+#[tokio::test]
 async fn worker_daemon_recovers_after_worker_auth_rate_limit_window_expires() {
     let (proxy_addr, _) = spawn_proxy_server("openai").await;
     let (backend_addr, observed_request_rx, _) = spawn_mock_backend().await;
