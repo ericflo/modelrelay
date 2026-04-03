@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::{Body, Bytes},
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{self, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -17,7 +17,11 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{Mutex, oneshot},
-    time::{Duration, timeout},
+    time::{Duration, sleep, timeout},
+};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_daemon::{WorkerDaemon, WorkerDaemonConfig};
 
@@ -274,6 +278,31 @@ async fn wait_for_registered_model(addr: SocketAddr, expected_model: &str) {
     })
     .await
     .unwrap_or_else(|_| panic!("model {expected_model} was not registered"));
+}
+
+async fn assert_model_not_registered_for(
+    addr: SocketAddr,
+    unexpected_model: &str,
+    duration: Duration,
+) {
+    timeout(duration, async {
+        loop {
+            let (_, body) = get_models(addr).await;
+            let models = body["data"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .filter_map(|entry| entry["id"].as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                !models.contains(&unexpected_model),
+                "model {unexpected_model} unexpectedly registered during cooldown"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect_err("model absence probe should run until timeout");
 }
 
 async fn wait_for_models_catalog(addr: SocketAddr, expected_models: &[&str]) {
@@ -725,6 +754,44 @@ async fn wait_for_worker_disconnect(core: &Arc<Mutex<ProxyServerCore>>, worker_i
     })
     .await
     .unwrap_or_else(|_| panic!("worker {worker_id} did not disconnect before timeout"));
+}
+
+fn worker_connect_request(addr: SocketAddr, secret: &str) -> http::Request<()> {
+    let mut request = format!("ws://{addr}/v1/worker/connect?provider=openai")
+        .into_client_request()
+        .expect("build websocket request");
+    request.headers_mut().insert(
+        "x-worker-secret",
+        secret.parse().expect("parse worker secret header"),
+    );
+    request
+}
+
+async fn next_close_frame(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    context: &str,
+) -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    loop {
+        let message = timeout(
+            Duration::from_secs(2),
+            futures_util::StreamExt::next(socket),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("receive {context} before timeout"))
+        .expect("socket message")
+        .expect("websocket message");
+
+        match message {
+            Message::Close(Some(close_frame)) => return close_frame,
+            Message::Text(_) | Message::Binary(_) | Message::Frame(_) | Message::Pong(_) => {
+                panic!("expected close frame {context}");
+            }
+            Message::Ping(_) => {}
+            Message::Close(None) => panic!("expected close frame payload {context}"),
+        }
+    }
 }
 
 fn spawn_openai_daemon(
@@ -1303,4 +1370,95 @@ async fn worker_daemon_drains_in_flight_request_before_replacement_receives_queu
     );
 
     replacement_daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_recovers_after_worker_auth_rate_limit_window_expires() {
+    let (proxy_addr, _) = spawn_proxy_server("openai").await;
+    let (backend_addr, observed_request_rx, _) = spawn_mock_backend().await;
+
+    for _ in 0..3 {
+        let (mut socket, _) = connect_async(worker_connect_request(proxy_addr, "wrong-secret"))
+            .await
+            .expect("connect websocket");
+        let close_frame = next_close_frame(&mut socket, "bad secret rejection").await;
+        assert_eq!(u16::from(close_frame.code), 1008);
+        assert_eq!(close_frame.reason, "worker authentication failed");
+    }
+
+    let throttled_daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+    let throttled_daemon_handle = tokio::spawn(async move { throttled_daemon.run().await });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if throttled_daemon_handle.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cooldown-rejected daemon exits before timeout");
+    let throttled_result = throttled_daemon_handle
+        .await
+        .expect("join cooldown-rejected daemon");
+    assert!(
+        throttled_result.is_ok(),
+        "daemon should observe proxy close cleanly during auth cooldown"
+    );
+    assert_model_not_registered_for(proxy_addr, "gpt-4.1-mini", Duration::from_millis(100)).await;
+
+    sleep(Duration::from_millis(300)).await;
+
+    let recovered_daemon_handle = spawn_openai_daemon(proxy_addr, "gpu-box-a", backend_addr);
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let request_body =
+        json!({"model": "gpt-4.1-mini", "input": "auth cooldown expired"}).to_string();
+    let response = post_responses(
+        proxy_addr,
+        &request_body,
+        &[
+            ("Authorization", "Bearer test-openai-key"),
+            ("OpenAI-Beta", "responses=v1"),
+            ("OpenAI-Organization", "org-demo"),
+        ],
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: Some("Bearer test-openai-key".to_string()),
+            openai_organization: Some("org-demo".to_string()),
+            openai_beta: Some("responses=v1".to_string()),
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: request_body,
+        }
+    );
+    assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
+    assert!(response.contains("\r\nx-backend-trace: openai-responses-backend\r\n"));
+    assert!(response.ends_with(
+        r#"{"id":"resp_123","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_123","status":"completed","role":"assistant","content":[{"type":"output_text","text":"responses proxy success"}]}]}"#
+    ));
+
+    recovered_daemon_handle.abort();
 }
