@@ -12,7 +12,9 @@ use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
-use worker_protocol::{ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage};
+use worker_protocol::{
+    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+};
 
 use crate::ProxyServerCore;
 
@@ -259,6 +261,16 @@ async fn handle_authenticated_socket(
 
 async fn handle_worker_message(state: &WorkerSocketState, worker_id: &str, payload: &str) -> bool {
     match serde_json::from_str(payload) {
+        Ok(WorkerToServerMessage::ResponseChunk(ResponseChunkMessage { request_id, .. })) => {
+            let core = state.core.lock().await;
+            matches!(
+                core.request_state(&request_id),
+                Some(crate::RequestState::InFlight {
+                    worker_id: active_worker_id,
+                    ..
+                }) if active_worker_id == worker_id
+            )
+        }
         Ok(WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
             request_id, ..
         })) => {
