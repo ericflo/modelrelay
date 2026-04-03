@@ -11,7 +11,8 @@ use axum::{
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
-use worker_protocol::{ServerToWorkerMessage, WorkerToServerMessage};
+use tokio::time::{Duration, timeout};
+use worker_protocol::{ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage};
 
 use crate::ProxyServerCore;
 
@@ -188,11 +189,12 @@ async fn handle_authenticated_socket(
         return;
     };
 
-    let ack = {
+    let registered = {
         let mut core = state.core.lock().await;
-        core.register_worker(provider, register).ack
+        core.register_worker(provider, register)
     };
-    let response = ServerToWorkerMessage::RegisterAck(ack);
+    let worker_id = registered.worker_id;
+    let response = ServerToWorkerMessage::RegisterAck(registered.ack);
 
     let Ok(payload) = serde_json::to_string(&response) else {
         close_socket(
@@ -204,7 +206,90 @@ async fn handle_authenticated_socket(
         return;
     };
 
-    let _ = socket.send(Message::Text(payload.into())).await;
+    if socket.send(Message::Text(payload.into())).await.is_err() {
+        let mut core = state.core.lock().await;
+        let _ = core.disconnect_worker(&worker_id);
+        return;
+    }
+
+    loop {
+        if flush_pending_requests(&mut socket, &state, &worker_id)
+            .await
+            .is_err()
+        {
+            let mut core = state.core.lock().await;
+            let _ = core.disconnect_worker(&worker_id);
+            return;
+        }
+
+        match timeout(Duration::from_millis(25), socket.recv()).await {
+            Ok(Some(Ok(Message::Text(payload)))) => {
+                if !handle_worker_message(&state, &worker_id, &payload).await {
+                    close_socket(
+                        socket,
+                        CLOSE_CODE_PROTOCOL_ERROR,
+                        CLOSE_REASON_PROTOCOL_ERROR,
+                    )
+                    .await;
+                    let mut core = state.core.lock().await;
+                    let _ = core.disconnect_worker(&worker_id);
+                    return;
+                }
+            }
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
+                let mut core = state.core.lock().await;
+                let _ = core.disconnect_worker(&worker_id);
+                return;
+            }
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) | Err(_) => {}
+            Ok(Some(Ok(Message::Binary(_)))) => {
+                close_socket(
+                    socket,
+                    CLOSE_CODE_PROTOCOL_ERROR,
+                    CLOSE_REASON_PROTOCOL_ERROR,
+                )
+                .await;
+                let mut core = state.core.lock().await;
+                let _ = core.disconnect_worker(&worker_id);
+                return;
+            }
+        }
+    }
+}
+
+async fn handle_worker_message(state: &WorkerSocketState, worker_id: &str, payload: &str) -> bool {
+    match serde_json::from_str(payload) {
+        Ok(WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+            request_id, ..
+        })) => {
+            let mut core = state.core.lock().await;
+            core.finish_request(worker_id, &request_id).is_some()
+                || core.request_state(&request_id).is_none()
+        }
+        _ => false,
+    }
+}
+
+async fn flush_pending_requests(
+    socket: &mut WebSocket,
+    state: &WorkerSocketState,
+    worker_id: &str,
+) -> Result<(), ()> {
+    let requests = {
+        let mut core = state.core.lock().await;
+        core.take_pending_worker_requests(worker_id)
+    };
+
+    for request in requests {
+        let payload =
+            serde_json::to_string(&ServerToWorkerMessage::Request(request)).map_err(|_| ())?;
+        socket
+            .send(Message::Text(payload.into()))
+            .await
+            .map_err(|_| ())?;
+    }
+
+    Ok(())
 }
 
 async fn close_socket(mut socket: WebSocket, code: u16, reason: &'static str) {
