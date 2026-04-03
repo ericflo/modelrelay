@@ -14,8 +14,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use worker_protocol::{
     CancelMessage, CancelReason, GracefulShutdownMessage, ModelsUpdateMessage, PingMessage,
-    PongMessage, ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage,
-    WorkerToServerMessage,
+    PongMessage, ResponseChunkMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 use crate::{
@@ -355,11 +354,11 @@ async fn handle_worker_message(state: &WorkerSocketState, worker_id: &str, paylo
                 }) if active_worker_id == worker_id
             )
         }
-        Ok(WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
-            request_id, ..
-        })) => {
+        Ok(WorkerToServerMessage::ResponseComplete(response)) => {
+            let request_id = response.request_id.clone();
             let mut core = state.core.lock().await;
-            core.finish_request(worker_id, &request_id).is_some()
+            core.complete_http_response(worker_id, response)
+                || core.finish_request(worker_id, &request_id).is_some()
                 || core.request_state(&request_id).is_none()
         }
         _ => false,

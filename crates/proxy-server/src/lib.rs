@@ -4,8 +4,10 @@ pub mod worker_socket;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
+use tokio::sync::oneshot;
 use worker_protocol::{
     HeaderMap, ModelsUpdateMessage, PongMessage, RegisterAck, RegisterMessage, RequestMessage,
+    ResponseCompleteMessage,
 };
 
 pub use http::ProxyHttpApp;
@@ -24,6 +26,7 @@ pub struct ProxyServerCore {
     selection_cursors: HashMap<SelectionKey, usize>,
     active_requests: HashMap<String, ActiveRequestState>,
     pending_worker_requests: HashMap<String, VecDeque<RequestMessage>>,
+    pending_http_response_senders: HashMap<String, oneshot::Sender<ResponseCompleteMessage>>,
     worker_cancel_signals: Vec<WorkerCancelSignal>,
     worker_graceful_shutdown_signals: Vec<GracefulShutdownSignal>,
     graceful_shutdown_disconnect_reasons: HashMap<String, GracefulShutdownDisconnectReason>,
@@ -238,6 +241,49 @@ impl ProxyServerCore {
         self.dispatch_next_compatible(worker_id)
     }
 
+    pub fn submit_http_response_request(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        body: impl Into<String>,
+        headers: HeaderMap,
+    ) -> Result<PendingHttpResponse, RequestFailure> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let outcome =
+            self.submit_transport_request(provider, model, endpoint_path, false, body, headers);
+
+        let request_id = match outcome {
+            SubmissionOutcome::Dispatched(DispatchAssignment { request_id, .. })
+            | SubmissionOutcome::Queued(QueuedAssignment { request_id, .. }) => request_id,
+            SubmissionOutcome::Rejected(failure) => return Err(failure),
+        };
+
+        self.pending_http_response_senders
+            .insert(request_id.clone(), response_tx);
+
+        Ok(PendingHttpResponse {
+            request_id,
+            response_rx,
+        })
+    }
+
+    pub fn complete_http_response(
+        &mut self,
+        worker_id: &str,
+        response: ResponseCompleteMessage,
+    ) -> bool {
+        let request_id = response.request_id.clone();
+        let Some(sender) = self.pending_http_response_senders.remove(&request_id) else {
+            return false;
+        };
+
+        let finished = self.finish_request(worker_id, &request_id).is_some()
+            || self.request_state(&request_id).is_none();
+        let _ = sender.send(response);
+        finished
+    }
+
     #[must_use]
     pub fn take_pending_worker_requests(&mut self, worker_id: &str) -> Vec<RequestMessage> {
         self.pending_worker_requests
@@ -350,6 +396,7 @@ impl ProxyServerCore {
 
             for request_id in &worker.in_flight_requests {
                 self.active_requests.remove(request_id);
+                self.pending_http_response_senders.remove(request_id);
                 failed_requests.push(RequestFailure {
                     request_id: request_id.clone(),
                     reason: RequestFailureReason::GracefulShutdownTimedOut,
@@ -391,6 +438,8 @@ impl ProxyServerCore {
             while let Some(request) = queue.pop_front() {
                 if now.saturating_duration_since(request.queued_at) >= timeout {
                     self.active_requests.remove(&request.request_id);
+                    self.pending_http_response_senders
+                        .remove(&request.request_id);
                     failures.push(RequestFailure {
                         request_id: request.request_id,
                         reason: RequestFailureReason::QueueTimedOut,
@@ -428,6 +477,7 @@ impl ProxyServerCore {
             };
 
             if cancellation.is_some() {
+                self.pending_http_response_senders.remove(&request_id);
                 failed_requests.push(RequestFailure {
                     request_id,
                     reason: RequestFailureReason::RequestAlreadyCanceled,
@@ -436,6 +486,7 @@ impl ProxyServerCore {
             }
 
             if request.requeue_count >= MAX_REQUEUE_COUNT {
+                self.pending_http_response_senders.remove(&request_id);
                 failed_requests.push(RequestFailure {
                     request_id,
                     reason: RequestFailureReason::MaxRequeuesExceeded,
@@ -481,6 +532,7 @@ impl ProxyServerCore {
                     .position(|queued_request| queued_request.request_id == request_id)?;
                 queue.remove(index)?;
                 self.active_requests.remove(request_id);
+                self.pending_http_response_senders.remove(request_id);
 
                 Some(CancellationOutcome::RemovedFromQueue {
                     request_id: request_id.to_string(),
@@ -740,6 +792,12 @@ pub enum SubmissionOutcome {
     Dispatched(DispatchAssignment),
     Queued(QueuedAssignment),
     Rejected(RequestFailure),
+}
+
+#[derive(Debug)]
+pub struct PendingHttpResponse {
+    pub request_id: String,
+    pub response_rx: oneshot::Receiver<ResponseCompleteMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
