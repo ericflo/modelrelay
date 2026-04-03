@@ -561,6 +561,74 @@ async fn worker_daemon_forwards_non_streaming_openai_request_through_live_proxy(
 }
 
 #[tokio::test]
+async fn worker_daemon_preserves_non_2xx_openai_backend_response_through_live_proxy() {
+    let (proxy_addr, _core) = spawn_proxy_server("openai").await;
+    let (backend_addr, observed_request_rx) = spawn_controlled_chat_backend(
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate-limit-backend",
+        r#"{"error":{"message":"backend overloaded","type":"rate_limit_error","code":"too_many_requests"}}"#,
+        None,
+    )
+    .await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let request_body = r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"trigger backend error"}]}"#;
+    let response = post_chat_completions(
+        proxy_addr,
+        request_body,
+        &[
+            ("Authorization", "Bearer client-token"),
+            ("OpenAI-Organization", "org-demo"),
+        ],
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/chat/completions".to_string(),
+            authorization: Some("Bearer client-token".to_string()),
+            openai_organization: Some("org-demo".to_string()),
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: request_body.to_string(),
+        }
+    );
+    assert!(response.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nx-backend-trace: rate-limit-backend\r\n"));
+    assert!(response.ends_with(
+        r#"{"error":{"message":"backend overloaded","type":"rate_limit_error","code":"too_many_requests"}}"#
+    ));
+    assert!(
+        !response.to_ascii_lowercase().contains("worker unavailable"),
+        "the proxy should preserve the backend error instead of flattening it: {response}"
+    );
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
 async fn worker_daemon_forwards_streaming_openai_request_through_live_proxy() {
     let (proxy_addr, _core) = spawn_proxy_server("openai").await;
     let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
