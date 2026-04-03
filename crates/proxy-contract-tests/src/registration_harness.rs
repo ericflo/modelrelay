@@ -177,19 +177,20 @@ impl RegistrationHarness {
     }
 
     fn record_failed_auth(&mut self, client_identity: String) {
-        let state = self
-            .failed_auth_attempts
-            .entry(client_identity)
-            .or_insert(FailedAuthRateLimitState {
-                failed_attempts: 0,
-                limited_until_tick: None,
-                expires_at_tick: self.current_tick + FAILED_AUTH_RATE_LIMIT_WINDOW_TICKS,
-            });
+        let state =
+            self.failed_auth_attempts
+                .entry(client_identity)
+                .or_insert(FailedAuthRateLimitState {
+                    failed_attempts: 0,
+                    limited_until_tick: None,
+                    expires_at_tick: self.current_tick + FAILED_AUTH_RATE_LIMIT_WINDOW_TICKS,
+                });
 
         state.failed_attempts += 1;
         state.expires_at_tick = self.current_tick + FAILED_AUTH_RATE_LIMIT_WINDOW_TICKS;
         if state.failed_attempts >= FAILED_AUTH_RATE_LIMIT_THRESHOLD {
-            state.limited_until_tick = Some(self.current_tick + FAILED_AUTH_RATE_LIMIT_WINDOW_TICKS);
+            state.limited_until_tick =
+                Some(self.current_tick + FAILED_AUTH_RATE_LIMIT_WINDOW_TICKS);
         }
     }
 

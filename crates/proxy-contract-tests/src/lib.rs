@@ -926,8 +926,7 @@ mod tests {
             harness.connect(repeated_bad_secret()),
             Err(HandshakeFailure {
                 code: CloseCode::PolicyViolation,
-                reason: "worker authentication rate limited for client `198.51.100.24`"
-                    .to_string(),
+                reason: "worker authentication rate limited for client `198.51.100.24`".to_string(),
             })
         );
 
@@ -976,8 +975,7 @@ mod tests {
             harness.connect(rate_limited_client()),
             Err(HandshakeFailure {
                 code: CloseCode::PolicyViolation,
-                reason: "worker authentication rate limited for client `198.51.100.24`"
-                    .to_string(),
+                reason: "worker authentication rate limited for client `198.51.100.24`".to_string(),
             })
         );
 
