@@ -1,8 +1,14 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration as StdDuration, Instant},
+};
 
 use axum::{
     Router,
     extract::{
+        ConnectInfo,
         Query, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     },
@@ -25,12 +31,15 @@ const WORKER_SECRET_HEADER: &str = "x-worker-secret";
 const WORKER_PROTOCOL_VERSION: &str = "2026-04-bridge-v1";
 const CLOSE_REASON_AUTH_FAILED: &str = "worker authentication failed";
 const CLOSE_REASON_PROTOCOL_ERROR: &str = "worker registration protocol error";
+const CLOSE_REASON_AUTH_RATE_LIMITED: &str = "worker authentication temporarily rate limited";
 const CLOSE_REASON_GRACEFUL_SHUTDOWN_COMPLETE: &str = "graceful shutdown complete";
 const CLOSE_REASON_GRACEFUL_SHUTDOWN_TIMED_OUT: &str = "graceful shutdown timed out";
 const CLOSE_REASON_STALE_HEARTBEAT: &str = "worker heartbeat timed out";
 const CLOSE_CODE_POLICY_VIOLATION: u16 = 1008;
 const CLOSE_CODE_PROTOCOL_ERROR: u16 = 1002;
 const CLOSE_CODE_NORMAL: u16 = 1000;
+const AUTH_FAILURE_THRESHOLD: u32 = 3;
+const AUTH_RATE_LIMIT_COOLDOWN: StdDuration = StdDuration::from_millis(250);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 const HEARTBEAT_PONG_TIMEOUT: Duration = Duration::from_millis(300);
 
@@ -72,6 +81,7 @@ impl WorkerSocketApp {
             state: WorkerSocketState {
                 core,
                 providers: HashMap::new(),
+                failed_auth_by_client: Arc::new(Mutex::new(HashMap::new())),
             },
         }
     }
@@ -97,6 +107,7 @@ impl WorkerSocketApp {
 struct WorkerSocketState {
     core: Arc<Mutex<ProxyServerCore>>,
     providers: HashMap<String, WorkerSocketProviderConfig>,
+    failed_auth_by_client: Arc<Mutex<HashMap<String, FailedAuthState>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,13 +123,21 @@ enum AuthOutcome {
     Rejected { reason: &'static str },
 }
 
+#[derive(Debug, Clone)]
+struct FailedAuthState {
+    failures: u32,
+    last_failed_at: Instant,
+    blocked_until: Option<Instant>,
+}
+
 async fn worker_connect_handler(
     ws: WebSocketUpgrade,
     State(state): State<WorkerSocketState>,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     Query(query): Query<WorkerConnectQuery>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    match authenticate_connection(&state, &headers, &query) {
+    match authenticate_connection(&state, client_addr.ip().to_string(), &headers, &query).await {
         AuthOutcome::Authenticated { provider } => ws.on_upgrade(move |socket| async move {
             handle_authenticated_socket(socket, state, provider).await;
         }),
@@ -128,11 +147,18 @@ async fn worker_connect_handler(
     }
 }
 
-fn authenticate_connection(
+async fn authenticate_connection(
     state: &WorkerSocketState,
+    client_identity: String,
     headers: &axum::http::HeaderMap,
     query: &WorkerConnectQuery,
 ) -> AuthOutcome {
+    if client_is_rate_limited(state, &client_identity).await {
+        return AuthOutcome::Rejected {
+            reason: CLOSE_REASON_AUTH_RATE_LIMITED,
+        };
+    }
+
     let Some(provider) = query.provider.as_deref() else {
         return AuthOutcome::Rejected {
             reason: CLOSE_REASON_AUTH_FAILED,
@@ -168,14 +194,69 @@ fn authenticate_connection(
         .ct_eq(config.worker_secret.as_bytes())
         .into();
     if !secret_matches {
+        record_failed_auth(state, client_identity).await;
         return AuthOutcome::Rejected {
             reason: CLOSE_REASON_AUTH_FAILED,
         };
     }
 
+    clear_failed_auth(state, &client_identity).await;
+
     AuthOutcome::Authenticated {
         provider: provider.to_string(),
     }
+}
+
+async fn client_is_rate_limited(state: &WorkerSocketState, client_identity: &str) -> bool {
+    let now = Instant::now();
+    let mut failed_auth_by_client = state.failed_auth_by_client.lock().await;
+
+    match failed_auth_by_client.get(client_identity) {
+        Some(entry) if entry.blocked_until.is_some_and(|blocked_until| blocked_until > now) => true,
+        Some(_) => {
+            if failed_auth_by_client
+                .get(client_identity)
+                .is_some_and(|entry| now.duration_since(entry.last_failed_at) > AUTH_RATE_LIMIT_COOLDOWN)
+            {
+                failed_auth_by_client.remove(client_identity);
+            }
+            false
+        }
+        None => false,
+    }
+}
+
+async fn record_failed_auth(state: &WorkerSocketState, client_identity: String) {
+    let now = Instant::now();
+    let mut failed_auth_by_client = state.failed_auth_by_client.lock().await;
+    let entry = failed_auth_by_client
+        .entry(client_identity)
+        .or_insert(FailedAuthState {
+            failures: 0,
+            last_failed_at: now,
+            blocked_until: None,
+        });
+
+    if entry.blocked_until.is_some_and(|blocked_until| blocked_until <= now)
+        || now.duration_since(entry.last_failed_at) > AUTH_RATE_LIMIT_COOLDOWN
+    {
+        *entry = FailedAuthState {
+            failures: 0,
+            last_failed_at: now,
+            blocked_until: None,
+        };
+    }
+
+    entry.failures += 1;
+    entry.last_failed_at = now;
+    if entry.failures >= AUTH_FAILURE_THRESHOLD {
+        entry.blocked_until = Some(now + AUTH_RATE_LIMIT_COOLDOWN);
+    }
+}
+
+async fn clear_failed_auth(state: &WorkerSocketState, client_identity: &str) {
+    let mut failed_auth_by_client = state.failed_auth_by_client.lock().await;
+    failed_auth_by_client.remove(client_identity);
 }
 
 async fn handle_authenticated_socket(

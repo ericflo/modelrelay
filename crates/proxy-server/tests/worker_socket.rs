@@ -5,7 +5,11 @@ use proxy_server::{
     CancelReason as ProxyCancelReason, ProxyServerCore, RequestState, SubmissionOutcome,
     WorkerSocketApp, WorkerSocketProviderConfig,
 };
-use tokio::{net::TcpListener, sync::Mutex, time::timeout};
+use tokio::{
+    net::TcpListener,
+    sync::Mutex,
+    time::{sleep, timeout},
+};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -37,7 +41,7 @@ async fn spawn_server_with_provider_config(
     let addr = listener.local_addr().expect("listener local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, app)
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .expect("serve worker socket app");
     });
@@ -504,6 +508,45 @@ async fn rejected_auth_connection_is_closed_with_policy_violation() {
 
     let core = core.lock().await;
     assert!(core.provider_models("openai").is_empty());
+}
+
+#[tokio::test]
+async fn repeated_failed_auth_attempts_are_rate_limited_until_cooldown_expires() {
+    let (addr, core) = spawn_server().await;
+
+    for _ in 0..3 {
+        let (mut socket, _) = connect_async(worker_connect_request(addr, "wrong-secret"))
+            .await
+            .expect("connect websocket");
+
+        let close_frame = next_close_message(&mut socket, "bad secret rejection").await;
+        assert_eq!(u16::from(close_frame.code), 1008);
+        assert_eq!(close_frame.reason, "worker authentication failed");
+    }
+
+    let (mut throttled_socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let close_frame = next_close_message(&mut throttled_socket, "auth rate limit rejection").await;
+    assert_eq!(u16::from(close_frame.code), 1008);
+    assert_eq!(
+        close_frame.reason,
+        "worker authentication temporarily rate limited"
+    );
+
+    sleep(std::time::Duration::from_millis(300)).await;
+
+    let (mut recovered_socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack = register_test_worker(&mut recovered_socket).await;
+
+    let core = core.lock().await;
+    assert_eq!(ack.worker_id, "worker-1");
+    assert_eq!(
+        core.provider_models("openai"),
+        vec!["llama-3.1-70b".to_string()]
+    );
 }
 
 #[tokio::test]
