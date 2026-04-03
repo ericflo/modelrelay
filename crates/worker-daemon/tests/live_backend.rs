@@ -10,7 +10,8 @@ use axum::{
 };
 use futures_util::stream;
 use proxy_server::{
-    ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp, WorkerSocketProviderConfig,
+    ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp,
+    WorkerSocketProviderConfig,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -841,6 +842,13 @@ fn assert_created_responses_response(response: &str, trace_header: &str, body: &
     assert!(response.ends_with(body));
 }
 
+fn assert_service_unavailable(response: &str, message: &str) {
+    assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(response.contains("\r\ncontent-type: text/plain; charset=utf-8\r\n"));
+    assert!(response.contains("\r\nx-content-type-options: nosniff\r\n"));
+    assert!(response.ends_with(&format!("{message}\n")));
+}
+
 async fn begin_graceful_shutdown(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
     let mut core = core.lock().await;
     let signals =
@@ -1129,6 +1137,103 @@ async fn worker_daemon_forwards_streaming_openai_responses_request_through_live_
     assert!(first_delta_index < second_delta_index);
     assert!(second_delta_index < done_index);
     assert!(full_response.ends_with("0\r\n\r\n"));
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_returns_sanitized_queue_timeout_error_through_live_proxy() {
+    let (proxy_addr, core) = spawn_proxy_server("openai").await;
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: Some(0),
+            },
+        );
+    }
+    let (backend_addr, first_observed_request_rx, release_response_tx) =
+        spawn_delayed_responses_backend().await;
+    let daemon_handle = spawn_openai_daemon(proxy_addr, "gpu-box-a", backend_addr);
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let first_body = json!({"model": "gpt-4.1-mini", "input": "hold worker busy"}).to_string();
+    let second_body = json!({"model": "gpt-4.1-mini", "input": "time out in queue"}).to_string();
+
+    let first_request_task = tokio::spawn({
+        let first_body = first_body.clone();
+        async move {
+            post_responses(
+                proxy_addr,
+                &first_body,
+                &[
+                    ("Authorization", "Bearer in-flight-openai-key"),
+                    ("OpenAI-Beta", "responses=v1"),
+                ],
+            )
+            .await
+        }
+    });
+
+    let first_observed_request = timeout(Duration::from_secs(2), first_observed_request_rx)
+        .await
+        .expect("first backend observed request before timeout")
+        .expect("first backend observed request");
+    assert_openai_responses_request(
+        &first_observed_request,
+        "Bearer in-flight-openai-key",
+        &first_body,
+    );
+
+    let second_request_task = tokio::spawn({
+        let second_body = second_body.clone();
+        async move {
+            post_responses(
+                proxy_addr,
+                &second_body,
+                &[
+                    ("Authorization", "Bearer queued-openai-key"),
+                    ("OpenAI-Beta", "responses=v1"),
+                ],
+            )
+            .await
+        }
+    });
+
+    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
+
+    {
+        let mut core = core.lock().await;
+        let failures = core.expire_queue_timeouts(std::time::Instant::now());
+        assert_eq!(failures.len(), 1);
+        assert_eq!(core.queued_request_ids("openai"), Vec::<String>::new());
+    }
+
+    let second_response = second_request_task
+        .await
+        .expect("join timed-out queued request");
+    assert_service_unavailable(&second_response, "Request timed out waiting for worker");
+    assert!(
+        !second_response.contains("QueueTimedOut"),
+        "sanitized boundary must not leak the internal failure reason enum"
+    );
+
+    release_response_tx
+        .send(())
+        .expect("release delayed backend response");
+
+    let first_response = timeout(Duration::from_secs(2), first_request_task)
+        .await
+        .expect("first request completed before timeout")
+        .expect("join first request task");
+    assert_created_responses_response(
+        &first_response,
+        "delayed-openai-responses-backend",
+        r#"{"id":"resp_drain_1","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_drain_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"drain completed"}]}]}"#,
+    );
 
     daemon_handle.abort();
 }
