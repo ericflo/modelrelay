@@ -585,8 +585,7 @@ async fn worker_daemon_preserves_non_2xx_openai_backend_response_through_live_pr
 
     wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
 
-    let request_body =
-        r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"trigger backend error"}]}"#;
+    let request_body = r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"trigger backend error"}]}"#;
     let response = post_chat_completions(
         proxy_addr,
         request_body,
