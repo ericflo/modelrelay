@@ -92,6 +92,7 @@ impl WorkerDaemon {
         let (mut socket_write, mut socket_read) = socket.split();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let mut active_requests = HashMap::<String, JoinHandle<()>>::new();
+        let mut shutting_down = false;
 
         send_worker_message(
             &mut socket_write,
@@ -114,7 +115,12 @@ impl WorkerDaemon {
                     match message? {
                         Message::Text(payload) => {
                             let server_message = serde_json::from_str::<ServerToWorkerMessage>(&payload)?;
-                            if !self.handle_server_message(&event_tx, &mut active_requests, server_message).await? {
+                            if !self.handle_server_message(
+                                &event_tx,
+                                &mut active_requests,
+                                &mut shutting_down,
+                                server_message,
+                            ).await? {
                                 break;
                             }
                         }
@@ -159,10 +165,16 @@ impl WorkerDaemon {
         &self,
         event_tx: &mpsc::UnboundedSender<DaemonEvent>,
         active_requests: &mut HashMap<String, JoinHandle<()>>,
+        shutting_down: &mut bool,
         message: ServerToWorkerMessage,
     ) -> Result<bool, BoxError> {
         match message {
             ServerToWorkerMessage::Request(request) => {
+                if *shutting_down {
+                    return Err(Box::new(io::Error::other(
+                        "received new request while draining worker daemon",
+                    )));
+                }
                 let request_id = request.request_id.clone();
                 let finished_request_id = request_id.clone();
                 let client = self.client.clone();
@@ -201,7 +213,10 @@ impl WorkerDaemon {
                     })?;
                 Ok(true)
             }
-            ServerToWorkerMessage::GracefulShutdown(_) => Ok(false),
+            ServerToWorkerMessage::GracefulShutdown(_) => {
+                *shutting_down = true;
+                Ok(true)
+            }
             ServerToWorkerMessage::ModelsRefresh(_) => {
                 let models = refresh_models(self.client.clone(), &self.config).await?;
                 event_tx
