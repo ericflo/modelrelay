@@ -157,6 +157,7 @@ impl ProxyServerCore {
             request_id: format!("request-{}", self.next_request_id),
             provider: provider.into(),
             model: model.into(),
+            queued_at: Instant::now(),
             transport: RequestTransport {
                 endpoint_path: endpoint_path.into(),
                 is_streaming,
@@ -365,6 +366,42 @@ impl ProxyServerCore {
             disconnected_worker_ids,
             failed_requests,
         }
+    }
+
+    #[must_use]
+    pub fn expire_queue_timeouts(&mut self, now: Instant) -> Vec<RequestFailure> {
+        let mut failures = Vec::new();
+
+        for (provider, queue) in &mut self.provider_queues {
+            let Some(timeout) = self
+                .provider_queue_policies
+                .get(provider)
+                .copied()
+                .unwrap_or_default()
+                .queue_timeout_ticks
+                .map(Duration::from_secs)
+            else {
+                continue;
+            };
+
+            let mut retained_queue = VecDeque::with_capacity(queue.len());
+
+            while let Some(request) = queue.pop_front() {
+                if now.saturating_duration_since(request.queued_at) >= timeout {
+                    self.active_requests.remove(&request.request_id);
+                    failures.push(RequestFailure {
+                        request_id: request.request_id,
+                        reason: RequestFailureReason::QueueTimedOut,
+                    });
+                } else {
+                    retained_queue.push_back(request);
+                }
+            }
+
+            *queue = retained_queue;
+        }
+
+        failures
     }
 
     pub fn disconnect_worker(&mut self, worker_id: &str) -> Option<WorkerDisconnectOutcome> {
@@ -684,12 +721,14 @@ pub struct RegisteredWorker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderQueuePolicy {
     pub max_queue_len: usize,
+    pub queue_timeout_ticks: Option<u64>,
 }
 
 impl Default for ProviderQueuePolicy {
     fn default() -> Self {
         Self {
             max_queue_len: usize::MAX,
+            queue_timeout_ticks: None,
         }
     }
 }
@@ -776,6 +815,7 @@ pub struct RequestFailure {
 pub enum RequestFailureReason {
     RequestAlreadyCanceled,
     MaxRequeuesExceeded,
+    QueueTimedOut,
     QueueFull,
     GracefulShutdownTimedOut,
 }
@@ -803,6 +843,7 @@ struct RequestRecord {
     request_id: String,
     provider: String,
     model: String,
+    queued_at: Instant,
     transport: RequestTransport,
     requeue_count: usize,
 }
@@ -893,6 +934,7 @@ mod tests {
         ProxyServerCore, QueuedAssignment, RequestFailure, RequestFailureReason, RequestState,
         SubmissionOutcome, WorkerCancelSignal, WorkerDisconnectOutcome,
     };
+    use std::time::Duration;
     use worker_protocol::{ModelsUpdateMessage, RegisterMessage};
 
     fn register_message(
@@ -996,7 +1038,13 @@ mod tests {
     #[test]
     fn bounds_queue_per_provider_and_preserves_existing_entries() {
         let mut core = ProxyServerCore::new();
-        core.configure_provider_queue("openai", ProviderQueuePolicy { max_queue_len: 1 });
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: None,
+            },
+        );
 
         let worker_id = core
             .register_worker(
@@ -1119,7 +1167,7 @@ mod tests {
             SubmissionOutcome::Queued(_)
         ));
         assert!(matches!(
-            core.submit_request("openai", "mistral-large"),
+            core.submit_request("openai", "llama-3.1-70b"),
             SubmissionOutcome::Queued(_)
         ));
 
@@ -1175,6 +1223,137 @@ mod tests {
         assert_eq!(core.request_state("request-2"), None);
         assert_eq!(core.finish_request(&worker_id, "request-1"), None);
         assert!(core.worker_in_flight_request_ids(&worker_id).is_empty());
+    }
+
+    #[test]
+    fn queued_request_times_out_after_waiting_for_worker_capacity() {
+        let mut core = ProxyServerCore::new();
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 2,
+                queue_timeout_ticks: Some(5),
+            },
+        );
+        let worker_id = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert!(matches!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(_)
+        ));
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        let timeout_at = match core.active_requests.get("request-2") {
+            Some(super::ActiveRequestState::Queued { request }) => {
+                request.queued_at + Duration::from_secs(5)
+            }
+            _ => panic!("request-2 should still be queued"),
+        };
+
+        assert_eq!(
+            core.expire_queue_timeouts(timeout_at),
+            vec![RequestFailure {
+                request_id: "request-2".to_string(),
+                reason: RequestFailureReason::QueueTimedOut,
+            }]
+        );
+        assert!(core.queued_request_ids("openai").is_empty());
+        assert_eq!(core.request_state("request-2"), None);
+        assert_eq!(core.finish_request(&worker_id, "request-1"), None);
+    }
+
+    #[test]
+    fn queue_timeout_removes_only_expired_requests_from_the_provider_queue() {
+        let mut core = ProxyServerCore::new();
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 3,
+                queue_timeout_ticks: Some(5),
+            },
+        );
+        let worker_id = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert!(matches!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(_)
+        ));
+        assert!(matches!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Queued(_)
+        ));
+        assert!(matches!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Queued(_)
+        ));
+
+        let cutoff = {
+            let queue = core
+                .provider_queues
+                .get_mut("openai")
+                .expect("openai queue should exist");
+            let first = queue
+                .iter_mut()
+                .find(|request| request.request_id == "request-2")
+                .expect("request-2 should still be queued");
+            let cutoff = first.queued_at + Duration::from_secs(5);
+            first.queued_at -= Duration::from_secs(5);
+
+            let second = queue
+                .iter_mut()
+                .find(|request| request.request_id == "request-3")
+                .expect("request-3 should still be queued");
+            second.queued_at = cutoff.checked_sub(Duration::from_secs(1)).unwrap();
+            cutoff
+        };
+
+        if let Some(super::ActiveRequestState::Queued { request }) =
+            core.active_requests.get_mut("request-2")
+        {
+            request.queued_at -= Duration::from_secs(5);
+        }
+        if let Some(super::ActiveRequestState::Queued { request }) =
+            core.active_requests.get_mut("request-3")
+        {
+            request.queued_at = cutoff.checked_sub(Duration::from_secs(1)).unwrap();
+        }
+
+        assert_eq!(
+            core.expire_queue_timeouts(cutoff),
+            vec![RequestFailure {
+                request_id: "request-2".to_string(),
+                reason: RequestFailureReason::QueueTimedOut,
+            }]
+        );
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-3".to_string()]
+        );
+        assert_eq!(core.request_state("request-2"), None);
+        assert_eq!(core.request_state("request-3"), Some(RequestState::Queued));
+        assert_eq!(
+            core.finish_request(&worker_id, "request-1"),
+            Some(DispatchAssignment {
+                request_id: "request-3".to_string(),
+                worker_id,
+            })
+        );
     }
 
     #[test]
