@@ -10,7 +10,7 @@ This repository is deliberately in the phase-0 bootstrap state. The immediate jo
 
 - Katamari behavior contract captured from commit `ab5e90f6a2ff05a063663ce478146bf0b6829429`
 - Minimal Rust workspace and CI for tests-first development
-- Placeholder crate with passing tests so the next loop can start adding real contract tests
+- Contract test crate plus a shared `worker-protocol` crate defining the bridge message schema
 
 ## Documents
 
@@ -24,4 +24,3 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
-

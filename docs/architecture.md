@@ -27,7 +27,7 @@ This is the planned Rust split for the extracted standalone project. It is inten
 ## Early Implementation Order
 
 1. Lock the contract with black-box tests in `proxy-contract-tests`.
-2. Introduce the shared worker protocol crate.
+2. Introduce the shared worker protocol crate. This workspace now includes `crates/worker-protocol` for the bridge message schema.
 3. Build an in-memory proxy-server core that can satisfy the contract tests without real sockets.
 4. Add transport adapters for real WebSocket and HTTP boundaries.
 5. Add the worker daemon and local-backend integration.
@@ -40,4 +40,3 @@ This is the planned Rust split for the extracted standalone project. It is inten
 - Packaging and release workflow.
 
 Those matter later, but they should follow green contract tests rather than precede them.
-
