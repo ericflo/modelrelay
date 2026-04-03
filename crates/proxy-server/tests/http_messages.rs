@@ -2,7 +2,8 @@ use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
 use proxy_server::{
-    ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig,
+    ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp,
+    WorkerSocketProviderConfig,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -15,8 +16,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    CancelMessage, CancelReason, HeaderMap, RegisterMessage, ResponseChunkMessage,
-    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason, HeaderMap, ModelsUpdateMessage, RegisterMessage,
+    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -52,6 +53,26 @@ async fn spawn_server_with_core(
     });
 
     addr
+}
+
+async fn wait_for_request_state(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    request_id: &str,
+    expected: RequestState,
+) {
+    timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            {
+                let core = core.lock().await;
+                if core.request_state(request_id) == Some(expected.clone()) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("request {request_id} did not reach expected state"));
 }
 
 fn assert_service_unavailable(response: &str, message: &str) {
@@ -191,6 +212,19 @@ async fn send_response_chunk(socket: &mut TestSocket, request_id: &str, chunk: &
         .send(Message::Text(payload.into()))
         .await
         .expect("send response_chunk");
+}
+
+async fn send_models_update(socket: &mut TestSocket, models: Vec<String>, current_load: u32) {
+    let message = WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
+        models,
+        current_load,
+    });
+    let payload = serde_json::to_string(&message).expect("serialize models_update");
+
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .expect("send models_update");
 }
 
 #[tokio::test]
@@ -422,5 +456,200 @@ async fn worker_backed_messages_route_returns_sanitized_no_workers_error() {
     assert!(
         !response.contains("queue is full"),
         "the client boundary should not expose the raw queue rejection"
+    );
+}
+
+#[tokio::test]
+async fn worker_backed_messages_route_returns_sanitized_queue_timeout_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "anthropic",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: Some(0),
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let body = r#"{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"messages":[{"role":"user","content":"timeout me"}]}"#;
+    let http_request = tokio::spawn(post_messages(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    ));
+    wait_for_request_state(&core, "request-1", RequestState::Queued).await;
+
+    {
+        let mut core = core.lock().await;
+        let failures = core.expire_queue_timeouts(std::time::Instant::now());
+        assert_eq!(failures.len(), 1);
+    }
+
+    let response = http_request.await.expect("join timed-out http request");
+    assert_service_unavailable(&response, "Request timed out waiting for worker");
+}
+
+#[tokio::test]
+async fn worker_backed_messages_route_returns_sanitized_queue_full_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "anthropic",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: None,
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core.clone(), true).await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"messages":[{"role":"user","content":"hello from messages"}]}"#;
+    let first_request = tokio::spawn(open_messages_request(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    ));
+    let ServerToWorkerMessage::Request(_) =
+        next_server_message(&mut socket, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+
+    let second_request = tokio::spawn(open_messages_request(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    ));
+    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
+
+    let response = post_messages(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    )
+    .await;
+    assert_service_unavailable(&response, "Service temporarily at capacity, please retry");
+    assert!(
+        !response.contains("queue is full"),
+        "the client boundary should not expose the raw queue-full reason"
+    );
+
+    first_request.abort();
+    second_request.abort();
+}
+
+#[tokio::test]
+async fn worker_backed_messages_route_returns_sanitized_provider_disabled_error() {
+    let addr = spawn_server_with_core(Arc::new(Mutex::new(ProxyServerCore::new())), false).await;
+
+    let body = r#"{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"messages":[{"role":"user","content":"hello from messages"}]}"#;
+    let response = post_messages(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    )
+    .await;
+
+    assert_service_unavailable(&response, "Provider is currently disabled");
+    assert!(
+        !response.contains("virtual provider is disabled"),
+        "the compatibility boundary should use the stable disabled message"
+    );
+}
+
+#[tokio::test]
+async fn worker_backed_messages_route_returns_sanitized_requeue_exhaustion_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let (mut socket_one, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect first websocket");
+    register_test_worker(&mut socket_one).await;
+
+    let body = r#"{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"messages":[{"role":"user","content":"keep retrying"}]}"#;
+    let http_request = tokio::spawn(post_messages(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    ));
+
+    let ServerToWorkerMessage::Request(first_request) =
+        next_server_message(&mut socket_one, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+
+    socket_one
+        .close(None)
+        .await
+        .expect("close first worker socket");
+    wait_for_request_state(&core, &first_request.request_id, RequestState::Queued).await;
+
+    for label in ["second", "third", "fourth"] {
+        let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+            .await
+            .unwrap_or_else(|_| panic!("connect {label} websocket"));
+        register_test_worker(&mut socket).await;
+        send_models_update(
+            &mut socket,
+            vec!["claude-3-5-sonnet-20241022".to_string()],
+            0,
+        )
+        .await;
+
+        let ServerToWorkerMessage::Request(requeued_request) =
+            next_server_message(&mut socket, &format!("{label} worker request")).await
+        else {
+            panic!("expected {label} worker request message");
+        };
+        assert_eq!(requeued_request.request_id, first_request.request_id);
+
+        socket
+            .close(None)
+            .await
+            .unwrap_or_else(|_| panic!("close {label} worker socket"));
+
+        if label != "fourth" {
+            wait_for_request_state(&core, &first_request.request_id, RequestState::Queued).await;
+        }
+    }
+
+    let response = http_request
+        .await
+        .expect("join requeue exhaustion http request");
+    assert_service_unavailable(
+        &response,
+        "Request could not be processed after multiple attempts",
+    );
+    assert!(
+        !response.contains("exceeded maximum requeue"),
+        "the client boundary should not expose the raw requeue exhaustion reason"
     );
 }
