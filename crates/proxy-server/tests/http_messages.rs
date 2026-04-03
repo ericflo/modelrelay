@@ -9,7 +9,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Mutex,
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tokio_tungstenite::{
     connect_async,
@@ -232,6 +232,22 @@ async fn assert_worker_socket_closes(socket: &mut TestSocket) {
             other => panic!("unexpected websocket message while waiting for close: {other:?}"),
         }
     }
+}
+
+async fn next_close_frame(
+    socket: &mut TestSocket,
+    context: &str,
+) -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    let message = timeout(std::time::Duration::from_secs(2), socket.next())
+        .await
+        .unwrap_or_else(|_| panic!("receive {context} before timeout"))
+        .expect("socket message")
+        .expect("websocket message");
+    let Message::Close(Some(close_frame)) = message else {
+        panic!("expected close frame for {context}");
+    };
+
+    close_frame.to_owned()
 }
 
 fn assert_messages_response(response: &str, worker_backend: &str, body: &str) {
@@ -830,6 +846,70 @@ async fn worker_backed_messages_route_returns_sanitized_no_workers_error() {
     assert!(
         !response.contains("queue is full"),
         "the client boundary should not expose the raw queue rejection"
+    );
+}
+
+#[tokio::test]
+async fn worker_backed_messages_route_recovers_after_worker_auth_rate_limit_window_expires() {
+    let addr = spawn_server().await;
+
+    for _ in 0..3 {
+        let (mut socket, _) = connect_async(worker_connect_request(addr, "wrong-secret"))
+            .await
+            .expect("connect websocket");
+        let close_frame = next_close_frame(&mut socket, "bad secret rejection").await;
+        assert_eq!(u16::from(close_frame.code), 1008);
+        assert_eq!(close_frame.reason, "worker authentication failed");
+    }
+
+    let (mut throttled_socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let close_frame = next_close_frame(&mut throttled_socket, "auth rate limit rejection").await;
+    assert_eq!(u16::from(close_frame.code), 1008);
+    assert_eq!(
+        close_frame.reason,
+        "worker authentication temporarily rate limited"
+    );
+
+    sleep(std::time::Duration::from_millis(300)).await;
+
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"messages":[{"role":"user","content":"auth cooldown expired"}]}"#;
+    let http_request = tokio::spawn(post_messages(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    ));
+
+    let ServerToWorkerMessage::Request(request) =
+        next_server_message(&mut socket, "messages request after auth cooldown").await
+    else {
+        panic!("expected request message");
+    };
+    assert_eq!(request.endpoint_path, "/v1/messages");
+    assert_eq!(request.body, body);
+
+    send_response_complete(
+        &mut socket,
+        &request.request_id,
+        "gpu-box-a",
+        r#"{"id":"msg_auth_expiry","type":"message","role":"assistant","content":[{"type":"text","text":"worker re-authenticated"}],"model":"claude-3-5-sonnet-20241022","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":3}}"#,
+    )
+    .await;
+
+    let response = http_request.await.expect("join http request");
+    assert_messages_response(
+        &response,
+        "gpu-box-a",
+        r#"{"id":"msg_auth_expiry","type":"message","role":"assistant","content":[{"type":"text","text":"worker re-authenticated"}],"model":"claude-3-5-sonnet-20241022","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":3}}"#,
     );
 }
 
