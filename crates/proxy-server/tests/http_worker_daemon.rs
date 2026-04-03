@@ -9,7 +9,9 @@ use axum::{
     routing::post,
 };
 use futures_util::stream;
-use proxy_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
+use proxy_server::{
+    ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp, WorkerSocketProviderConfig,
+};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -34,6 +36,15 @@ struct ObservedBackendRequest {
 #[derive(Clone)]
 struct BackendState {
     observed_request_tx: Arc<Mutex<Option<oneshot::Sender<ObservedBackendRequest>>>>,
+}
+
+#[derive(Clone)]
+struct ControlledChatBackendState {
+    observed_request_tx: Arc<Mutex<Option<oneshot::Sender<ObservedBackendRequest>>>>,
+    response_gate_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    response_status: StatusCode,
+    response_trace: &'static str,
+    response_body: &'static str,
 }
 
 async fn spawn_proxy_server(models_provider: &str) -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
@@ -78,6 +89,43 @@ async fn spawn_mock_backend() -> (SocketAddr, oneshot::Receiver<ObservedBackendR
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve backend app");
+    });
+
+    (addr, observed_request_rx)
+}
+
+async fn spawn_controlled_chat_backend(
+    response_status: StatusCode,
+    response_trace: &'static str,
+    response_body: &'static str,
+    response_gate_rx: Option<oneshot::Receiver<()>>,
+) -> (SocketAddr, oneshot::Receiver<ObservedBackendRequest>) {
+    let (observed_request_tx, observed_request_rx) = oneshot::channel();
+    let state = ControlledChatBackendState {
+        observed_request_tx: Arc::new(Mutex::new(Some(observed_request_tx))),
+        response_gate_rx: Arc::new(Mutex::new(response_gate_rx)),
+        response_status,
+        response_trace,
+        response_body,
+    };
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(controlled_chat_completions_handler),
+        )
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind controlled backend listener");
+    let addr = listener
+        .local_addr()
+        .expect("controlled backend listener local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve controlled backend app");
     });
 
     (addr, observed_request_rx)
@@ -165,6 +213,39 @@ async fn mock_messages_handler(
             ("x-backend-trace", "mock-anthropic-backend"),
         ],
         r#"{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"anthropic success"}]}"#,
+    )
+        .into_response()
+}
+
+async fn controlled_chat_completions_handler(
+    State(state): State<ControlledChatBackendState>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    if let Some(observed_request_tx) = state.observed_request_tx.lock().await.take() {
+        let _ = observed_request_tx.send(ObservedBackendRequest {
+            path: "/v1/chat/completions".to_string(),
+            authorization: header_value(&headers, "authorization"),
+            openai_organization: header_value(&headers, "openai-organization"),
+            x_api_key: header_value(&headers, "x-api-key"),
+            anthropic_version: header_value(&headers, "anthropic-version"),
+            anthropic_beta: header_value(&headers, "anthropic-beta"),
+            content_type: header_value(&headers, "content-type"),
+            body,
+        });
+    }
+
+    if let Some(response_gate_rx) = state.response_gate_rx.lock().await.take() {
+        let _ = response_gate_rx.await;
+    }
+
+    (
+        state.response_status,
+        [
+            ("content-type", "application/json"),
+            ("x-backend-trace", state.response_trace),
+        ],
+        state.response_body,
     )
         .into_response()
 }
@@ -324,6 +405,45 @@ async fn wait_for_registered_model(addr: SocketAddr, expected_model: &str) {
     })
     .await
     .unwrap_or_else(|_| panic!("model {expected_model} was not registered"));
+}
+
+async fn wait_for_request_state(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    request_id: &str,
+    expected_state: RequestState,
+) {
+    let expected_state_for_loop = expected_state.clone();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let state = {
+                let core = core.lock().await;
+                core.request_state(request_id)
+            };
+            if state == Some(expected_state_for_loop.clone()) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("request {request_id} did not reach {expected_state:?}"));
+}
+
+async fn wait_for_queued_request_id(core: &Arc<Mutex<ProxyServerCore>>, provider: &str) -> String {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let queued_request_ids = {
+                let core = core.lock().await;
+                core.queued_request_ids(provider)
+            };
+            if let Some(request_id) = queued_request_ids.into_iter().next() {
+                return request_id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("provider {provider} never queued a request"))
 }
 
 #[tokio::test]
@@ -542,4 +662,115 @@ async fn worker_daemon_forwards_anthropic_messages_request_through_live_proxy() 
     ));
 
     daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_requeues_live_request_after_first_daemon_disconnect() {
+    let (proxy_addr, core) = spawn_proxy_server("openai").await;
+
+    let (first_backend_release_tx, first_backend_release_rx) = oneshot::channel();
+    let (first_backend_addr, first_observed_request_rx) = spawn_controlled_chat_backend(
+        StatusCode::OK,
+        "first-backend",
+        r#"{"id":"chatcmpl-first","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"should not arrive"},"finish_reason":"stop"}]}"#,
+        Some(first_backend_release_rx),
+    )
+    .await;
+    let first_daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{first_backend_addr}"),
+    });
+    let first_daemon_handle = tokio::spawn(async move { first_daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let request_body = r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"finish after daemon reconnect"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(
+        proxy_addr,
+        request_body,
+        &[("Authorization", "Bearer client-token")],
+    ));
+
+    let first_observed_request = timeout(Duration::from_secs(2), first_observed_request_rx)
+        .await
+        .expect("first backend observed request before timeout")
+        .expect("first backend observed request");
+    assert_eq!(
+        first_observed_request,
+        ObservedBackendRequest {
+            path: "/v1/chat/completions".to_string(),
+            authorization: Some("Bearer client-token".to_string()),
+            openai_organization: None,
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: request_body.to_string(),
+        }
+    );
+
+    first_daemon_handle.abort();
+
+    let request_id = wait_for_queued_request_id(&core, "openai").await;
+    wait_for_request_state(&core, &request_id, RequestState::Queued).await;
+
+    let (replacement_backend_addr, replacement_observed_request_rx) = spawn_controlled_chat_backend(
+        StatusCode::OK,
+        "replacement-backend",
+        r#"{"id":"chatcmpl-requeued","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"replacement worker success"},"finish_reason":"stop"}]}"#,
+        None,
+    )
+    .await;
+    let replacement_daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-b".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{replacement_backend_addr}"),
+    });
+    let replacement_daemon_handle = tokio::spawn(async move { replacement_daemon.run().await });
+
+    let replacement_observed_request =
+        timeout(Duration::from_secs(5), replacement_observed_request_rx)
+            .await
+            .expect("replacement backend observed request before timeout")
+            .expect("replacement backend observed request");
+    assert_eq!(
+        replacement_observed_request,
+        ObservedBackendRequest {
+            path: "/v1/chat/completions".to_string(),
+            authorization: Some("Bearer client-token".to_string()),
+            openai_organization: None,
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: request_body.to_string(),
+        }
+    );
+
+    let response = timeout(Duration::from_secs(5), http_request)
+        .await
+        .expect("http request completed before timeout")
+        .expect("join http request task");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nx-backend-trace: replacement-backend\r\n"));
+    assert!(response.ends_with(
+        r#"{"id":"chatcmpl-requeued","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"replacement worker success"},"finish_reason":"stop"}]}"#
+    ));
+    assert!(
+        !response.to_ascii_lowercase().contains("disconnect"),
+        "the client response should not leak an internal disconnect error: {response}"
+    );
+
+    drop(first_backend_release_tx);
+    replacement_daemon_handle.abort();
 }
