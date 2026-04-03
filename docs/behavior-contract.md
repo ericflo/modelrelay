@@ -82,4 +82,4 @@ Source of truth:
 Ordered by leverage:
 
 1. Registration sanitization edge warnings:
-   Add characterization tests for truncated worker names, capped model lists with warnings, and `max_concurrent` clamping so the Rust registration contract covers both the happy path and the warning-heavy edge cases Katamari tolerated.
+   Add characterization tests for warning-heavy registration edge cases, including truncated worker names, capped model lists, empty accepted-model registrations, and `max_concurrent` clamping so the Rust registration contract covers both the happy path and the noisy acknowledgements Katamari tolerated.

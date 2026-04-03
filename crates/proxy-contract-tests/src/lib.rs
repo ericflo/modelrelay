@@ -1302,6 +1302,35 @@ mod tests {
     }
 
     #[test]
+    fn openai_responses_http_boundary_preserves_model_stream_flag_and_body() {
+        let body = json!({
+            "model": "gpt-4.1-mini",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}]
+                }
+            ],
+            "stream": true,
+            "metadata": {"trace_id": "trace-123"}
+        })
+        .to_string();
+
+        let forwarded = HttpCompatibilityHarness::parse_client_request("/v1/responses", &body)
+            .expect("OpenAI responses request should parse");
+
+        assert_eq!(
+            forwarded,
+            ForwardedHttpRequest {
+                path: "/v1/responses".to_string(),
+                model: "gpt-4.1-mini".to_string(),
+                is_streaming: true,
+                raw_body: body,
+            }
+        );
+    }
+
+    #[test]
     fn anthropic_messages_http_boundary_preserves_model_stream_flag_and_body() {
         let body = json!({
             "model": "claude-3-7-sonnet",
@@ -1573,6 +1602,91 @@ mod tests {
                 ForwardedChunk::new(
                     2,
                     "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                    true,
+                ),
+                ForwardedChunk::new(3, "data: [DONE]\n\n", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_responses_streaming_http_boundary_preserves_sse_shape_and_done_marker() {
+        let mut harness = ResponseHarness::new();
+        let request_id = harness.start_request("/v1/responses");
+
+        let first = harness.deliver_response_chunk(
+            &request_id,
+            ResponseChunk::new(
+                "data: {\"id\":\"resp_123\",\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+            ),
+        );
+        let second = harness.deliver_response_chunk(
+            &request_id,
+            ResponseChunk::new(
+                "data: {\"id\":\"resp_123\",\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+            ),
+        );
+        let done =
+            harness.deliver_response_chunk(&request_id, ResponseChunk::new("data: [DONE]\n\n"));
+
+        let delivered = harness
+            .deliver_response_complete(
+                &request_id,
+                ResponseComplete::new(
+                    200,
+                    vec![
+                        ResponseHeader::new("content-type", "text/event-stream"),
+                        ResponseHeader::new("cache-control", "no-cache"),
+                    ],
+                    "",
+                ),
+            )
+            .expect("stream completion should close the OpenAI responses SSE response");
+
+        assert_eq!(
+            first,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                1,
+                "data: {\"id\":\"resp_123\",\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+                true,
+            )))
+        );
+        assert_eq!(
+            second,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                2,
+                "data: {\"id\":\"resp_123\",\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+                true,
+            )))
+        );
+        assert_eq!(
+            done,
+            Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
+                3,
+                "data: [DONE]\n\n",
+                true,
+            )))
+        );
+        assert_eq!(delivered.status, 200);
+        assert_eq!(
+            delivered.headers,
+            vec![
+                ResponseHeader::new("content-type", "text/event-stream"),
+                ResponseHeader::new("cache-control", "no-cache"),
+            ]
+        );
+        assert_eq!(delivered.body, "");
+        assert_eq!(
+            delivered.streamed_chunks,
+            vec![
+                ForwardedChunk::new(
+                    1,
+                    "data: {\"id\":\"resp_123\",\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+                    true,
+                ),
+                ForwardedChunk::new(
+                    2,
+                    "data: {\"id\":\"resp_123\",\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
                     true,
                 ),
                 ForwardedChunk::new(3, "data: [DONE]\n\n", true),
