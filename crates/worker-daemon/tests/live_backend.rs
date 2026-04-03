@@ -1,4 +1,4 @@
-use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeMap, fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use axum::{Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post};
 use proxy_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
@@ -240,6 +240,170 @@ async fn post_responses(addr: SocketAddr, body: &str, headers: &[(&str, &str)]) 
     String::from_utf8(response).expect("proxy response is utf-8")
 }
 
+async fn open_responses_request(
+    addr: SocketAddr,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> TcpStream {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .expect("connect to proxy server");
+    let mut request = format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        write!(request, "{name}: {value}\r\n").expect("append request header");
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write responses request");
+
+    stream
+}
+
+async fn spawn_slow_cancellation_backend() -> (
+    SocketAddr,
+    oneshot::Receiver<ObservedBackendRequest>,
+    oneshot::Receiver<Result<(), String>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind slow backend listener");
+    let addr = listener
+        .local_addr()
+        .expect("slow backend listener local addr");
+    let (observed_request_tx, observed_request_rx) = oneshot::channel();
+    let (cancelled_tx, cancelled_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let result = async {
+            let (mut stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
+            let request = read_raw_http_request(&mut stream).await?;
+
+            observed_request_tx
+                .send(ObservedBackendRequest {
+                    path: request.path,
+                    authorization: request.headers.get("authorization").cloned(),
+                    openai_organization: request.headers.get("openai-organization").cloned(),
+                    openai_beta: request.headers.get("openai-beta").cloned(),
+                    x_api_key: request.headers.get("x-api-key").cloned(),
+                    anthropic_version: request.headers.get("anthropic-version").cloned(),
+                    anthropic_beta: request.headers.get("anthropic-beta").cloned(),
+                    content_type: request.headers.get("content-type").cloned(),
+                    body: request.body,
+                })
+                .map_err(|_| "failed to send observed backend request".to_string())?;
+
+            wait_for_socket_close(&mut stream).await
+        }
+        .await;
+
+        let _ = cancelled_tx.send(result);
+    });
+
+    (addr, observed_request_rx, cancelled_rx)
+}
+
+struct RawHttpRequest {
+    path: String,
+    headers: BTreeMap<String, String>,
+    body: String,
+}
+
+async fn read_raw_http_request(stream: &mut TcpStream) -> Result<RawHttpRequest, String> {
+    let mut request_bytes = Vec::new();
+    let mut chunk = [0_u8; 1024];
+
+    let header_end = loop {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err("backend client closed before sending headers".to_string());
+        }
+        request_bytes.extend_from_slice(&chunk[..read]);
+        if let Some(position) = find_bytes(&request_bytes, b"\r\n\r\n") {
+            break position + 4;
+        }
+    };
+
+    let head = String::from_utf8(request_bytes[..header_end].to_vec())
+        .map_err(|error| error.to_string())?;
+    let mut lines = head.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "missing request line".to_string())?;
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| "missing request path".to_string())?
+        .to_string();
+
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| format!("invalid header line: {line}"))?;
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+
+    let content_length = headers
+        .get("content-length")
+        .ok_or_else(|| "missing content-length header".to_string())?
+        .parse::<usize>()
+        .map_err(|error| error.to_string())?;
+    let mut body = request_bytes[header_end..].to_vec();
+    while body.len() < content_length {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err("backend client closed before sending full body".to_string());
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    body.truncate(content_length);
+
+    Ok(RawHttpRequest {
+        path,
+        headers,
+        body: String::from_utf8(body).map_err(|error| error.to_string())?,
+    })
+}
+
+async fn wait_for_socket_close(stream: &mut TcpStream) -> Result<(), String> {
+    timeout(Duration::from_secs(2), async {
+        let mut buffer = [0_u8; 1];
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .await
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                return Ok(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| "backend connection was not canceled before timeout".to_string())?
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
 fn parse_json_response(response: &[u8]) -> (u16, Value) {
     let response = String::from_utf8(response.to_vec()).expect("response is utf-8");
     let (head, body) = response
@@ -384,6 +548,73 @@ async fn worker_daemon_forwards_openai_responses_request_through_live_proxy() {
     assert!(response.ends_with(
         r#"{"id":"resp_123","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_123","status":"completed","role":"assistant","content":[{"type":"output_text","text":"responses proxy success"}]}]}"#
     ));
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_cancels_in_flight_backend_request_when_proxy_client_disconnects() {
+    let proxy_addr = spawn_proxy_server("openai").await;
+    let (backend_addr, observed_request_rx, cancelled_rx) = spawn_slow_cancellation_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let request_body =
+        json!({"model": "gpt-4.1-mini", "stream": true, "input": "cancel me"}).to_string();
+    let mut response_stream = open_responses_request(
+        proxy_addr,
+        &request_body,
+        &[
+            ("Authorization", "Bearer test-openai-key"),
+            ("OpenAI-Beta", "responses=v1"),
+            ("OpenAI-Organization", "org-demo"),
+        ],
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: Some("Bearer test-openai-key".to_string()),
+            openai_organization: Some("org-demo".to_string()),
+            openai_beta: Some("responses=v1".to_string()),
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: request_body,
+        }
+    );
+
+    response_stream
+        .shutdown()
+        .await
+        .expect("shutdown disconnected proxy client");
+    drop(response_stream);
+
+    timeout(Duration::from_secs(2), cancelled_rx)
+        .await
+        .expect("backend cancellation before timeout")
+        .expect("backend cancellation result")
+        .expect("backend request was canceled");
 
     daemon_handle.abort();
 }
