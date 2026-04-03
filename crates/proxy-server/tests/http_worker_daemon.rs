@@ -192,6 +192,8 @@ async fn mock_messages_handler(
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
+    let is_streaming = body.contains(r#""stream":true"#);
+
     if let Some(observed_request_tx) = state.observed_request_tx.lock().await.take() {
         let _ = observed_request_tx.send(ObservedBackendRequest {
             path: "/v1/messages".to_string(),
@@ -203,6 +205,43 @@ async fn mock_messages_handler(
             content_type: header_value(&headers, "content-type"),
             body,
         });
+    }
+
+    if is_streaming {
+        let chunks = [
+            "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ];
+        let stream = stream::unfold(0_usize, move |index| async move {
+            let chunk = chunks.get(index)?;
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Some((
+                Ok::<Bytes, Infallible>(Bytes::from_static(chunk.as_bytes())),
+                index + 1,
+            ))
+        });
+
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            "content-type",
+            "text/event-stream".parse().expect("parse content-type"),
+        );
+        response.headers_mut().insert(
+            "anthropic-beta",
+            "tools-2024-04-04"
+                .parse()
+                .expect("parse anthropic-beta header"),
+        );
+        response.headers_mut().insert(
+            "x-backend-trace",
+            "mock-anthropic-backend"
+                .parse()
+                .expect("parse x-backend-trace header"),
+        );
+        return response;
     }
 
     (
@@ -660,6 +699,94 @@ async fn worker_daemon_forwards_anthropic_messages_request_through_live_proxy() 
     assert!(response.ends_with(
         r#"{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"anthropic success"}]}"#
     ));
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_forwards_anthropic_streaming_request_through_live_proxy() {
+    let (proxy_addr, _core) = spawn_proxy_server("anthropic").await;
+    let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "anthropic".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["claude-3-5-sonnet-20241022".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "claude-3-5-sonnet-20241022").await;
+
+    let request_body = r#"{"model":"claude-3-5-sonnet-20241022","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hello from proxy"}]}"#;
+    let mut response_stream = open_messages_request(
+        proxy_addr,
+        request_body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "tools-2024-04-04"),
+        ],
+    )
+    .await;
+
+    let first_fragment = read_until_contains(
+        &mut response_stream,
+        "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/messages".to_string(),
+            authorization: None,
+            openai_organization: None,
+            x_api_key: Some("test-anthropic-key".to_string()),
+            anthropic_version: Some("2023-06-01".to_string()),
+            anthropic_beta: Some("tools-2024-04-04".to_string()),
+            content_type: Some("application/json".to_string()),
+            body: request_body.to_string(),
+        }
+    );
+    assert!(first_fragment.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(first_fragment.contains("\r\ncontent-type: text/event-stream\r\n"));
+    assert!(
+        first_fragment.contains("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+    );
+    assert!(!first_fragment.contains("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+
+    let mut rest = Vec::new();
+    response_stream
+        .read_to_end(&mut rest)
+        .await
+        .expect("read streaming anthropic messages response");
+    let full_response = first_fragment + &String::from_utf8(rest).expect("proxy response is utf-8");
+
+    let message_start_index = full_response
+        .find("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        .expect("find message_start event");
+    let content_delta_index = full_response
+        .find(
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+        )
+        .expect("find content_block_delta event");
+    let message_stop_index = full_response
+        .find("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+        .expect("find message_stop event");
+
+    assert!(message_start_index < content_delta_index);
+    assert!(content_delta_index < message_stop_index);
+    assert!(full_response.ends_with("0\r\n\r\n"));
 
     daemon_handle.abort();
 }
