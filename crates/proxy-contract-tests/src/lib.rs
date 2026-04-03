@@ -1030,6 +1030,38 @@ mod tests {
     }
 
     #[test]
+    fn header_secret_takes_precedence_over_legacy_query_secret_when_both_are_present() {
+        let mut harness =
+            RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
+
+        let accepted = harness.connect(ConnectRequest {
+            provider: "openai".to_string(),
+            header_secret: Some("top-secret".to_string()),
+            query_secret: Some("wrong-secret".to_string()),
+            client_identity: "198.51.100.24".to_string(),
+        });
+        assert!(
+            accepted.is_ok(),
+            "a valid X-Worker-Secret header should authenticate even if the legacy query secret conflicts"
+        );
+
+        let rejected = harness.connect(ConnectRequest {
+            provider: "openai".to_string(),
+            header_secret: Some("wrong-secret".to_string()),
+            query_secret: Some("top-secret".to_string()),
+            client_identity: "203.0.113.10".to_string(),
+        });
+        assert_eq!(
+            rejected,
+            Err(HandshakeFailure {
+                code: CloseCode::PolicyViolation,
+                reason: "worker authentication failed".to_string(),
+            }),
+            "a valid legacy query secret must not rescue a conflicting X-Worker-Secret header"
+        );
+    }
+
+    #[test]
     fn repeated_failed_auth_attempts_are_rate_limited_by_client_identity() {
         let mut harness =
             RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
