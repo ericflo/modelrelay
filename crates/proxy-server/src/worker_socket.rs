@@ -13,17 +13,23 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use worker_protocol::{
-    CancelMessage, CancelReason, ModelsUpdateMessage, PingMessage, PongMessage,
-    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason, GracefulShutdownMessage, ModelsUpdateMessage, PingMessage,
+    PongMessage, ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage,
+    WorkerToServerMessage,
 };
 
-use crate::{ProxyServerCore, WorkerCancelSignal};
+use crate::{
+    GracefulShutdownDisconnectReason, GracefulShutdownSignal, ProxyServerCore, WorkerCancelSignal,
+};
 
 const WORKER_SECRET_HEADER: &str = "x-worker-secret";
 const CLOSE_REASON_AUTH_FAILED: &str = "worker authentication failed";
 const CLOSE_REASON_PROTOCOL_ERROR: &str = "worker registration protocol error";
+const CLOSE_REASON_GRACEFUL_SHUTDOWN_COMPLETE: &str = "graceful shutdown complete";
+const CLOSE_REASON_GRACEFUL_SHUTDOWN_TIMED_OUT: &str = "graceful shutdown timed out";
 const CLOSE_CODE_POLICY_VIOLATION: u16 = 1008;
 const CLOSE_CODE_PROTOCOL_ERROR: u16 = 1002;
+const CLOSE_CODE_NORMAL: u16 = 1000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,34 +181,9 @@ async fn handle_authenticated_socket(
 ) {
     let mut last_heartbeat_sent_at = tokio::time::Instant::now();
 
-    let Some(Ok(Message::Text(payload))) = socket.recv().await else {
-        close_socket(
-            socket,
-            CLOSE_CODE_PROTOCOL_ERROR,
-            CLOSE_REASON_PROTOCOL_ERROR,
-        )
-        .await;
-        return;
-    };
-
-    let Ok(WorkerToServerMessage::Register(register)) = serde_json::from_str(&payload) else {
-        close_socket(
-            socket,
-            CLOSE_CODE_PROTOCOL_ERROR,
-            CLOSE_REASON_PROTOCOL_ERROR,
-        )
-        .await;
-        return;
-    };
-
-    let registered = {
-        let mut core = state.core.lock().await;
-        core.register_worker(provider, register)
-    };
-    let worker_id = registered.worker_id;
-    let response = ServerToWorkerMessage::RegisterAck(registered.ack);
-
-    let Ok(payload) = serde_json::to_string(&response) else {
+    let Ok((worker_id, payload)) =
+        register_authenticated_worker(&mut socket, &state, provider).await
+    else {
         close_socket(
             socket,
             CLOSE_CODE_PROTOCOL_ERROR,
@@ -225,6 +206,20 @@ async fn handle_authenticated_socket(
         {
             let mut core = state.core.lock().await;
             let _ = core.disconnect_worker(&worker_id);
+            return;
+        }
+
+        if flush_pending_graceful_shutdowns(&mut socket, &state, &worker_id)
+            .await
+            .is_err()
+        {
+            let mut core = state.core.lock().await;
+            let _ = core.disconnect_worker(&worker_id);
+            return;
+        }
+
+        if let Some((code, reason)) = graceful_shutdown_close_action(&state, &worker_id).await {
+            close_socket(socket, code, reason).await;
             return;
         }
 
@@ -274,6 +269,29 @@ async fn handle_authenticated_socket(
             }
         }
     }
+}
+
+async fn register_authenticated_worker(
+    socket: &mut WebSocket,
+    state: &WorkerSocketState,
+    provider: String,
+) -> Result<(String, String), ()> {
+    let Some(Ok(Message::Text(payload))) = socket.recv().await else {
+        return Err(());
+    };
+    let Ok(WorkerToServerMessage::Register(register)) = serde_json::from_str(&payload) else {
+        return Err(());
+    };
+
+    let registered = {
+        let mut core = state.core.lock().await;
+        core.register_worker(provider, register)
+    };
+    let worker_id = registered.worker_id;
+    let payload = serde_json::to_string(&ServerToWorkerMessage::RegisterAck(registered.ack))
+        .map_err(|_| ())?;
+
+    Ok((worker_id, payload))
 }
 
 async fn handle_worker_message(state: &WorkerSocketState, worker_id: &str, payload: &str) -> bool {
@@ -357,6 +375,28 @@ async fn flush_pending_requests(
     Ok(())
 }
 
+async fn flush_pending_graceful_shutdowns(
+    socket: &mut WebSocket,
+    state: &WorkerSocketState,
+    worker_id: &str,
+) -> Result<(), ()> {
+    let shutdowns = {
+        let mut core = state.core.lock().await;
+        core.take_pending_worker_graceful_shutdown_signals(worker_id)
+    };
+
+    for shutdown in shutdowns {
+        let payload =
+            serde_json::to_string(&graceful_shutdown_message(shutdown)).map_err(|_| ())?;
+        socket
+            .send(Message::Text(payload.into()))
+            .await
+            .map_err(|_| ())?;
+    }
+
+    Ok(())
+}
+
 async fn flush_pending_cancels(
     socket: &mut WebSocket,
     state: &WorkerSocketState,
@@ -386,6 +426,44 @@ fn cancel_message(cancel: WorkerCancelSignal) -> ServerToWorkerMessage {
             crate::CancelReason::RequestTimedOut => CancelReason::Timeout,
         },
     })
+}
+
+fn graceful_shutdown_message(shutdown: GracefulShutdownSignal) -> ServerToWorkerMessage {
+    ServerToWorkerMessage::GracefulShutdown(GracefulShutdownMessage {
+        reason: shutdown.reason,
+        drain_timeout_secs: Some(shutdown.drain_timeout.as_secs().max(1)),
+    })
+}
+
+async fn graceful_shutdown_close_action(
+    state: &WorkerSocketState,
+    worker_id: &str,
+) -> Option<(u16, &'static str)> {
+    let mut core = state.core.lock().await;
+    let outcome = core.expire_graceful_shutdown(std::time::Instant::now());
+    if outcome
+        .disconnected_worker_ids
+        .iter()
+        .any(|disconnected_worker_id| disconnected_worker_id == worker_id)
+    {
+        let _ = core.take_graceful_shutdown_disconnect_reason(worker_id);
+        return Some((CLOSE_CODE_NORMAL, CLOSE_REASON_GRACEFUL_SHUTDOWN_TIMED_OUT));
+    }
+
+    if core.disconnect_drained_worker_if_idle(worker_id) {
+        let _ = core.take_graceful_shutdown_disconnect_reason(worker_id);
+        return Some((CLOSE_CODE_NORMAL, CLOSE_REASON_GRACEFUL_SHUTDOWN_COMPLETE));
+    }
+
+    match core.take_graceful_shutdown_disconnect_reason(worker_id) {
+        Some(GracefulShutdownDisconnectReason::Completed) => {
+            Some((CLOSE_CODE_NORMAL, CLOSE_REASON_GRACEFUL_SHUTDOWN_COMPLETE))
+        }
+        Some(GracefulShutdownDisconnectReason::TimedOut) => {
+            Some((CLOSE_CODE_NORMAL, CLOSE_REASON_GRACEFUL_SHUTDOWN_TIMED_OUT))
+        }
+        None => None,
+    }
 }
 
 async fn send_heartbeat_ping(socket: &mut WebSocket) -> Result<(), ()> {

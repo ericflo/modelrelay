@@ -1,6 +1,7 @@
 pub mod worker_socket;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use worker_protocol::{
     HeaderMap, ModelsUpdateMessage, PongMessage, RegisterAck, RegisterMessage, RequestMessage,
@@ -22,6 +23,8 @@ pub struct ProxyServerCore {
     active_requests: HashMap<String, ActiveRequestState>,
     pending_worker_requests: HashMap<String, VecDeque<RequestMessage>>,
     worker_cancel_signals: Vec<WorkerCancelSignal>,
+    worker_graceful_shutdown_signals: Vec<GracefulShutdownSignal>,
+    graceful_shutdown_disconnect_reasons: HashMap<String, GracefulShutdownDisconnectReason>,
 }
 
 impl ProxyServerCore {
@@ -65,6 +68,8 @@ impl ProxyServerCore {
                 max_concurrent: register.max_concurrent.max(1) as usize,
                 reported_load: current_load,
                 in_flight_requests: Vec::new(),
+                is_draining: false,
+                graceful_shutdown_deadline: None,
             },
         );
 
@@ -206,14 +211,26 @@ impl ProxyServerCore {
         worker_id: &str,
         request_id: &str,
     ) -> Option<DispatchAssignment> {
-        let worker = self.workers.get_mut(worker_id)?;
-        let position = worker
-            .in_flight_requests
-            .iter()
-            .position(|active_request_id| active_request_id == request_id)?;
-        worker.in_flight_requests.remove(position);
-        worker.reported_load = worker.reported_load.saturating_sub(1);
+        let should_disconnect_after_finish = {
+            let worker = self.workers.get_mut(worker_id)?;
+            let position = worker
+                .in_flight_requests
+                .iter()
+                .position(|active_request_id| active_request_id == request_id)?;
+            worker.in_flight_requests.remove(position);
+            worker.reported_load = worker.reported_load.saturating_sub(1);
+            worker.is_draining && worker.in_flight_requests.is_empty()
+        };
         self.active_requests.remove(request_id);
+
+        if should_disconnect_after_finish {
+            self.graceful_shutdown_disconnect_reasons.insert(
+                worker_id.to_string(),
+                GracefulShutdownDisconnectReason::Completed,
+            );
+            self.remove_worker(worker_id);
+            return None;
+        }
 
         self.dispatch_next_compatible(worker_id)
     }
@@ -257,10 +274,101 @@ impl ProxyServerCore {
         pending
     }
 
+    pub fn begin_graceful_shutdown(
+        &mut self,
+        reason: Option<&str>,
+        drain_timeout: Duration,
+    ) -> Vec<GracefulShutdownSignal> {
+        let disconnect_deadline = Instant::now() + drain_timeout;
+        let mut signals = Vec::new();
+
+        for worker_id in self.worker_order.clone() {
+            let Some(worker) = self.workers.get_mut(&worker_id) else {
+                continue;
+            };
+            if worker.is_draining {
+                continue;
+            }
+
+            worker.is_draining = true;
+            worker.graceful_shutdown_deadline = Some(disconnect_deadline);
+
+            let signal = GracefulShutdownSignal {
+                worker_id: worker_id.clone(),
+                reason: reason.map(ToOwned::to_owned),
+                drain_timeout,
+            };
+            self.worker_graceful_shutdown_signals.push(signal.clone());
+            signals.push(signal);
+        }
+
+        signals
+    }
+
+    #[must_use]
+    pub fn take_pending_worker_graceful_shutdown_signals(
+        &mut self,
+        worker_id: &str,
+    ) -> Vec<GracefulShutdownSignal> {
+        let mut pending = Vec::new();
+        let mut remaining = Vec::with_capacity(self.worker_graceful_shutdown_signals.len());
+
+        for signal in self.worker_graceful_shutdown_signals.drain(..) {
+            if signal.worker_id == worker_id && self.workers.contains_key(&signal.worker_id) {
+                pending.push(signal);
+            } else if self.workers.contains_key(&signal.worker_id) {
+                remaining.push(signal);
+            }
+        }
+
+        self.worker_graceful_shutdown_signals = remaining;
+        pending
+    }
+
+    #[must_use]
+    pub fn expire_graceful_shutdown(&mut self, now: Instant) -> GracefulShutdownOutcome {
+        let expiring_workers = self
+            .worker_order
+            .iter()
+            .filter_map(|worker_id| {
+                let worker = self.workers.get(worker_id)?;
+                let deadline = worker.graceful_shutdown_deadline?;
+                (deadline <= now).then(|| worker_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        let mut disconnected_worker_ids = Vec::new();
+        let mut failed_requests = Vec::new();
+
+        for worker_id in expiring_workers {
+            let Some(worker) = self.workers.get(&worker_id).cloned() else {
+                continue;
+            };
+
+            for request_id in &worker.in_flight_requests {
+                self.active_requests.remove(request_id);
+                failed_requests.push(RequestFailure {
+                    request_id: request_id.clone(),
+                    reason: RequestFailureReason::GracefulShutdownTimedOut,
+                });
+            }
+
+            self.graceful_shutdown_disconnect_reasons.insert(
+                worker_id.clone(),
+                GracefulShutdownDisconnectReason::TimedOut,
+            );
+            self.remove_worker(&worker_id);
+            disconnected_worker_ids.push(worker_id);
+        }
+
+        GracefulShutdownOutcome {
+            disconnected_worker_ids,
+            failed_requests,
+        }
+    }
+
     pub fn disconnect_worker(&mut self, worker_id: &str) -> Option<WorkerDisconnectOutcome> {
-        let worker = self.workers.remove(worker_id)?;
-        self.worker_order
-            .retain(|registered_worker_id| registered_worker_id != worker_id);
+        let worker = self.remove_worker(worker_id)?;
 
         let mut requeued_request_ids = Vec::new();
         let mut failed_requests = Vec::new();
@@ -404,6 +512,37 @@ impl ProxyServerCore {
     }
 
     #[must_use]
+    pub fn worker_is_draining(&self, worker_id: &str) -> bool {
+        self.workers
+            .get(worker_id)
+            .is_some_and(|worker| worker.is_draining)
+    }
+
+    pub fn disconnect_drained_worker_if_idle(&mut self, worker_id: &str) -> bool {
+        let should_disconnect = self
+            .workers
+            .get(worker_id)
+            .is_some_and(|worker| worker.is_draining && worker.in_flight_requests.is_empty());
+
+        if should_disconnect {
+            self.graceful_shutdown_disconnect_reasons.insert(
+                worker_id.to_string(),
+                GracefulShutdownDisconnectReason::Completed,
+            );
+            self.remove_worker(worker_id);
+        }
+
+        should_disconnect
+    }
+
+    pub(crate) fn take_graceful_shutdown_disconnect_reason(
+        &mut self,
+        worker_id: &str,
+    ) -> Option<GracefulShutdownDisconnectReason> {
+        self.graceful_shutdown_disconnect_reasons.remove(worker_id)
+    }
+
+    #[must_use]
     pub fn worker_reported_load(&self, worker_id: &str) -> Option<usize> {
         self.workers
             .get(worker_id)
@@ -467,7 +606,11 @@ impl ProxyServerCore {
                 let selection_load = worker.selection_load();
                 let has_capacity = selection_load < worker.max_concurrent;
 
-                if worker.provider == provider && supports_exact_model && has_capacity {
+                if worker.provider == provider
+                    && supports_exact_model
+                    && has_capacity
+                    && !worker.is_draining
+                {
                     Some((position, worker_id.clone(), selection_load))
                 } else {
                     None
@@ -514,9 +657,21 @@ impl ProxyServerCore {
     }
 
     fn worker_has_capacity(&self, worker_id: &str) -> bool {
-        self.workers
-            .get(worker_id)
-            .is_some_and(|worker| worker.selection_load() < worker.max_concurrent)
+        self.workers.get(worker_id).is_some_and(|worker| {
+            !worker.is_draining && worker.selection_load() < worker.max_concurrent
+        })
+    }
+
+    fn remove_worker(&mut self, worker_id: &str) -> Option<WorkerState> {
+        let worker = self.workers.remove(worker_id)?;
+        self.worker_order
+            .retain(|registered_worker_id| registered_worker_id != worker_id);
+        self.pending_worker_requests.remove(worker_id);
+        self.worker_cancel_signals
+            .retain(|signal| signal.worker_id != worker_id);
+        self.worker_graceful_shutdown_signals
+            .retain(|signal| signal.worker_id != worker_id);
+        Some(worker)
     }
 }
 
@@ -584,6 +739,25 @@ pub struct WorkerDisconnectOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GracefulShutdownSignal {
+    pub worker_id: String,
+    pub reason: Option<String>,
+    pub drain_timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GracefulShutdownOutcome {
+    pub disconnected_worker_ids: Vec<String>,
+    pub failed_requests: Vec<RequestFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GracefulShutdownDisconnectReason {
+    Completed,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestState {
     Queued,
     InFlight {
@@ -603,6 +777,7 @@ pub enum RequestFailureReason {
     RequestAlreadyCanceled,
     MaxRequeuesExceeded,
     QueueFull,
+    GracefulShutdownTimedOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -613,6 +788,8 @@ struct WorkerState {
     max_concurrent: usize,
     reported_load: usize,
     in_flight_requests: Vec<String>,
+    is_draining: bool,
+    graceful_shutdown_deadline: Option<Instant>,
 }
 
 impl WorkerState {

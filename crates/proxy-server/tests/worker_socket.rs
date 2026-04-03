@@ -11,9 +11,9 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    CancelMessage, CancelReason as ProtocolCancelReason, HeaderMap, ModelsUpdateMessage,
-    PingMessage, PongMessage, RegisterMessage, ResponseChunkMessage, ResponseCompleteMessage,
-    ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason as ProtocolCancelReason, GracefulShutdownMessage, HeaderMap,
+    ModelsUpdateMessage, PingMessage, PongMessage, RegisterMessage, ResponseChunkMessage,
+    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -75,6 +75,33 @@ async fn next_non_heartbeat_text_message(socket: &mut TestSocket, context: &str)
 async fn next_server_message(socket: &mut TestSocket, context: &str) -> ServerToWorkerMessage {
     serde_json::from_str(&next_non_heartbeat_text_message(socket, context).await)
         .unwrap_or_else(|_| panic!("deserialize {context}"))
+}
+
+async fn next_close_message(
+    socket: &mut TestSocket,
+    context: &str,
+) -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    loop {
+        let message = timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .unwrap_or_else(|_| panic!("receive {context} before timeout"))
+            .expect("socket message")
+            .expect("websocket message");
+
+        match message {
+            Message::Text(payload) => {
+                if matches!(
+                    serde_json::from_str::<ServerToWorkerMessage>(&payload),
+                    Ok(ServerToWorkerMessage::Ping(_))
+                ) {
+                    continue;
+                }
+                panic!("expected close frame {context}");
+            }
+            Message::Close(Some(close_frame)) => return close_frame,
+            _ => panic!("expected close frame {context}"),
+        }
+    }
 }
 
 async fn assert_no_non_heartbeat_message(socket: &mut TestSocket, wait_for: std::time::Duration) {
@@ -305,6 +332,41 @@ async fn assert_canceled_request_state(core: &Arc<Mutex<ProxyServerCore>>, worke
     assert_eq!(
         core.queued_request_ids("openai"),
         vec!["request-2".to_string()]
+    );
+}
+
+async fn submit_graceful_shutdown_test_requests(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    worker_id: &str,
+) {
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"finish before drain"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+            request_id: "request-1".to_string(),
+            worker_id: worker_id.to_string(),
+        })
+    );
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued during drain"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            request_id: "request-2".to_string(),
+            queue_len: 1,
+        })
     );
 }
 
@@ -783,4 +845,126 @@ async fn heartbeat_ping_pong_updates_live_worker_load_without_reconnect_or_early
             HeaderMap::new(),
         )
     );
+}
+
+#[tokio::test]
+async fn graceful_shutdown_drains_in_flight_request_and_disconnects_without_dispatching_queued_work()
+ {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack = register_test_worker(&mut socket).await;
+
+    submit_graceful_shutdown_test_requests(&core, &ack.worker_id).await;
+
+    assert_eq!(
+        next_server_message(&mut socket, "initial request before drain").await,
+        expected_request_message(
+            "request-1",
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"finish before drain"}]}"#,
+            HeaderMap::new(),
+        )
+    );
+
+    {
+        let mut core = core.lock().await;
+        assert_eq!(
+            core.begin_graceful_shutdown(
+                Some("proxy server shutting down"),
+                std::time::Duration::from_millis(250),
+            ),
+            vec![proxy_server::GracefulShutdownSignal {
+                worker_id: ack.worker_id.clone(),
+                reason: Some("proxy server shutting down".to_string()),
+                drain_timeout: std::time::Duration::from_millis(250),
+            }]
+        );
+        assert!(core.worker_is_draining(&ack.worker_id));
+    }
+
+    assert_eq!(
+        next_server_message(&mut socket, "graceful shutdown").await,
+        ServerToWorkerMessage::GracefulShutdown(GracefulShutdownMessage {
+            reason: Some("proxy server shutting down".to_string()),
+            drain_timeout_secs: Some(1),
+        })
+    );
+
+    send_response_complete(&mut socket, "request-1").await;
+
+    let close_frame = next_close_message(&mut socket, "post-drain disconnect").await;
+    assert_eq!(u16::from(close_frame.code), 1000);
+    assert_eq!(close_frame.reason, "graceful shutdown complete");
+
+    let core = core.lock().await;
+    assert!(!core.has_worker(&ack.worker_id));
+    assert_eq!(core.request_state("request-1"), None);
+    assert_eq!(core.request_state("request-2"), Some(RequestState::Queued));
+    assert_eq!(
+        core.queued_request_ids("openai"),
+        vec!["request-2".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn graceful_shutdown_timeout_disconnects_worker_and_removes_in_flight_request() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack = register_test_worker(&mut socket).await;
+
+    {
+        let mut core = core.lock().await;
+        assert_eq!(
+            core.submit_transport_request(
+                "openai",
+                "llama-3.1-70b",
+                "/v1/chat/completions",
+                false,
+                r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"timeout during drain"}]}"#,
+                HeaderMap::new(),
+            ),
+            SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: ack.worker_id.clone(),
+            })
+        );
+        assert_eq!(
+            core.begin_graceful_shutdown(
+                Some("proxy server draining"),
+                std::time::Duration::from_millis(50),
+            ),
+            vec![proxy_server::GracefulShutdownSignal {
+                worker_id: ack.worker_id.clone(),
+                reason: Some("proxy server draining".to_string()),
+                drain_timeout: std::time::Duration::from_millis(50),
+            }]
+        );
+    }
+
+    assert_eq!(
+        next_server_message(&mut socket, "request before timeout").await,
+        expected_request_message(
+            "request-1",
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"timeout during drain"}]}"#,
+            HeaderMap::new(),
+        )
+    );
+    assert_eq!(
+        next_server_message(&mut socket, "graceful shutdown before timeout").await,
+        ServerToWorkerMessage::GracefulShutdown(GracefulShutdownMessage {
+            reason: Some("proxy server draining".to_string()),
+            drain_timeout_secs: Some(1),
+        })
+    );
+
+    let close_frame = next_close_message(&mut socket, "drain timeout disconnect").await;
+    assert_eq!(u16::from(close_frame.code), 1000);
+    assert_eq!(close_frame.reason, "graceful shutdown timed out");
+
+    let core = core.lock().await;
+    assert!(!core.has_worker(&ack.worker_id));
+    assert_eq!(core.request_state("request-1"), None);
 }
