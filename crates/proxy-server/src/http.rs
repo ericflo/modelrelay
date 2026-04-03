@@ -51,6 +51,7 @@ impl ProxyHttpApp {
         let router = Router::new()
             .route("/v1/models", get(models_handler))
             .route("/v1/chat/completions", post(chat_completions_handler))
+            .route("/v1/responses", post(responses_handler))
             .with_state(HttpState {
                 core: self.core,
                 models_provider: self.models_provider,
@@ -113,6 +114,23 @@ async fn chat_completions_handler(
     headers: AxumHeaderMap,
     body: String,
 ) -> Response {
+    worker_backed_openai_http_handler(state, headers, body, "/v1/chat/completions").await
+}
+
+async fn responses_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+    body: String,
+) -> Response {
+    worker_backed_openai_http_handler(state, headers, body, "/v1/responses").await
+}
+
+async fn worker_backed_openai_http_handler(
+    state: HttpState,
+    headers: AxumHeaderMap,
+    body: String,
+    endpoint_path: &'static str,
+) -> Response {
     let Ok(request) = serde_json::from_str::<ChatCompletionsRequest>(&body) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -126,7 +144,7 @@ async fn chat_completions_handler(
         match core.submit_http_response_request(
             &state.models_provider,
             request.model,
-            "/v1/chat/completions",
+            endpoint_path,
             body,
             forwarded_request_headers(&headers),
         ) {
