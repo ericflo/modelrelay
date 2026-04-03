@@ -473,12 +473,10 @@ async fn rejected_auth_connection_is_closed_with_policy_violation() {
 #[tokio::test]
 async fn worker_secret_query_string_fallback_authenticates_connection() {
     let (addr, core) = spawn_server().await;
-    let (mut socket, _) = connect_async(worker_connect_request_with_query_secret(
-        addr,
-        "top-secret",
-    ))
-    .await
-    .expect("connect websocket");
+    let (mut socket, _) =
+        connect_async(worker_connect_request_with_query_secret(addr, "top-secret"))
+            .await
+            .expect("connect websocket");
 
     let ack = register_test_worker(&mut socket).await;
 
@@ -493,8 +491,7 @@ async fn worker_secret_query_string_fallback_authenticates_connection() {
 #[tokio::test]
 async fn disabled_provider_connection_is_closed_with_policy_violation() {
     let (addr, core) =
-        spawn_server_with_provider_config(WorkerSocketProviderConfig::disabled("top-secret"))
-            .await;
+        spawn_server_with_provider_config(WorkerSocketProviderConfig::disabled("top-secret")).await;
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
         .await
         .expect("connect websocket");
