@@ -51,6 +51,7 @@ impl ProxyHttpApp {
         let router = Router::new()
             .route("/v1/models", get(models_handler))
             .route("/v1/chat/completions", post(chat_completions_handler))
+            .route("/v1/messages", post(messages_handler))
             .route("/v1/responses", post(responses_handler))
             .with_state(HttpState {
                 core: self.core,
@@ -114,7 +115,15 @@ async fn chat_completions_handler(
     headers: AxumHeaderMap,
     body: String,
 ) -> Response {
-    worker_backed_openai_http_handler(state, headers, body, "/v1/chat/completions").await
+    worker_backed_http_handler(state, headers, body, "/v1/chat/completions").await
+}
+
+async fn messages_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+    body: String,
+) -> Response {
+    worker_backed_http_handler(state, headers, body, "/v1/messages").await
 }
 
 async fn responses_handler(
@@ -122,10 +131,10 @@ async fn responses_handler(
     headers: AxumHeaderMap,
     body: String,
 ) -> Response {
-    worker_backed_openai_http_handler(state, headers, body, "/v1/responses").await
+    worker_backed_http_handler(state, headers, body, "/v1/responses").await
 }
 
-async fn worker_backed_openai_http_handler(
+async fn worker_backed_http_handler(
     state: HttpState,
     headers: AxumHeaderMap,
     body: String,
