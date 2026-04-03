@@ -46,6 +46,11 @@ struct DelayedResponsesBackendState {
     release_response_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
 }
 
+#[derive(Clone)]
+struct NonSuccessResponsesBackendState {
+    observed_request_tx: Arc<Mutex<Option<oneshot::Sender<ObservedBackendRequest>>>>,
+}
+
 async fn spawn_proxy_server(models_provider: &str) -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let worker_socket_app = WorkerSocketApp::new(core.clone())
@@ -447,6 +452,32 @@ async fn spawn_delayed_responses_backend() -> (
     (addr, observed_request_rx, release_response_tx)
 }
 
+async fn spawn_non_success_responses_backend()
+-> (SocketAddr, oneshot::Receiver<ObservedBackendRequest>) {
+    let (observed_request_tx, observed_request_rx) = oneshot::channel();
+    let state = NonSuccessResponsesBackendState {
+        observed_request_tx: Arc::new(Mutex::new(Some(observed_request_tx))),
+    };
+    let app = Router::new()
+        .route("/v1/responses", post(non_success_responses_handler))
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind non-success backend listener");
+    let addr = listener
+        .local_addr()
+        .expect("non-success backend listener local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve non-success backend app");
+    });
+
+    (addr, observed_request_rx)
+}
+
 async fn delayed_responses_handler(
     State(state): State<DelayedResponsesBackendState>,
     headers: HeaderMap,
@@ -478,6 +509,37 @@ async fn delayed_responses_handler(
             ("x-backend-trace", "delayed-openai-responses-backend"),
         ],
         r#"{"id":"resp_drain_1","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_drain_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"drain completed"}]}]}"#,
+    )
+}
+
+async fn non_success_responses_handler(
+    State(state): State<NonSuccessResponsesBackendState>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    if let Some(observed_request_tx) = state.observed_request_tx.lock().await.take() {
+        let _ = observed_request_tx.send(ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: header_value(&headers, "authorization"),
+            openai_organization: header_value(&headers, "openai-organization"),
+            openai_beta: header_value(&headers, "openai-beta"),
+            x_api_key: header_value(&headers, "x-api-key"),
+            anthropic_version: header_value(&headers, "anthropic-version"),
+            anthropic_beta: header_value(&headers, "anthropic-beta"),
+            content_type: header_value(&headers, "content-type"),
+            body,
+        });
+    }
+
+    (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        [
+            ("content-type", "application/json"),
+            ("openai-beta", "responses=v1"),
+            ("retry-after", "17"),
+            ("x-backend-trace", "openai-responses-rate-limit"),
+        ],
+        r#"{"error":{"message":"backend overloaded","type":"rate_limit_error","code":"backend_overloaded"}}"#,
     )
 }
 
@@ -845,6 +907,70 @@ async fn worker_daemon_forwards_openai_responses_request_through_live_proxy() {
     assert!(response.contains("\r\nx-backend-trace: openai-responses-backend\r\n"));
     assert!(response.ends_with(
         r#"{"id":"resp_123","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_123","status":"completed","role":"assistant","content":[{"type":"output_text","text":"responses proxy success"}]}]}"#
+    ));
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_preserves_non_2xx_openai_responses_backend_response_through_live_proxy() {
+    let (proxy_addr, _) = spawn_proxy_server("openai").await;
+    let (backend_addr, observed_request_rx) = spawn_non_success_responses_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let request_body =
+        json!({"model": "gpt-4.1-mini", "input": "trigger backend overload"}).to_string();
+    let response = post_responses(
+        proxy_addr,
+        &request_body,
+        &[
+            ("Authorization", "Bearer test-openai-key"),
+            ("OpenAI-Beta", "responses=v1"),
+            ("OpenAI-Organization", "org-demo"),
+            ("X-Trace-Id", "trace-429"),
+        ],
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: Some("Bearer test-openai-key".to_string()),
+            openai_organization: Some("org-demo".to_string()),
+            openai_beta: Some("responses=v1".to_string()),
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: request_body,
+        }
+    );
+    assert!(response.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
+    assert!(response.contains("\r\nretry-after: 17\r\n"));
+    assert!(response.contains("\r\nx-backend-trace: openai-responses-rate-limit\r\n"));
+    assert!(response.ends_with(
+        r#"{"error":{"message":"backend overloaded","type":"rate_limit_error","code":"backend_overloaded"}}"#
     ));
 
     daemon_handle.abort();
