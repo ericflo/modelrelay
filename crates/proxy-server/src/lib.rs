@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use worker_protocol::{ModelsUpdateMessage, RegisterAck, RegisterMessage};
 
+const MAX_REQUEUE_COUNT: usize = 3;
+
 #[derive(Debug, Default)]
 pub struct ProxyServerCore {
     next_request_id: usize,
@@ -102,6 +104,7 @@ impl ProxyServerCore {
             request_id: format!("request-{}", self.next_request_id),
             provider: provider.into(),
             model: model.into(),
+            requeue_count: 0,
         };
         self.next_request_id += 1;
         self.active_requests.insert(
@@ -159,6 +162,70 @@ impl ProxyServerCore {
         self.active_requests.remove(request_id);
 
         self.dispatch_next_compatible(worker_id)
+    }
+
+    pub fn disconnect_worker(&mut self, worker_id: &str) -> Option<WorkerDisconnectOutcome> {
+        let worker = self.workers.remove(worker_id)?;
+        self.worker_order
+            .retain(|registered_worker_id| registered_worker_id != worker_id);
+
+        let mut requeued_request_ids = Vec::new();
+        let mut failed_requests = Vec::new();
+        let mut requeued_requests = Vec::new();
+
+        for request_id in worker.in_flight_requests {
+            let Some(active_request) = self.active_requests.remove(&request_id) else {
+                continue;
+            };
+
+            let ActiveRequestState::InFlight {
+                mut request,
+                cancellation,
+                ..
+            } = active_request
+            else {
+                continue;
+            };
+
+            if cancellation.is_some() {
+                failed_requests.push(RequestFailure {
+                    request_id,
+                    reason: RequestFailureReason::RequestAlreadyCanceled,
+                });
+                continue;
+            }
+
+            if request.requeue_count >= MAX_REQUEUE_COUNT {
+                failed_requests.push(RequestFailure {
+                    request_id,
+                    reason: RequestFailureReason::MaxRequeuesExceeded,
+                });
+                continue;
+            }
+
+            request.requeue_count += 1;
+            requeued_request_ids.push(request.request_id.clone());
+            requeued_requests.push(request.clone());
+            self.active_requests.insert(
+                request.request_id.clone(),
+                ActiveRequestState::Queued { request },
+            );
+        }
+
+        let had_requeued_requests = !requeued_request_ids.is_empty();
+        if let Some(queue) = self.provider_queues.get_mut(&worker.provider) {
+            for request in requeued_requests.into_iter().rev() {
+                queue.push_front(request);
+            }
+        } else if had_requeued_requests {
+            self.provider_queues
+                .insert(worker.provider, requeued_requests.into_iter().collect());
+        }
+
+        Some(WorkerDisconnectOutcome {
+            requeued_request_ids,
+            failed_requests,
+        })
     }
 
     pub fn cancel_request(
@@ -402,6 +469,12 @@ pub struct WorkerCancelSignal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerDisconnectOutcome {
+    pub requeued_request_ids: Vec<String>,
+    pub failed_requests: Vec<RequestFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestState {
     Queued,
     InFlight {
@@ -418,6 +491,8 @@ pub struct RequestFailure {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestFailureReason {
+    RequestAlreadyCanceled,
+    MaxRequeuesExceeded,
     QueueFull,
 }
 
@@ -442,6 +517,7 @@ struct RequestRecord {
     request_id: String,
     provider: String,
     model: String,
+    requeue_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -507,7 +583,7 @@ mod tests {
     use super::{
         CancelReason, CancellationOutcome, DispatchAssignment, ProviderQueuePolicy,
         ProxyServerCore, QueuedAssignment, RequestFailure, RequestFailureReason, RequestState,
-        SubmissionOutcome, WorkerCancelSignal,
+        SubmissionOutcome, WorkerCancelSignal, WorkerDisconnectOutcome,
     };
     use worker_protocol::{ModelsUpdateMessage, RegisterMessage};
 
@@ -860,5 +936,184 @@ mod tests {
             core.worker_in_flight_request_ids(&worker_id),
             vec!["request-2".to_string()]
         );
+    }
+
+    #[test]
+    fn disconnecting_a_worker_requeues_a_live_in_flight_request() {
+        let mut core = ProxyServerCore::new();
+        let first = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+        let second = core
+            .register_worker(
+                "openai",
+                register_message("gpu-b", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: first.clone(),
+            })
+        );
+
+        assert_eq!(
+            core.disconnect_worker(&first),
+            Some(WorkerDisconnectOutcome {
+                requeued_request_ids: vec!["request-1".to_string()],
+                failed_requests: Vec::new(),
+            })
+        );
+        assert_eq!(
+            core.request_state("request-1"),
+            Some(RequestState::Queued)
+        );
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-1".to_string()]
+        );
+
+        assert_eq!(
+            core.update_worker_models(
+                &second,
+                ModelsUpdateMessage {
+                    models: vec!["llama-3.1-70b".to_string()],
+                    current_load: 0,
+                }
+            ),
+            vec![DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: second.clone(),
+            }]
+        );
+        assert_eq!(
+            core.worker_in_flight_request_ids(&second),
+            vec!["request-1".to_string()]
+        );
+        assert!(core.queued_request_ids("openai").is_empty());
+    }
+
+    #[test]
+    fn disconnecting_a_worker_does_not_requeue_a_request_after_it_was_canceled() {
+        let mut core = ProxyServerCore::new();
+        let worker_id = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: worker_id.clone(),
+            })
+        );
+        assert_eq!(
+            core.cancel_request("request-1", CancelReason::ClientDisconnected),
+            Some(CancellationOutcome::WorkerCancelSent(WorkerCancelSignal {
+                worker_id: worker_id.clone(),
+                request_id: "request-1".to_string(),
+                reason: CancelReason::ClientDisconnected,
+            }))
+        );
+
+        assert_eq!(
+            core.disconnect_worker(&worker_id),
+            Some(WorkerDisconnectOutcome {
+                requeued_request_ids: Vec::new(),
+                failed_requests: vec![RequestFailure {
+                    request_id: "request-1".to_string(),
+                    reason: RequestFailureReason::RequestAlreadyCanceled,
+                }],
+            })
+        );
+        assert_eq!(core.request_state("request-1"), None);
+        assert!(core.queued_request_ids("openai").is_empty());
+    }
+
+    #[test]
+    fn repeated_worker_disconnects_stop_requeueing_after_the_max_attempts() {
+        let mut core = ProxyServerCore::new();
+        let worker_one = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+        let worker_two = core
+            .register_worker(
+                "openai",
+                register_message("gpu-b", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+        let worker_three = core
+            .register_worker(
+                "openai",
+                register_message("gpu-c", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+        let worker_four = core
+            .register_worker(
+                "openai",
+                register_message("gpu-d", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: worker_one.clone(),
+            })
+        );
+
+        let requeues = [
+            (worker_one, worker_two.clone()),
+            (worker_two.clone(), worker_three.clone()),
+            (worker_three.clone(), worker_four.clone()),
+        ];
+
+        for (disconnected_worker, replacement_worker) in requeues {
+            assert_eq!(
+                core.disconnect_worker(&disconnected_worker),
+                Some(WorkerDisconnectOutcome {
+                    requeued_request_ids: vec!["request-1".to_string()],
+                    failed_requests: Vec::new(),
+                })
+            );
+            assert_eq!(
+                core.update_worker_models(
+                    &replacement_worker,
+                    ModelsUpdateMessage {
+                        models: vec!["llama-3.1-70b".to_string()],
+                        current_load: 0,
+                    }
+                ),
+                vec![DispatchAssignment {
+                    request_id: "request-1".to_string(),
+                    worker_id: replacement_worker.clone(),
+                }]
+            );
+        }
+
+        assert_eq!(
+            core.disconnect_worker(&worker_four),
+            Some(WorkerDisconnectOutcome {
+                requeued_request_ids: Vec::new(),
+                failed_requests: vec![RequestFailure {
+                    request_id: "request-1".to_string(),
+                    reason: RequestFailureReason::MaxRequeuesExceeded,
+                }],
+            })
+        );
+        assert_eq!(core.request_state("request-1"), None);
+        assert!(core.queued_request_ids("openai").is_empty());
     }
 }
