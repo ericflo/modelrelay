@@ -236,12 +236,12 @@ async fn handle_authenticated_socket(
                     return;
                 }
             }
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
                 let mut core = state.core.lock().await;
                 let _ = core.disconnect_worker(&worker_id);
                 return;
             }
-            Ok(Some(Ok(Message::Ping(_)))) | Ok(Some(Ok(Message::Pong(_)))) => {}
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) | Err(_) => {}
             Ok(Some(Ok(Message::Binary(_)))) => {
                 close_socket(
                     socket,
@@ -253,7 +253,6 @@ async fn handle_authenticated_socket(
                 let _ = core.disconnect_worker(&worker_id);
                 return;
             }
-            Err(_) => {}
         }
     }
 }
