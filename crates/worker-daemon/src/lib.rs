@@ -201,10 +201,11 @@ impl WorkerDaemon {
                 Ok(true)
             }
             ServerToWorkerMessage::Ping(ping) => {
+                let current_load = u32::try_from(active_requests.len()).unwrap_or(u32::MAX);
                 event_tx
                     .send(DaemonEvent::Outbound(WorkerToServerMessage::Pong(
                         PongMessage {
-                            current_load: 0,
+                            current_load,
                             timestamp_unix_ms: ping.timestamp_unix_ms,
                         },
                     )))
