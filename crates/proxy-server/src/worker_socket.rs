@@ -22,6 +22,8 @@ use crate::{
     GracefulShutdownDisconnectReason, GracefulShutdownSignal, ProxyServerCore, WorkerCancelSignal,
 };
 
+pub const WORKER_CONNECT_PATH: &str = "/v1/worker/connect";
+
 const WORKER_SECRET_HEADER: &str = "x-worker-secret";
 const CLOSE_REASON_AUTH_FAILED: &str = "worker authentication failed";
 const CLOSE_REASON_PROTOCOL_ERROR: &str = "worker registration protocol error";
@@ -86,7 +88,7 @@ impl WorkerSocketApp {
 
     pub fn router(self) -> Router {
         Router::new()
-            .route("/v1/worker/connect", get(worker_connect_handler))
+            .route(WORKER_CONNECT_PATH, get(worker_connect_handler))
             .with_state(self.state)
     }
 }

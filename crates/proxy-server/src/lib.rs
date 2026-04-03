@@ -1,3 +1,4 @@
+pub mod http_router;
 pub mod worker_socket;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -7,7 +8,8 @@ use worker_protocol::{
     HeaderMap, ModelsUpdateMessage, PongMessage, RegisterAck, RegisterMessage, RequestMessage,
 };
 
-pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
+pub use http_router::{MODELS_PATH, ProxyServerApp};
+pub use worker_socket::{WORKER_CONNECT_PATH, WorkerSocketApp, WorkerSocketProviderConfig};
 
 const MAX_REQUEUE_COUNT: usize = 3;
 

@@ -4,12 +4,13 @@
 
 The target shape is operationally simple: clients talk to one stable OpenAI-style or Anthropic-style endpoint, workers connect in from heterogeneous GPU boxes, and the server handles routing, queueing, streaming, cancellation, and worker churn in one place.
 
-This repository is deliberately in the phase-0 bootstrap state. The immediate job is to lock down the Katamari worker-proxy behavior as a public contract and build the Rust test harness that future characterization tests will use.
+This repository now has the first live central-server slice: a composable Axum router that serves OpenAI-compatible `GET /v1/models` from the in-memory worker registry alongside the existing worker WebSocket transport. The immediate job remains tests-first expansion of the client-facing HTTP surface until chat, responses, messages, streaming, and cancellation are all backed by the same live router.
 
 ## Current Scope
 
 - Katamari behavior contract captured from commit `ab5e90f6a2ff05a063663ce478146bf0b6829429`
-- Minimal Rust workspace and CI for tests-first development
+- In-memory `proxy-server` core for worker registry, queueing, routing, cancellation, and graceful drain behavior
+- Live Axum transport slices for worker WebSocket registration and OpenAI-compatible `GET /v1/models`
 - Contract test crate plus a shared `worker-protocol` crate defining the bridge message schema
 
 ## Documents
@@ -22,5 +23,6 @@ This repository is deliberately in the phase-0 bootstrap state. The immediate jo
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p proxy-server --test http_router
 cargo test --workspace
 ```
