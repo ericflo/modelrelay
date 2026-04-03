@@ -419,6 +419,35 @@ async fn worker_backed_chat_completions_route_returns_sanitized_no_workers_error
 }
 
 #[tokio::test]
+async fn worker_backed_chat_completions_route_returns_sanitized_queue_timeout_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: Some(0),
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"timeout me"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
+    wait_for_request_state(&core, "request-1", RequestState::Queued).await;
+
+    {
+        let mut core = core.lock().await;
+        let failures = core.expire_queue_timeouts(std::time::Instant::now());
+        assert_eq!(failures.len(), 1);
+    }
+
+    let response = http_request.await.expect("join timed-out http request");
+    assert_service_unavailable(&response, "Request timed out waiting for worker");
+}
+
+#[tokio::test]
 async fn worker_backed_chat_completions_route_returns_sanitized_queue_full_error() {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     {
@@ -457,6 +486,20 @@ async fn worker_backed_chat_completions_route_returns_sanitized_queue_full_error
 
     first_request.abort();
     second_request.abort();
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_returns_sanitized_provider_disabled_error() {
+    let addr = spawn_server_with_core(Arc::new(Mutex::new(ProxyServerCore::new())), false).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hello"}]}"#;
+    let response = post_chat_completions(addr, body, &[]).await;
+
+    assert_service_unavailable(&response, "Provider is currently disabled");
+    assert!(
+        !response.contains("virtual provider is disabled"),
+        "the compatibility boundary should use the stable disabled message"
+    );
 }
 
 #[tokio::test]
