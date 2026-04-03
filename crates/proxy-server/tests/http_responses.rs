@@ -16,8 +16,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    CancelMessage, CancelReason, HeaderMap, RegisterMessage, ResponseChunkMessage,
-    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason, HeaderMap, ModelsUpdateMessage, RegisterMessage,
+    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -209,6 +209,19 @@ async fn send_response_chunk(socket: &mut TestSocket, request_id: &str, chunk: &
         .send(Message::Text(payload.into()))
         .await
         .expect("send response_chunk");
+}
+
+async fn send_models_update(socket: &mut TestSocket, models: Vec<String>, current_load: u32) {
+    let message = WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
+        models,
+        current_load,
+    });
+    let payload = serde_json::to_string(&message).expect("serialize models_update");
+
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .expect("send models_update");
 }
 
 #[tokio::test]
@@ -575,5 +588,80 @@ async fn worker_backed_responses_route_returns_sanitized_provider_disabled_error
     assert!(
         !response.contains("virtual provider is disabled"),
         "the compatibility boundary should use the stable disabled message"
+    );
+}
+
+#[tokio::test]
+async fn worker_backed_responses_route_returns_sanitized_requeue_exhaustion_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let (mut socket_one, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect first websocket");
+    register_test_worker(&mut socket_one).await;
+
+    let body = r#"{"model":"gpt-4.1-mini","input":"keep retrying"}"#;
+    let http_request = tokio::spawn(post_responses(
+        addr,
+        body,
+        &[("OpenAI-Beta", "responses=v1")],
+    ));
+
+    let ServerToWorkerMessage::Request(first_request) =
+        next_server_message(&mut socket_one, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+
+    socket_one
+        .close(None)
+        .await
+        .expect("close first worker socket");
+    wait_for_request_state(&core, &first_request.request_id, RequestState::Queued).await;
+
+    for label in ["second", "third", "fourth"] {
+        let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+            .await
+            .unwrap_or_else(|_| panic!("connect {label} websocket"));
+        register_test_worker(&mut socket).await;
+        send_models_update(&mut socket, vec!["gpt-4.1-mini".to_string()], 0).await;
+
+        let ServerToWorkerMessage::Request(requeued_request) =
+            next_server_message(&mut socket, &format!("{label} worker request")).await
+        else {
+            panic!("expected {label} worker request message");
+        };
+        assert_eq!(requeued_request.request_id, first_request.request_id);
+
+        socket
+            .close(None)
+            .await
+            .unwrap_or_else(|_| panic!("close {label} worker socket"));
+
+        if label != "fourth" {
+            wait_for_request_state(&core, &first_request.request_id, RequestState::Queued).await;
+        }
+    }
+
+    let response = timeout(std::time::Duration::from_secs(2), http_request)
+        .await
+        .expect("http request completed before timeout")
+        .expect("join http request task");
+    assert_service_unavailable(
+        &response,
+        "Request could not be processed after multiple attempts",
+    );
+    assert!(
+        !response.contains("MaxRequeuesExceeded"),
+        "the client boundary should not expose the internal failure enum"
+    );
+    assert!(
+        !response.to_ascii_lowercase().contains("requeue"),
+        "the client boundary should not expose raw requeue wording"
+    );
+    assert!(
+        !response.to_ascii_lowercase().contains("max retries"),
+        "the client boundary should not expose raw retry-limit wording"
     );
 }
