@@ -188,9 +188,10 @@ async fn handle_authenticated_socket(
         return;
     };
 
-    let ack = {
+    let (worker_id, ack) = {
         let mut core = state.core.lock().await;
-        core.register_worker(provider, register).ack
+        let registered = core.register_worker(provider, register);
+        (registered.worker_id, registered.ack)
     };
     let response = ServerToWorkerMessage::RegisterAck(ack);
 
@@ -204,7 +205,95 @@ async fn handle_authenticated_socket(
         return;
     };
 
-    let _ = socket.send(Message::Text(payload.into())).await;
+    if socket.send(Message::Text(payload.into())).await.is_err() {
+        let mut core = state.core.lock().await;
+        let _ = core.disconnect_worker(&worker_id);
+        return;
+    }
+
+    let Some(initial_dispatch) = next_dispatch_message(&state, &worker_id).await else {
+        socket_loop(socket, state, worker_id).await;
+        return;
+    };
+    if socket
+        .send(Message::Text(initial_dispatch.into()))
+        .await
+        .is_err()
+    {
+        let mut core = state.core.lock().await;
+        let _ = core.disconnect_worker(&worker_id);
+        return;
+    }
+
+    socket_loop(socket, state, worker_id).await;
+}
+
+async fn socket_loop(mut socket: WebSocket, state: WorkerSocketState, worker_id: String) {
+    while let Some(message) = socket.recv().await {
+        let Ok(message) = message else {
+            break;
+        };
+
+        let Message::Text(payload) = message else {
+            continue;
+        };
+
+        let Ok(message) = serde_json::from_str::<WorkerToServerMessage>(&payload) else {
+            close_socket(
+                socket,
+                CLOSE_CODE_PROTOCOL_ERROR,
+                CLOSE_REASON_PROTOCOL_ERROR,
+            )
+            .await;
+            return;
+        };
+
+        let next_dispatch = match message {
+            WorkerToServerMessage::ResponseComplete(response) => {
+                next_dispatch_message_after_finish(&state, &worker_id, &response.request_id).await
+            }
+            _ => None,
+        };
+
+        let Some(next_dispatch) = next_dispatch else {
+            continue;
+        };
+
+        if socket
+            .send(Message::Text(next_dispatch.into()))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+
+    let mut core = state.core.lock().await;
+    let _ = core.disconnect_worker(&worker_id);
+}
+
+async fn next_dispatch_message(state: &WorkerSocketState, worker_id: &str) -> Option<String> {
+    let request = {
+        let mut core = state.core.lock().await;
+        let assignment = core.dispatch_next_for_worker(worker_id)?;
+        core.request_message(&assignment.request_id)?
+    };
+
+    serde_json::to_string(&ServerToWorkerMessage::Request(request)).ok()
+}
+
+async fn next_dispatch_message_after_finish(
+    state: &WorkerSocketState,
+    worker_id: &str,
+    request_id: &str,
+) -> Option<String> {
+    let request = {
+        let mut core = state.core.lock().await;
+        let assignment = core.finish_request(worker_id, request_id)?;
+        core.request_message(&assignment.request_id)?
+    };
+
+    serde_json::to_string(&ServerToWorkerMessage::Request(request)).ok()
 }
 
 async fn close_socket(mut socket: WebSocket, code: u16, reason: &'static str) {

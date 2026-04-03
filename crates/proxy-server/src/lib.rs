@@ -2,7 +2,9 @@ pub mod worker_socket;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use worker_protocol::{ModelsUpdateMessage, RegisterAck, RegisterMessage};
+use worker_protocol::{
+    HeaderMap, ModelsUpdateMessage, RegisterAck, RegisterMessage, RequestMessage,
+};
 
 pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
 
@@ -104,10 +106,23 @@ impl ProxyServerCore {
         provider: impl Into<String>,
         model: impl Into<String>,
     ) -> SubmissionOutcome {
+        let model = model.into();
+        self.submit_http_request(provider, ProxyRequest::non_streaming(model))
+    }
+
+    pub fn submit_http_request(
+        &mut self,
+        provider: impl Into<String>,
+        request: ProxyRequest,
+    ) -> SubmissionOutcome {
         let request = RequestRecord {
             request_id: format!("request-{}", self.next_request_id),
             provider: provider.into(),
-            model: model.into(),
+            model: request.model,
+            endpoint_path: request.endpoint_path,
+            is_streaming: request.is_streaming,
+            body: request.body,
+            headers: request.headers,
             requeue_count: 0,
         };
         self.next_request_id += 1;
@@ -149,6 +164,10 @@ impl ProxyServerCore {
             request_id: request.request_id,
             queue_len: queue.len(),
         })
+    }
+
+    pub fn dispatch_next_for_worker(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
+        self.dispatch_next_compatible(worker_id)
     }
 
     pub fn finish_request(
@@ -329,6 +348,23 @@ impl ProxyServerCore {
         self.worker_cancel_signals.clone()
     }
 
+    #[must_use]
+    pub fn request_message(&self, request_id: &str) -> Option<RequestMessage> {
+        let ActiveRequestState::InFlight { request, .. } = self.active_requests.get(request_id)?
+        else {
+            return None;
+        };
+
+        Some(RequestMessage {
+            request_id: request.request_id.clone(),
+            model: request.model.clone(),
+            endpoint_path: request.endpoint_path.clone(),
+            is_streaming: request.is_streaming,
+            body: request.body.clone(),
+            headers: request.headers.clone(),
+        })
+    }
+
     fn dispatch_next_compatible(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
         let (provider, models) = {
             let worker = self.workers.get(worker_id)?;
@@ -448,6 +484,30 @@ pub struct DispatchAssignment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyRequest {
+    pub model: String,
+    pub endpoint_path: String,
+    pub is_streaming: bool,
+    pub body: String,
+    pub headers: HeaderMap,
+}
+
+impl ProxyRequest {
+    #[must_use]
+    pub fn non_streaming(model: impl Into<String>) -> Self {
+        let model = model.into();
+
+        Self {
+            body: format!(r#"{{"model":"{model}","stream":false}}"#),
+            model,
+            endpoint_path: "/v1/chat/completions".to_string(),
+            is_streaming: false,
+            headers: HeaderMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedAssignment {
     pub request_id: String,
     pub queue_len: usize,
@@ -521,6 +581,10 @@ struct RequestRecord {
     request_id: String,
     provider: String,
     model: String,
+    endpoint_path: String,
+    is_streaming: bool,
+    body: String,
+    headers: HeaderMap,
     requeue_count: usize,
 }
 
