@@ -98,9 +98,7 @@ async fn mock_chat_completions_handler(
             "data: [DONE]\n\n",
         ];
         let stream = stream::unfold(0_usize, move |index| async move {
-            let Some(chunk) = chunks.get(index) else {
-                return None;
-            };
+            let chunk = chunks.get(index)?;
 
             tokio::time::sleep(Duration::from_millis(10)).await;
             Some((
