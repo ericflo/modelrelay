@@ -1,6 +1,9 @@
 [package]
 name = "worker-protocol"
 version = "0.1.0"
+description = "WebSocket protocol types shared between the proxy server and worker daemon"
+keywords = ["llm", "protocol", "websocket", "proxy", "worker"]
+categories = ["network-programming", "encoding"]
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
