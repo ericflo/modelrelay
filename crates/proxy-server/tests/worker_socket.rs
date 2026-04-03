@@ -146,6 +146,22 @@ async fn wait_for_worker_reported_load(
     .unwrap_or_else(|_| panic!("worker {worker_id} reported load did not reach {expected_load}"));
 }
 
+async fn wait_for_worker_disconnect(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+    timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            {
+                let core = core.lock().await;
+                if !core.has_worker(worker_id) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("worker {worker_id} was not disconnected"));
+}
+
 async fn submit_heartbeat_initial_request(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
     let mut core = core.lock().await;
     assert_eq!(
@@ -844,6 +860,43 @@ async fn heartbeat_ping_pong_updates_live_worker_load_without_reconnect_or_early
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued until complete"}]}"#,
             HeaderMap::new(),
         )
+    );
+}
+
+#[tokio::test]
+async fn stale_heartbeat_worker_is_disconnected_and_removed_from_routing() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack = register_test_worker(&mut socket).await;
+
+    assert_heartbeat_ping(&mut socket).await;
+
+    let close_frame = timeout(
+        std::time::Duration::from_millis(350),
+        next_close_message(&mut socket, "stale heartbeat disconnect"),
+    )
+    .await
+    .expect("close stale heartbeat worker within pong window");
+    assert!(u16::from(close_frame.code) >= 1000);
+
+    wait_for_worker_disconnect(&core, &ack.worker_id).await;
+
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"still there?"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            request_id: "request-1".to_string(),
+            queue_len: 1,
+        })
     );
 }
 
