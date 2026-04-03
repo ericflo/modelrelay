@@ -429,6 +429,55 @@ async fn worker_backed_responses_route_returns_sanitized_queue_timeout_error() {
 }
 
 #[tokio::test]
+async fn worker_backed_responses_route_returns_sanitized_queue_full_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: None,
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core.clone(), true).await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"gpt-4.1-mini","input":"hello from responses"}"#;
+    let first_request = tokio::spawn(open_responses_request(
+        addr,
+        body,
+        &[("OpenAI-Beta", "responses=v1")],
+    ));
+    let ServerToWorkerMessage::Request(_) =
+        next_server_message(&mut socket, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+
+    let second_request = tokio::spawn(open_responses_request(
+        addr,
+        body,
+        &[("OpenAI-Beta", "responses=v1")],
+    ));
+    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
+
+    let response = post_responses(addr, body, &[("OpenAI-Beta", "responses=v1")]).await;
+    assert_service_unavailable(&response, "Service temporarily at capacity, please retry");
+    assert!(
+        !response.contains("queue is full"),
+        "the client boundary should not expose the raw queue-full reason"
+    );
+
+    first_request.abort();
+    second_request.abort();
+}
+
+#[tokio::test]
 async fn worker_backed_responses_route_returns_sanitized_provider_disabled_error() {
     let addr = spawn_server_with_core(Arc::new(Mutex::new(ProxyServerCore::new())), false).await;
 
