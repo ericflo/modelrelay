@@ -91,16 +91,24 @@ fn worker_connect_request(addr: SocketAddr, secret: &str) -> http::Request<()> {
 }
 
 async fn next_server_message(socket: &mut TestSocket, context: &str) -> ServerToWorkerMessage {
-    let message = timeout(std::time::Duration::from_secs(2), socket.next())
-        .await
-        .unwrap_or_else(|_| panic!("receive {context} before timeout"))
-        .expect("socket message")
-        .expect("websocket message");
-    let Message::Text(payload) = message else {
-        panic!("expected text {context}");
-    };
+    loop {
+        let message = timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .unwrap_or_else(|_| panic!("receive {context} before timeout"))
+            .expect("socket message")
+            .expect("websocket message");
+        let Message::Text(payload) = message else {
+            panic!("expected text {context}");
+        };
 
-    serde_json::from_str(&payload).unwrap_or_else(|_| panic!("deserialize {context}"))
+        let server_message =
+            serde_json::from_str(&payload).unwrap_or_else(|_| panic!("deserialize {context}"));
+        if matches!(server_message, ServerToWorkerMessage::Ping(_)) {
+            continue;
+        }
+
+        return server_message;
+    }
 }
 
 async fn register_test_worker(socket: &mut TestSocket) {
