@@ -560,8 +560,7 @@ async fn worker_backed_chat_completions_route_requeues_live_request_after_worker
         .expect("connect first websocket");
     register_test_worker(&mut socket_one).await;
 
-    let body =
-        r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"finish after reconnect"}]}"#;
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"finish after reconnect"}]}"#;
     let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
 
     let ServerToWorkerMessage::Request(first_request) =
