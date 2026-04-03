@@ -545,6 +545,49 @@ impl ProxyServerCore {
         failures
     }
 
+    pub fn delete_provider(&mut self, provider: &str) {
+        let queued_request_ids = self
+            .provider_queues
+            .remove(provider)
+            .into_iter()
+            .flat_map(std::iter::IntoIterator::into_iter)
+            .map(|request| request.request_id)
+            .collect::<Vec<_>>();
+
+        for request_id in queued_request_ids {
+            self.active_requests.remove(&request_id);
+            self.fail_pending_http_response(&request_id, RequestFailureReason::ProviderDeleted);
+        }
+
+        let worker_ids = self
+            .worker_order
+            .iter()
+            .filter_map(|worker_id| {
+                self.workers
+                    .get(worker_id)
+                    .filter(|worker| worker.provider == provider)
+                    .map(|_| worker_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for worker_id in worker_ids {
+            let Some(worker) = self.workers.get(&worker_id).cloned() else {
+                continue;
+            };
+
+            for request_id in worker.in_flight_requests {
+                self.active_requests.remove(&request_id);
+                self.fail_pending_http_response(&request_id, RequestFailureReason::ProviderDeleted);
+            }
+
+            self.graceful_shutdown_disconnect_reasons.insert(
+                worker_id.clone(),
+                GracefulShutdownDisconnectReason::Completed,
+            );
+            let _ = self.remove_worker(&worker_id);
+        }
+    }
+
     pub fn disconnect_worker(&mut self, worker_id: &str) -> Option<WorkerDisconnectOutcome> {
         let worker = self.remove_worker(worker_id)?;
 
