@@ -27,10 +27,12 @@ const CLOSE_REASON_AUTH_FAILED: &str = "worker authentication failed";
 const CLOSE_REASON_PROTOCOL_ERROR: &str = "worker registration protocol error";
 const CLOSE_REASON_GRACEFUL_SHUTDOWN_COMPLETE: &str = "graceful shutdown complete";
 const CLOSE_REASON_GRACEFUL_SHUTDOWN_TIMED_OUT: &str = "graceful shutdown timed out";
+const CLOSE_REASON_STALE_HEARTBEAT: &str = "worker heartbeat timed out";
 const CLOSE_CODE_POLICY_VIOLATION: u16 = 1008;
 const CLOSE_CODE_PROTOCOL_ERROR: u16 = 1002;
 const CLOSE_CODE_NORMAL: u16 = 1000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
+const HEARTBEAT_PONG_TIMEOUT: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSocketProviderConfig {
@@ -179,7 +181,8 @@ async fn handle_authenticated_socket(
     state: WorkerSocketState,
     provider: String,
 ) {
-    let mut last_heartbeat_sent_at = tokio::time::Instant::now();
+    let mut last_heartbeat_activity_at = tokio::time::Instant::now();
+    let mut awaiting_pong_since: Option<tokio::time::Instant> = None;
 
     let Ok((worker_id, payload)) =
         register_authenticated_worker(&mut socket, &state, provider).await
@@ -194,8 +197,7 @@ async fn handle_authenticated_socket(
     };
 
     if socket.send(Message::Text(payload.into())).await.is_err() {
-        let mut core = state.core.lock().await;
-        let _ = core.disconnect_worker(&worker_id);
+        disconnect_worker(&state, &worker_id).await;
         return;
     }
 
@@ -204,8 +206,7 @@ async fn handle_authenticated_socket(
             .await
             .is_err()
         {
-            let mut core = state.core.lock().await;
-            let _ = core.disconnect_worker(&worker_id);
+            disconnect_worker(&state, &worker_id).await;
             return;
         }
 
@@ -213,8 +214,7 @@ async fn handle_authenticated_socket(
             .await
             .is_err()
         {
-            let mut core = state.core.lock().await;
-            let _ = core.disconnect_worker(&worker_id);
+            disconnect_worker(&state, &worker_id).await;
             return;
         }
 
@@ -225,7 +225,8 @@ async fn handle_authenticated_socket(
 
         match timeout(Duration::from_millis(25), socket.recv()).await {
             Ok(Some(Ok(Message::Text(payload)))) => {
-                last_heartbeat_sent_at = tokio::time::Instant::now();
+                last_heartbeat_activity_at = tokio::time::Instant::now();
+                awaiting_pong_since = None;
                 if !handle_worker_message(&state, &worker_id, &payload).await {
                     close_socket(
                         socket,
@@ -233,27 +234,35 @@ async fn handle_authenticated_socket(
                         CLOSE_REASON_PROTOCOL_ERROR,
                     )
                     .await;
-                    let mut core = state.core.lock().await;
-                    let _ = core.disconnect_worker(&worker_id);
+                    disconnect_worker(&state, &worker_id).await;
                     return;
                 }
             }
             Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
-                let mut core = state.core.lock().await;
-                let _ = core.disconnect_worker(&worker_id);
+                disconnect_worker(&state, &worker_id).await;
                 return;
             }
             Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {
-                last_heartbeat_sent_at = tokio::time::Instant::now();
+                last_heartbeat_activity_at = tokio::time::Instant::now();
+                awaiting_pong_since = None;
             }
             Err(_) => {
-                if last_heartbeat_sent_at.elapsed() >= HEARTBEAT_INTERVAL {
+                if awaiting_pong_since
+                    .is_some_and(|sent_at| sent_at.elapsed() >= HEARTBEAT_PONG_TIMEOUT)
+                {
+                    disconnect_worker(&state, &worker_id).await;
+                    close_socket(socket, CLOSE_CODE_NORMAL, CLOSE_REASON_STALE_HEARTBEAT).await;
+                    return;
+                }
+
+                if awaiting_pong_since.is_none()
+                    && last_heartbeat_activity_at.elapsed() >= HEARTBEAT_INTERVAL
+                {
                     if send_heartbeat_ping(&mut socket).await.is_err() {
-                        let mut core = state.core.lock().await;
-                        let _ = core.disconnect_worker(&worker_id);
+                        disconnect_worker(&state, &worker_id).await;
                         return;
                     }
-                    last_heartbeat_sent_at = tokio::time::Instant::now();
+                    awaiting_pong_since = Some(tokio::time::Instant::now());
                 }
             }
             Ok(Some(Ok(Message::Binary(_)))) => {
@@ -263,8 +272,7 @@ async fn handle_authenticated_socket(
                     CLOSE_REASON_PROTOCOL_ERROR,
                 )
                 .await;
-                let mut core = state.core.lock().await;
-                let _ = core.disconnect_worker(&worker_id);
+                disconnect_worker(&state, &worker_id).await;
                 return;
             }
         }
@@ -292,6 +300,11 @@ async fn register_authenticated_worker(
         .map_err(|_| ())?;
 
     Ok((worker_id, payload))
+}
+
+async fn disconnect_worker(state: &WorkerSocketState, worker_id: &str) {
+    let mut core = state.core.lock().await;
+    let _ = core.disconnect_worker(worker_id);
 }
 
 async fn handle_worker_message(state: &WorkerSocketState, worker_id: &str, payload: &str) -> bool {
