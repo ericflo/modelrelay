@@ -104,6 +104,29 @@ async fn next_close_message(
     }
 }
 
+async fn wait_for_disconnect_event(socket: &mut TestSocket, context: &str) {
+    loop {
+        let message = timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .unwrap_or_else(|_| panic!("receive {context} before timeout"))
+            .expect("socket message still open");
+
+        match message {
+            Ok(Message::Text(payload)) => {
+                if matches!(
+                    serde_json::from_str::<ServerToWorkerMessage>(&payload),
+                    Ok(ServerToWorkerMessage::Ping(_))
+                ) {
+                    continue;
+                }
+                panic!("expected disconnect event {context}");
+            }
+            Ok(Message::Close(_)) | Err(_) => return,
+            _ => panic!("expected disconnect event {context}"),
+        }
+    }
+}
+
 async fn assert_no_non_heartbeat_message(socket: &mut TestSocket, wait_for: std::time::Duration) {
     let deadline = tokio::time::Instant::now() + wait_for;
 
@@ -144,6 +167,26 @@ async fn wait_for_worker_reported_load(
     })
     .await
     .unwrap_or_else(|_| panic!("worker {worker_id} reported load did not reach {expected_load}"));
+}
+
+async fn wait_for_worker_disconnect(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    worker_id: &str,
+    wait_for: std::time::Duration,
+) {
+    timeout(wait_for, async {
+        loop {
+            {
+                let core = core.lock().await;
+                if !core.has_worker(worker_id) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("worker {worker_id} was not disconnected in time"));
 }
 
 async fn submit_heartbeat_initial_request(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
@@ -845,6 +888,50 @@ async fn heartbeat_ping_pong_updates_live_worker_load_without_reconnect_or_early
             HeaderMap::new(),
         )
     );
+}
+
+#[tokio::test]
+async fn stale_heartbeat_worker_is_disconnected_and_removed_from_routing_eligibility() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack = register_test_worker(&mut socket).await;
+
+    assert_heartbeat_ping(&mut socket).await;
+
+    timeout(
+        std::time::Duration::from_millis(350),
+        wait_for_disconnect_event(&mut socket, "stale heartbeat disconnect"),
+    )
+    .await
+    .expect("worker should be closed after missing heartbeat pong");
+
+    wait_for_worker_disconnect(&core, &ack.worker_id, std::time::Duration::from_millis(100)).await;
+
+    {
+        let core = core.lock().await;
+        assert!(!core.has_worker(&ack.worker_id));
+        assert_eq!(core.worker_reported_load(&ack.worker_id), None);
+    }
+
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"still there?"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            request_id: "request-1".to_string(),
+            queue_len: 1,
+        })
+    );
+    assert_eq!(core.queued_request_ids("openai"), vec!["request-1".to_string()]);
+    assert_eq!(core.request_state("request-1"), Some(RequestState::Queued));
 }
 
 #[tokio::test]
