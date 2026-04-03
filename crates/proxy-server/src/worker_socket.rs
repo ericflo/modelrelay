@@ -13,8 +13,8 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use worker_protocol::{
-    CancelMessage, CancelReason, ResponseChunkMessage, ResponseCompleteMessage,
-    ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason, ModelsUpdateMessage, ResponseChunkMessage,
+    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 use crate::{ProxyServerCore, WorkerCancelSignal};
@@ -262,6 +262,23 @@ async fn handle_authenticated_socket(
 
 async fn handle_worker_message(state: &WorkerSocketState, worker_id: &str, payload: &str) -> bool {
     match serde_json::from_str(payload) {
+        Ok(WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
+            models,
+            current_load,
+        })) => {
+            let mut core = state.core.lock().await;
+            if !core.has_worker(worker_id) {
+                return false;
+            }
+            let _ = core.update_worker_models(
+                worker_id,
+                ModelsUpdateMessage {
+                    models,
+                    current_load,
+                },
+            );
+            true
+        }
         Ok(WorkerToServerMessage::ResponseChunk(ResponseChunkMessage { request_id, .. })) => {
             let core = state.core.lock().await;
             matches!(
