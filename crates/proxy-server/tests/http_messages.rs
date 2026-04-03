@@ -298,6 +298,60 @@ async fn worker_backed_messages_route_forwards_anthropic_request_and_preserves_r
 }
 
 #[tokio::test]
+async fn worker_backed_messages_route_preserves_upstream_http_error() {
+    let addr = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"messages":[{"role":"user","content":"bad request"}]}"#;
+    let http_request = tokio::spawn(post_messages(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    ));
+
+    let ServerToWorkerMessage::Request(request) =
+        next_server_message(&mut socket, "worker request").await
+    else {
+        panic!("expected worker request message");
+    };
+
+    let error_body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"upstream rejected the payload"}}"#;
+    let complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+        request_id: request.request_id,
+        status_code: 429,
+        headers: HeaderMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("retry-after".to_string(), "7".to_string()),
+            (
+                "x-upstream-request-id".to_string(),
+                "req-upstream-123".to_string(),
+            ),
+        ]),
+        body: Some(error_body.to_string()),
+        token_counts: None,
+    });
+    let complete_payload = serde_json::to_string(&complete).expect("serialize response_complete");
+
+    socket
+        .send(Message::Text(complete_payload.into()))
+        .await
+        .expect("send response_complete");
+
+    let response = http_request.await.expect("join http request task");
+    assert!(response.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nretry-after: 7\r\n"));
+    assert!(response.contains("\r\nx-upstream-request-id: req-upstream-123\r\n"));
+    assert!(response.ends_with(error_body));
+}
+
+#[tokio::test]
 async fn worker_backed_messages_route_streams_live_anthropic_sse_events() {
     let addr = spawn_server().await;
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
