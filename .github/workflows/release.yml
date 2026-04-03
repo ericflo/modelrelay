@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_suffix: linux-amd64
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_suffix: linux-arm64
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact_suffix: darwin-amd64
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_suffix: darwin-arm64
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build proxy-server
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p proxy-server
+          else
+            cargo build --release --target ${{ matrix.target }} -p proxy-server
+          fi
+
+      - name: Build worker-daemon
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p worker-daemon
+          else
+            cargo build --release --target ${{ matrix.target }} -p worker-daemon
+          fi
+
+      - name: Stage binaries
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/proxy-server dist/proxy-server-${{ matrix.artifact_suffix }}
+          cp target/${{ matrix.target }}/release/worker-daemon dist/worker-daemon-${{ matrix.artifact_suffix }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.artifact_suffix }}
+          path: dist/
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | sed -n '2p')
+          CURRENT_TAG=${GITHUB_REF_NAME}
+          if [ -n "$PREV_TAG" ]; then
+            NOTES=$(git log --oneline "$PREV_TAG..$CURRENT_TAG" --no-merges | head -50)
+          else
+            NOTES=$(git log --oneline --no-merges | head -50)
+          fi
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$NOTES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: |
+            ## Binaries
+
+            Pre-built binaries are attached below. Download the one matching your platform:
+
+            | Binary | Platform |
+            |--------|----------|
+            | `proxy-server-linux-amd64` | Linux x86_64 |
+            | `proxy-server-linux-arm64` | Linux arm64 |
+            | `proxy-server-darwin-amd64` | macOS Intel |
+            | `proxy-server-darwin-arm64` | macOS Apple Silicon |
+            | `worker-daemon-linux-amd64` | Linux x86_64 |
+            | `worker-daemon-linux-arm64` | Linux arm64 |
+            | `worker-daemon-darwin-amd64` | macOS Intel |
+            | `worker-daemon-darwin-arm64` | macOS Apple Silicon |
+
+            ## Changes since previous release
+
+            ${{ steps.changelog.outputs.notes }}
+          files: dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
