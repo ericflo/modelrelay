@@ -285,7 +285,11 @@ async fn worker_backed_responses_route_preserves_upstream_http_error() {
     register_test_worker(&mut socket).await;
 
     let body = r#"{"model":"gpt-4.1-mini","input":"bad request"}"#;
-    let http_request = tokio::spawn(post_responses(addr, body, &[("OpenAI-Beta", "responses=v1")]));
+    let http_request = tokio::spawn(post_responses(
+        addr,
+        body,
+        &[("OpenAI-Beta", "responses=v1")],
+    ));
 
     let ServerToWorkerMessage::Request(request) =
         next_server_message(&mut socket, "worker request").await
