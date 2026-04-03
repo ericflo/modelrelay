@@ -1,12 +1,14 @@
-use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use axum::{
     Router,
+    body::{Body, Bytes},
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::post,
 };
+use futures_util::stream;
 use proxy_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
 use serde_json::{Value, json};
 use tokio::{
@@ -77,6 +79,8 @@ async fn mock_chat_completions_handler(
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
+    let is_streaming = body.contains(r#""stream":true"#);
+
     if let Some(observed_request_tx) = state.observed_request_tx.lock().await.take() {
         let _ = observed_request_tx.send(ObservedBackendRequest {
             path: "/v1/chat/completions".to_string(),
@@ -87,6 +91,33 @@ async fn mock_chat_completions_handler(
         });
     }
 
+    if is_streaming {
+        let chunks = [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        ];
+        let stream = stream::unfold(0_usize, move |index| async move {
+            let Some(chunk) = chunks.get(index) else {
+                return None;
+            };
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Some((
+                Ok::<Bytes, Infallible>(Bytes::from_static(chunk.as_bytes())),
+                index + 1,
+            ))
+        });
+
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            "content-type",
+            "text/event-stream".parse().expect("parse content-type"),
+        );
+        return response;
+    }
+
     (
         StatusCode::ACCEPTED,
         [
@@ -95,6 +126,7 @@ async fn mock_chat_completions_handler(
         ],
         r#"{"id":"resp_123","object":"chat.completion","model":"gpt-4.1-mini","choices":[{"index":0,"message":{"role":"assistant","content":"proxy success"},"finish_reason":"stop"}]}"#,
     )
+        .into_response()
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -125,6 +157,21 @@ async fn get_models(addr: SocketAddr) -> (u16, Value) {
 }
 
 async fn post_chat_completions(addr: SocketAddr, body: &str, headers: &[(&str, &str)]) -> String {
+    let mut stream = open_chat_completions_request(addr, body, headers).await;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read chat completions response");
+
+    String::from_utf8(response).expect("proxy response is utf-8")
+}
+
+async fn open_chat_completions_request(
+    addr: SocketAddr,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> TcpStream {
     let mut stream = TcpStream::connect(addr)
         .await
         .expect("connect to proxy server");
@@ -143,13 +190,7 @@ async fn post_chat_completions(addr: SocketAddr, body: &str, headers: &[(&str, &
         .await
         .expect("write chat completions request");
 
-    let mut response = Vec::new();
     stream
-        .read_to_end(&mut response)
-        .await
-        .expect("read chat completions response");
-
-    String::from_utf8(response).expect("proxy response is utf-8")
 }
 
 fn parse_json_response(response: &[u8]) -> (u16, Value) {
@@ -168,6 +209,24 @@ fn parse_json_response(response: &[u8]) -> (u16, Value) {
         status,
         serde_json::from_str(body.trim()).expect("parse json response body"),
     )
+}
+
+async fn read_until_contains(stream: &mut TcpStream, needle: &str) -> String {
+    let mut response = Vec::new();
+
+    loop {
+        if String::from_utf8_lossy(&response).contains(needle) {
+            return String::from_utf8(response).expect("http response is utf-8");
+        }
+
+        let mut chunk = [0_u8; 1024];
+        let read = timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("read response chunk before timeout")
+            .expect("read response chunk");
+        assert!(read > 0, "response closed before expected bytes arrived");
+        response.extend_from_slice(&chunk[..read]);
+    }
 }
 
 async fn wait_for_registered_model(addr: SocketAddr, expected_model: &str) {
@@ -258,6 +317,86 @@ async fn worker_daemon_forwards_non_streaming_openai_request_through_live_proxy(
             ]
         })
     );
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_forwards_streaming_openai_request_through_live_proxy() {
+    let (proxy_addr, _core) = spawn_proxy_server().await;
+    let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let request_body = r#"{"model":"gpt-4.1-mini","stream":true,"messages":[{"role":"user","content":"hello from proxy"}]}"#;
+    let mut response_stream = open_chat_completions_request(
+        proxy_addr,
+        request_body,
+        &[
+            ("Authorization", "Bearer client-token"),
+            ("OpenAI-Organization", "org-demo"),
+        ],
+    )
+    .await;
+
+    let first_fragment = read_until_contains(
+        &mut response_stream,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/chat/completions".to_string(),
+            authorization: Some("Bearer client-token".to_string()),
+            openai_organization: Some("org-demo".to_string()),
+            content_type: Some("application/json".to_string()),
+            body: request_body.to_string(),
+        }
+    );
+    assert!(first_fragment.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(first_fragment.contains("\r\ncontent-type: text/event-stream\r\n"));
+    assert!(first_fragment.contains("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n"));
+    assert!(!first_fragment.contains("data: [DONE]\n\n"));
+
+    let mut rest = Vec::new();
+    response_stream
+        .read_to_end(&mut rest)
+        .await
+        .expect("read streaming chat completions response");
+    let full_response = first_fragment + &String::from_utf8(rest).expect("proxy response is utf-8");
+
+    let hello_index = full_response
+        .find("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n")
+        .expect("find first streamed chunk");
+    let lo_index = full_response
+        .find("data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n")
+        .expect("find second streamed chunk");
+    let done_index = full_response
+        .find("data: [DONE]\n\n")
+        .expect("find done marker");
+
+    assert!(hello_index < lo_index);
+    assert!(lo_index < done_index);
+    assert!(full_response.ends_with("0\r\n\r\n"));
 
     daemon_handle.abort();
 }

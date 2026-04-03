@@ -7,7 +7,7 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    HeaderMap, ModelsUpdateMessage, PongMessage, RegisterMessage, RequestMessage,
+    ModelsUpdateMessage, PongMessage, RegisterMessage, RequestMessage, ResponseChunkMessage,
     ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
@@ -122,7 +122,7 @@ impl WorkerDaemon {
     ) -> Result<bool, BoxError> {
         match message {
             ServerToWorkerMessage::Request(request) => {
-                let response = self.forward_request(request).await?;
+                let response = self.forward_request(socket, request).await?;
                 send_worker_message(socket, &WorkerToServerMessage::ResponseComplete(response))
                     .await?;
                 Ok(true)
@@ -156,26 +156,22 @@ impl WorkerDaemon {
 
     async fn forward_request(
         &self,
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         request: RequestMessage,
     ) -> Result<ResponseCompleteMessage, BoxError> {
-        if request.is_streaming {
-            return Ok(ResponseCompleteMessage {
-                request_id: request.request_id,
-                status_code: 501,
-                headers: HeaderMap::from([(
-                    "content-type".to_string(),
-                    "application/json".to_string(),
-                )]),
-                body: Some(
-                    r#"{"error":{"message":"streaming is not implemented in this slice"}}"#
-                        .to_string(),
-                ),
-                token_counts: None,
-            });
-        }
+        let RequestMessage {
+            request_id,
+            endpoint_path,
+            is_streaming,
+            body,
+            headers,
+            ..
+        } = request;
 
         let mut backend_headers = ReqwestHeaderMap::new();
-        for (name, value) in request.headers {
+        for (name, value) in headers {
             let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) else {
                 continue;
             };
@@ -190,9 +186,9 @@ impl WorkerDaemon {
 
         let response = self
             .client
-            .post(self.config.backend_url(&request.endpoint_path))
+            .post(self.config.backend_url(&endpoint_path))
             .headers(backend_headers)
-            .body(request.body)
+            .body(body)
             .send()
             .await?;
         let status_code = response.status().as_u16();
@@ -207,10 +203,33 @@ impl WorkerDaemon {
                     .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
             })
             .collect();
+        if is_streaming {
+            let mut response = response;
+            while let Some(chunk) = response.chunk().await? {
+                let chunk = String::from_utf8(chunk.to_vec())?;
+                send_worker_message(
+                    socket,
+                    &WorkerToServerMessage::ResponseChunk(ResponseChunkMessage {
+                        request_id: request_id.clone(),
+                        chunk,
+                    }),
+                )
+                .await?;
+            }
+
+            return Ok(ResponseCompleteMessage {
+                request_id,
+                status_code,
+                headers: response_headers,
+                body: Some(String::new()),
+                token_counts: None,
+            });
+        }
+
         let body = response.text().await?;
 
         Ok(ResponseCompleteMessage {
-            request_id: request.request_id,
+            request_id,
             status_code,
             headers: response_headers,
             body: Some(body),
