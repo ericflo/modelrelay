@@ -969,10 +969,7 @@ mod tests {
                 failed_requests: Vec::new(),
             })
         );
-        assert_eq!(
-            core.request_state("request-1"),
-            Some(RequestState::Queued)
-        );
+        assert_eq!(core.request_state("request-1"), Some(RequestState::Queued));
         assert_eq!(
             core.queued_request_ids("openai"),
             vec!["request-1".to_string()]
