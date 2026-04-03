@@ -41,9 +41,12 @@ async fn spawn_server_with_provider_config(
     let addr = listener.local_addr().expect("listener local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-            .expect("serve worker socket app");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("serve worker socket app");
     });
 
     (addr, core)

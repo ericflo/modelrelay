@@ -8,8 +8,7 @@ use std::{
 use axum::{
     Router,
     extract::{
-        ConnectInfo,
-        Query, State,
+        ConnectInfo, Query, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     },
     routing::get,
@@ -212,11 +211,19 @@ async fn client_is_rate_limited(state: &WorkerSocketState, client_identity: &str
     let mut failed_auth_by_client = state.failed_auth_by_client.lock().await;
 
     match failed_auth_by_client.get(client_identity) {
-        Some(entry) if entry.blocked_until.is_some_and(|blocked_until| blocked_until > now) => true,
+        Some(entry)
+            if entry
+                .blocked_until
+                .is_some_and(|blocked_until| blocked_until > now) =>
+        {
+            true
+        }
         Some(_) => {
             if failed_auth_by_client
                 .get(client_identity)
-                .is_some_and(|entry| now.duration_since(entry.last_failed_at) > AUTH_RATE_LIMIT_COOLDOWN)
+                .is_some_and(|entry| {
+                    now.duration_since(entry.last_failed_at) > AUTH_RATE_LIMIT_COOLDOWN
+                })
             {
                 failed_auth_by_client.remove(client_identity);
             }
@@ -237,7 +244,9 @@ async fn record_failed_auth(state: &WorkerSocketState, client_identity: String) 
             blocked_until: None,
         });
 
-    if entry.blocked_until.is_some_and(|blocked_until| blocked_until <= now)
+    if entry
+        .blocked_until
+        .is_some_and(|blocked_until| blocked_until <= now)
         || now.duration_since(entry.last_failed_at) > AUTH_RATE_LIMIT_COOLDOWN
     {
         *entry = FailedAuthState {
