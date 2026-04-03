@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
 use proxy_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
@@ -97,7 +97,7 @@ async fn post_chat_completions(addr: SocketAddr, body: &str, headers: &[(&str, &
         body.len()
     );
     for (name, value) in headers {
-        request.push_str(&format!("{name}: {value}\r\n"));
+        write!(request, "{name}: {value}\r\n").expect("append http request header");
     }
     request.push_str("\r\n");
     request.push_str(body);

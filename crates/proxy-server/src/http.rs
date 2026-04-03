@@ -113,9 +113,8 @@ async fn chat_completions_handler(
     headers: AxumHeaderMap,
     body: String,
 ) -> Response {
-    let request = match serde_json::from_str::<ChatCompletionsRequest>(&body) {
-        Ok(request) => request,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(request) = serde_json::from_str::<ChatCompletionsRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
 
     if request.stream {

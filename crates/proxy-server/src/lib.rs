@@ -241,6 +241,12 @@ impl ProxyServerCore {
         self.dispatch_next_compatible(worker_id)
     }
 
+    /// Submits an HTTP-backed request and returns a future-like handle for the worker response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestFailure`] when the underlying transport submission is rejected
+    /// immediately, which currently happens if the provider queue is already full.
     pub fn submit_http_response_request(
         &mut self,
         provider: impl Into<String>,
