@@ -9,7 +9,9 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::stream;
-use proxy_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
+use proxy_server::{
+    ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp, WorkerSocketProviderConfig,
+};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -36,6 +38,12 @@ struct ObservedBackendRequest {
 struct BackendState {
     observed_request_tx: Arc<Mutex<Option<oneshot::Sender<ObservedBackendRequest>>>>,
     advertised_models: Arc<Mutex<Vec<String>>>,
+}
+
+#[derive(Clone)]
+struct DelayedResponsesBackendState {
+    observed_request_tx: Arc<Mutex<Option<oneshot::Sender<ObservedBackendRequest>>>>,
+    release_response_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
 }
 
 async fn spawn_proxy_server(models_provider: &str) -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
@@ -408,6 +416,71 @@ async fn spawn_slow_cancellation_backend() -> (
     (addr, observed_request_rx, cancelled_rx)
 }
 
+async fn spawn_delayed_responses_backend() -> (
+    SocketAddr,
+    oneshot::Receiver<ObservedBackendRequest>,
+    oneshot::Sender<()>,
+) {
+    let (observed_request_tx, observed_request_rx) = oneshot::channel();
+    let (release_response_tx, release_response_rx) = oneshot::channel();
+    let state = DelayedResponsesBackendState {
+        observed_request_tx: Arc::new(Mutex::new(Some(observed_request_tx))),
+        release_response_rx: Arc::new(Mutex::new(Some(release_response_rx))),
+    };
+    let app = Router::new()
+        .route("/v1/responses", post(delayed_responses_handler))
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind delayed backend listener");
+    let addr = listener
+        .local_addr()
+        .expect("delayed backend listener local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve delayed backend app");
+    });
+
+    (addr, observed_request_rx, release_response_tx)
+}
+
+async fn delayed_responses_handler(
+    State(state): State<DelayedResponsesBackendState>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    if let Some(observed_request_tx) = state.observed_request_tx.lock().await.take() {
+        let _ = observed_request_tx.send(ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: header_value(&headers, "authorization"),
+            openai_organization: header_value(&headers, "openai-organization"),
+            openai_beta: header_value(&headers, "openai-beta"),
+            x_api_key: header_value(&headers, "x-api-key"),
+            anthropic_version: header_value(&headers, "anthropic-version"),
+            anthropic_beta: header_value(&headers, "anthropic-beta"),
+            content_type: header_value(&headers, "content-type"),
+            body,
+        });
+    }
+
+    if let Some(release_response_rx) = state.release_response_rx.lock().await.take() {
+        let _ = release_response_rx.await;
+    }
+
+    (
+        axum::http::StatusCode::CREATED,
+        [
+            ("content-type", "application/json"),
+            ("openai-beta", "responses=v1"),
+            ("x-backend-trace", "delayed-openai-responses-backend"),
+        ],
+        r#"{"id":"resp_drain_1","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_drain_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"drain completed"}]}]}"#,
+    )
+}
+
 struct RawHttpRequest {
     path: String,
     headers: BTreeMap<String, String>,
@@ -537,6 +610,59 @@ async fn read_until_contains(stream: &mut TcpStream, needle: &str) -> String {
         assert!(read > 0, "response closed before expected bytes arrived");
         response.extend_from_slice(&chunk[..read]);
     }
+}
+
+async fn wait_for_request_state(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    request_id: &str,
+    expected: RequestState,
+) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            {
+                let core = core.lock().await;
+                if core.request_state(request_id) == Some(expected.clone()) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("request {request_id} did not reach expected state"));
+}
+
+async fn wait_for_worker_id(core: &Arc<Mutex<ProxyServerCore>>, provider: &str) -> String {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let worker_id = {
+                let core = core.lock().await;
+                core.worker_ids_for_provider(provider).into_iter().next()
+            };
+            if let Some(worker_id) = worker_id {
+                return worker_id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker registered before timeout")
+}
+
+async fn wait_for_worker_disconnect(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            {
+                let core = core.lock().await;
+                if !core.has_worker(worker_id) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("worker {worker_id} did not disconnect before timeout"));
 }
 
 #[tokio::test]
@@ -877,4 +1003,165 @@ async fn worker_daemon_refreshes_models_catalog_without_reconnect() {
     wait_for_models_catalog(proxy_addr, &["gpt-4.1-mini", "gpt-oss-120b"]).await;
 
     daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_drains_in_flight_request_before_replacement_receives_queued_work() {
+    let (proxy_addr, core) = spawn_proxy_server("openai").await;
+    let (draining_backend_addr, first_observed_request_rx, release_response_tx) =
+        spawn_delayed_responses_backend().await;
+
+    let draining_daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{draining_backend_addr}"),
+    });
+
+    let draining_daemon_handle = tokio::spawn(async move { draining_daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+    let draining_worker_id = wait_for_worker_id(&core, "openai").await;
+
+    let first_body = json!({"model": "gpt-4.1-mini", "input": "finish before drain"}).to_string();
+    let second_body =
+        json!({"model": "gpt-4.1-mini", "input": "stay queued during drain"}).to_string();
+
+    let first_request_body = first_body.clone();
+    let first_request_task = tokio::spawn(async move {
+        post_responses(
+            proxy_addr,
+            &first_request_body,
+            &[
+                ("Authorization", "Bearer test-openai-key"),
+                ("OpenAI-Beta", "responses=v1"),
+            ],
+        )
+        .await
+    });
+
+    let first_observed_request = timeout(Duration::from_secs(2), first_observed_request_rx)
+        .await
+        .expect("first backend observed request before timeout")
+        .expect("first backend observed request");
+    assert_eq!(
+        first_observed_request,
+        ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: Some("Bearer test-openai-key".to_string()),
+            openai_organization: None,
+            openai_beta: Some("responses=v1".to_string()),
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: first_body.clone(),
+        }
+    );
+
+    let mut queued_request_stream = open_responses_request(
+        proxy_addr,
+        &second_body,
+        &[
+            ("Authorization", "Bearer queued-openai-key"),
+            ("OpenAI-Beta", "responses=v1"),
+        ],
+    )
+    .await;
+
+    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
+
+    {
+        let mut core = core.lock().await;
+        let signals = core
+            .begin_graceful_shutdown(Some("proxy server shutting down"), Duration::from_secs(1));
+        assert_eq!(signals.len(), 1);
+        assert!(core.worker_is_draining(&draining_worker_id));
+    }
+
+    assert!(
+        timeout(
+            Duration::from_millis(200),
+            read_until_contains(&mut queued_request_stream, "HTTP/1.1"),
+        )
+        .await
+        .is_err(),
+        "queued request should stay pending while the draining worker finishes in-flight work"
+    );
+
+    release_response_tx
+        .send(())
+        .expect("release delayed backend response");
+
+    let first_response = timeout(Duration::from_secs(2), first_request_task)
+        .await
+        .expect("first request completed before timeout")
+        .expect("join first request task");
+    assert!(first_response.starts_with("HTTP/1.1 201 Created\r\n"));
+    assert!(first_response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(first_response.contains("\r\nopenai-beta: responses=v1\r\n"));
+    assert!(first_response.contains("\r\nx-backend-trace: delayed-openai-responses-backend\r\n"));
+    assert!(first_response.ends_with(
+        r#"{"id":"resp_drain_1","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_drain_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"drain completed"}]}]}"#
+    ));
+
+    timeout(Duration::from_secs(2), draining_daemon_handle)
+        .await
+        .expect("draining daemon exited before timeout")
+        .expect("join draining daemon task")
+        .expect("draining daemon exited cleanly");
+    wait_for_worker_disconnect(&core, &draining_worker_id).await;
+
+    {
+        let core = core.lock().await;
+        assert_eq!(core.request_state("request-2"), Some(RequestState::Queued));
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+    }
+
+    let (replacement_backend_addr, second_observed_request_rx, _) = spawn_mock_backend().await;
+    let replacement_daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-b".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{replacement_backend_addr}"),
+    });
+    let replacement_daemon_handle = tokio::spawn(async move { replacement_daemon.run().await });
+
+    let second_observed_request = timeout(Duration::from_secs(2), second_observed_request_rx)
+        .await
+        .expect("replacement backend observed request before timeout")
+        .expect("replacement backend observed request");
+    assert_eq!(
+        second_observed_request,
+        ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: Some("Bearer queued-openai-key".to_string()),
+            openai_organization: None,
+            openai_beta: Some("responses=v1".to_string()),
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: second_body,
+        }
+    );
+
+    let second_response = read_until_contains(
+        &mut queued_request_stream,
+        r#"{"id":"resp_123","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_123","status":"completed","role":"assistant","content":[{"type":"output_text","text":"responses proxy success"}]}]}"#,
+    )
+    .await;
+    assert!(second_response.starts_with("HTTP/1.1 201 Created\r\n"));
+    assert!(second_response.contains("\r\nx-backend-trace: openai-responses-backend\r\n"));
+
+    replacement_daemon_handle.abort();
 }
