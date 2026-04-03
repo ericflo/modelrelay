@@ -200,16 +200,16 @@ impl WorkerDaemon {
             let daemon = Self::new(config.clone());
             match daemon.run_session().await {
                 Ok(true) => {
-                    eprintln!("worker-daemon: graceful shutdown received, exiting");
+                    tracing::info!("graceful shutdown received, exiting");
                     return Ok(());
                 }
                 Ok(false) => {
                     attempt += 1;
                     let jitter_ms = subsecond_jitter_ms();
-                    eprintln!(
-                        "worker-daemon: connection closed unexpectedly \
-                         (attempt {attempt}), reconnecting in {}ms",
-                        backoff_ms + jitter_ms
+                    tracing::warn!(
+                        attempt,
+                        delay_ms = backoff_ms + jitter_ms,
+                        "connection closed unexpectedly, reconnecting"
                     );
                     sleep(Duration::from_millis(backoff_ms + jitter_ms)).await;
                     backoff_ms = (backoff_ms * 2).min(30_000);
@@ -217,10 +217,11 @@ impl WorkerDaemon {
                 Err(e) => {
                     attempt += 1;
                     let jitter_ms = subsecond_jitter_ms();
-                    eprintln!(
-                        "worker-daemon: error: {e} \
-                         (attempt {attempt}), reconnecting in {}ms",
-                        backoff_ms + jitter_ms
+                    tracing::warn!(
+                        error = %e,
+                        attempt,
+                        delay_ms = backoff_ms + jitter_ms,
+                        "connection error, reconnecting"
                     );
                     sleep(Duration::from_millis(backoff_ms + jitter_ms)).await;
                     backoff_ms = (backoff_ms * 2).min(30_000);

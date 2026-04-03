@@ -7,6 +7,7 @@ use proxy_server::{
     ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig,
 };
 use tokio::sync::Mutex;
+use tracing_subscriber::EnvFilter;
 
 /// Remote LLM worker proxy server.
 ///
@@ -38,11 +39,22 @@ struct Args {
     /// Seconds before an in-flight HTTP request times out (0 = no timeout)
     #[arg(long, env = "REQUEST_TIMEOUT_SECS", default_value = "300")]
     request_timeout: u64,
+
+    /// Log level filter (e.g. info, debug, warn, error, or a directive like
+    /// `proxy_server=debug`). Overridden by `RUST_LOG` if set.
+    #[arg(long, env = "LOG_LEVEL", default_value = "info")]
+    log_level: String,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&args.log_level)),
+        )
+        .init();
 
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
 
@@ -96,7 +108,6 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("Failed to bind to {}: {e}", args.listen));
 
-    eprintln!("proxy-server listening on {}", args.listen);
     let queue_timeout_display = if args.queue_timeout == 0 {
         "none".to_string()
     } else {
@@ -112,8 +123,13 @@ async fn main() {
     } else {
         args.max_queue_len.to_string()
     };
-    eprintln!(
-        "config: queue_timeout={queue_timeout_display} request_timeout={request_timeout_display} max_queue_len={max_queue_display}"
+    tracing::info!(
+        listen = %args.listen,
+        provider = %args.provider,
+        queue_timeout = %queue_timeout_display,
+        request_timeout = %request_timeout_display,
+        max_queue_len = %max_queue_display,
+        "proxy-server starting"
     );
 
     axum::serve(listener, router)
@@ -145,5 +161,5 @@ async fn shutdown_signal() {
         () = sigterm => {},
     }
 
-    eprintln!("shutting down gracefully");
+    tracing::info!("shutting down gracefully");
 }
