@@ -13,8 +13,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    HeaderMap, RegisterMessage, ResponseChunkMessage, ResponseCompleteMessage,
-    ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason, HeaderMap, RegisterMessage, ResponseChunkMessage,
+    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -316,4 +316,44 @@ async fn worker_backed_responses_route_streams_live_sse_chunks() {
     );
     assert!(full_response.contains("data: [DONE]\n\n"));
     assert!(full_response.ends_with("0\r\n\r\n"));
+}
+
+#[tokio::test]
+async fn worker_backed_responses_route_cancels_in_flight_request_when_http_client_disconnects() {
+    let addr = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"gpt-4.1-mini","stream":true,"input":"cancel me"}"#;
+    let mut http_stream = open_responses_request(
+        addr,
+        body,
+        &[
+            ("Authorization", "Bearer test-token"),
+            ("OpenAI-Beta", "responses=v1"),
+        ],
+    )
+    .await;
+
+    let ServerToWorkerMessage::Request(request) =
+        next_server_message(&mut socket, "worker request").await
+    else {
+        panic!("expected worker request message");
+    };
+
+    http_stream
+        .shutdown()
+        .await
+        .expect("shutdown disconnected http client");
+    drop(http_stream);
+
+    assert_eq!(
+        next_server_message(&mut socket, "worker cancel").await,
+        ServerToWorkerMessage::Cancel(CancelMessage {
+            request_id: request.request_id,
+            reason: CancelReason::ClientDisconnect,
+        })
+    );
 }
