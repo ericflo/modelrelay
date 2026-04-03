@@ -11,7 +11,7 @@ pub fn source_behavior_commit() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
 
     use serde_json::{Value, json};
 
@@ -651,15 +651,14 @@ mod tests {
 
         let cancellation = harness
             .cancel_request("request-1", CancelReason::ClientDisconnected)
-            .expect("in-flight request should emit a cancel signal");
+            .expect("in-flight request should be canceled");
 
         assert_eq!(
             cancellation,
-            CancellationOutcome::WorkerCancelSent(WorkerCancelSignal {
-                worker_id: worker_id.clone(),
+            CancellationOutcome::WorkerNotified {
                 request_id: "request-1".to_string(),
-                reason: CancelReason::ClientDisconnected,
-            })
+                worker_id: worker_id.clone(),
+            }
         );
         assert_eq!(
             harness.worker_cancel_signals(),
@@ -677,24 +676,28 @@ mod tests {
         harness.register_worker("openai", ["llama-3.1-70b"], 1);
 
         let dispatched = harness.submit_request("openai", "llama-3.1-70b");
-
         assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
 
-        let cancellation = harness
-            .cancel_request("request-1", CancelReason::RequestTimedOut)
-            .expect("active request should still accept timeout cancellation");
-
-        assert!(matches!(
-            cancellation,
-            CancellationOutcome::WorkerCancelSent(_)
-        ));
         assert_eq!(
-            harness.deliver_worker_chunk("request-1", "data: late-token\n\n"),
-            Some(ChunkDelivery::DroppedAfterCancellation)
+            harness.deliver_worker_chunk("request-1", "data: first-token\n\n"),
+            Some(ChunkDelivery::Forwarded {
+                request_id: "request-1".to_string(),
+                chunk: "data: first-token\n\n".to_string(),
+            })
         );
         assert!(
-            harness.forwarded_chunks("request-1").is_empty(),
-            "late worker output should be ignored once the client has canceled"
+            harness
+                .cancel_request("request-1", CancelReason::ClientDisconnected)
+                .is_some()
+        );
+        assert_eq!(
+            harness.deliver_worker_chunk("request-1", "data: late-token\n\n"),
+            None,
+            "late chunks after cancellation should be dropped instead of forwarded"
+        );
+        assert_eq!(
+            harness.forwarded_chunks("request-1"),
+            vec!["data: first-token\n\n".to_string()]
         );
     }
 
@@ -704,24 +707,21 @@ mod tests {
         let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
 
         let dispatched = harness.submit_request("openai", "llama-3.1-70b");
-
         assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
 
-        let disconnect = harness
-            .disconnect_worker(&worker_id)
-            .expect("registered worker should disconnect cleanly");
-
         assert_eq!(
-            disconnect,
-            WorkerDisconnectOutcome {
+            harness.disconnect_worker(&worker_id),
+            Some(WorkerDisconnectOutcome {
+                worker_id: worker_id.clone(),
                 requeued_request_ids: vec!["request-1".to_string()],
-                failed_requests: Vec::new(),
-            }
+                failed_requests: vec![],
+            })
         );
         assert_eq!(
             harness.queued_request_ids("openai"),
             vec!["request-1".to_string()]
         );
+        assert!(!harness.has_worker(&worker_id));
     }
 
     #[test]
@@ -730,30 +730,27 @@ mod tests {
         let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
 
         let dispatched = harness.submit_request("openai", "llama-3.1-70b");
-
         assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
-        assert!(matches!(
-            harness.cancel_request("request-1", CancelReason::RequestTimedOut),
-            Some(CancellationOutcome::WorkerCancelSent(_))
-        ));
-
-        let disconnect = harness
-            .disconnect_worker(&worker_id)
-            .expect("registered worker should disconnect cleanly");
+        assert!(
+            harness
+                .cancel_request("request-1", CancelReason::ClientDisconnected)
+                .is_some()
+        );
 
         assert_eq!(
-            disconnect,
-            WorkerDisconnectOutcome {
-                requeued_request_ids: Vec::new(),
+            harness.disconnect_worker(&worker_id),
+            Some(WorkerDisconnectOutcome {
+                worker_id: worker_id.clone(),
+                requeued_request_ids: vec![],
                 failed_requests: vec![RequestFailure {
                     request_id: "request-1".to_string(),
-                    reason: RequestFailureReason::RequestAlreadyCanceled,
+                    reason: RequestFailureReason::ClientCanceled,
                 }],
-            }
+            })
         );
         assert!(
             harness.queued_request_ids("openai").is_empty(),
-            "a timed-out request must fail fast instead of returning to the queue"
+            "a canceled request should fail immediately instead of requeueing on worker disconnect"
         );
     }
 
@@ -763,72 +760,50 @@ mod tests {
         let first_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
 
         let dispatched = harness.submit_request("openai", "llama-3.1-70b");
-
         assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
 
-        let first_disconnect = harness
-            .disconnect_worker(&first_worker)
-            .expect("first worker should disconnect cleanly");
-        assert_eq!(
-            first_disconnect.requeued_request_ids,
-            vec!["request-1".to_string()]
-        );
+        for _ in 0..3 {
+            let disconnected = harness
+                .disconnect_worker(&first_worker)
+                .expect("worker should disconnect while request is in flight");
+            assert_eq!(disconnected.requeued_request_ids, vec!["request-1".to_string()]);
+            assert!(disconnected.failed_requests.is_empty());
 
-        for attempt in 2..=3 {
             let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
-            let redispatch = harness
-                .dispatch_next_for_worker(&worker_id)
-                .expect("requeued request should dispatch to the replacement worker");
+            let redispatched = harness.finish_requeued_front("openai", &worker_id);
             assert_eq!(
-                redispatch,
-                DispatchAssignment {
+                redispatched,
+                Some(DispatchAssignment {
                     request_id: "request-1".to_string(),
-                    worker_id: worker_id.clone(),
-                }
-            );
-
-            let disconnect = harness
-                .disconnect_worker(&worker_id)
-                .expect("replacement worker should disconnect cleanly");
-            assert_eq!(
-                disconnect,
-                WorkerDisconnectOutcome {
-                    requeued_request_ids: vec!["request-1".to_string()],
-                    failed_requests: Vec::new(),
-                },
-                "disconnect attempt {attempt} should still remain under the requeue cap"
+                    worker_id,
+                })
             );
         }
 
         let final_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
-        let final_redispatch = harness
-            .dispatch_next_for_worker(&final_worker)
-            .expect("the third requeue should still be dispatchable");
+        let redispatched = harness.finish_requeued_front("openai", &final_worker);
         assert_eq!(
-            final_redispatch,
-            DispatchAssignment {
+            redispatched,
+            Some(DispatchAssignment {
                 request_id: "request-1".to_string(),
                 worker_id: final_worker.clone(),
-            }
+            })
         );
 
-        let final_disconnect = harness
+        let exhausted = harness
             .disconnect_worker(&final_worker)
-            .expect("final worker should disconnect cleanly");
-
+            .expect("final worker should disconnect while request is in flight");
+        assert_eq!(exhausted.requeued_request_ids, Vec::<String>::new());
         assert_eq!(
-            final_disconnect,
-            WorkerDisconnectOutcome {
-                requeued_request_ids: Vec::new(),
-                failed_requests: vec![RequestFailure {
-                    request_id: "request-1".to_string(),
-                    reason: RequestFailureReason::MaxRequeuesExceeded,
-                }],
-            }
+            exhausted.failed_requests,
+            vec![RequestFailure {
+                request_id: "request-1".to_string(),
+                reason: RequestFailureReason::RequeueExhausted,
+            }]
         );
         assert!(
             harness.queued_request_ids("openai").is_empty(),
-            "once the cap is hit, the request must fail instead of requeueing forever"
+            "requeue exhaustion should fail the request instead of leaving it queued"
         );
     }
 
@@ -837,52 +812,42 @@ mod tests {
         let mut harness =
             RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
 
-        let session = harness
+        let connection = harness
             .connect(ConnectRequest::with_header_secret("openai", "top-secret"))
             .expect("worker should authenticate");
 
-        let worker_message = serde_json::to_string(&WorkerToServer::Register(RegisterMessage {
-            worker_name: "  edge-box-01-with-an-overly-long-suffix  ".to_string(),
+        let registration = RegisterMessage {
+            worker_name: "gpu-box-a".to_string(),
             models: vec![
                 " llama-3.1-70b ".to_string(),
-                String::new(),
                 "llama-3.1-70b".to_string(),
-                " mistral-large ".to_string(),
-                "qwen2.5-coder".to_string(),
-                "phi-4".to_string(),
-                "too-many".to_string(),
+                " ".to_string(),
+                "mistral-large".to_string(),
             ],
-            max_concurrent: 0,
-            protocol_version: Some("katamari-worker-v1".to_string()),
-        }))
-        .expect("register message should encode");
+            max_concurrent: 3,
+            protocol_version: Some("2026-04-bridge-v1".to_string()),
+        };
 
-        let server_message = session
-            .exchange_text(&worker_message)
-            .expect("register should be accepted");
-
-        let ServerToWorker::RegisterAck(ack) =
-            serde_json::from_str::<ServerToWorker>(&server_message)
-                .expect("register ack should decode");
+        let ack = harness
+            .register(&connection.connection_id, registration)
+            .expect("registration should succeed");
 
         assert_eq!(
             ack,
             RegisterAck {
                 worker_id: "worker-1".to_string(),
-                worker_name: "edge-box-01-with-an-overly-long-".to_string(),
-                models: vec![
-                    "llama-3.1-70b".to_string(),
-                    "mistral-large".to_string(),
-                    "qwen2.5-coder".to_string(),
-                    "phi-4".to_string(),
-                ],
-                max_concurrent: 1,
-                protocol_version: "katamari-worker-v1".to_string(),
+                models: vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()],
                 warnings: vec![
-                    "worker_name truncated to 32 characters".to_string(),
-                    "model list truncated to 4 entries".to_string(),
+                    "trimmed surrounding whitespace from model name".to_string(),
+                    "ignored duplicate model 'llama-3.1-70b'".to_string(),
+                    "ignored empty model entry".to_string(),
                 ],
+                protocol_version: Some("2026-04-bridge-v1".to_string()),
             }
+        );
+        assert_eq!(
+            harness.outbound_messages(&connection.connection_id),
+            vec![ServerToWorker::RegisterAck(ack)]
         );
     }
 
@@ -891,35 +856,18 @@ mod tests {
         let mut harness =
             RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
 
-        let session = harness
+        let accepted = harness
             .connect(ConnectRequest::with_query_secret("openai", "top-secret"))
-            .expect("query-string fallback should still work");
+            .expect("legacy query secret should still work for backward compatibility");
+        assert_eq!(accepted.connection_id, "conn-1".to_string());
 
-        let ack = session
-            .exchange_text(
-                &serde_json::to_string(&WorkerToServer::Register(RegisterMessage {
-                    worker_name: "gpu-box".to_string(),
-                    models: vec!["llama-3.1-8b".to_string()],
-                    max_concurrent: 2,
-                    protocol_version: None,
-                }))
-                .expect("register message should encode"),
-            )
-            .expect("legacy auth path should still permit registration");
-
-        let ack = serde_json::from_str::<ServerToWorker>(&ack).expect("register ack should decode");
-        assert!(matches!(ack, ServerToWorker::RegisterAck(_)));
-
-        let failure = harness
-            .connect(ConnectRequest::with_header_secret("openai", "wrong-secret"))
-            .expect_err("bad secret should be rejected");
-
+        let rejected = harness.connect(ConnectRequest::with_header_secret("openai", "wrong-secret"));
         assert_eq!(
-            failure,
-            HandshakeFailure {
-                code: CloseCode::PolicyViolation,
-                reason: "worker authentication failed".to_string(),
-            }
+            rejected,
+            Err(HandshakeFailure::Unauthorized {
+                close_code: CloseCode::PolicyViolation,
+                message: "invalid worker secret".to_string(),
+            })
         );
     }
 
@@ -928,28 +876,27 @@ mod tests {
         let mut harness =
             RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
 
-        let session = harness
+        let connection = harness
             .connect(ConnectRequest::with_header_secret("openai", "top-secret"))
             .expect("worker should authenticate");
 
-        let failure = session
-            .exchange_text(
-                &serde_json::to_string(&WorkerToServer::Register(RegisterMessage {
-                    worker_name: "gpu-box".to_string(),
-                    models: vec!["llama-3.1-8b".to_string()],
-                    max_concurrent: 2,
-                    protocol_version: Some("katamari-worker-v2".to_string()),
-                }))
-                .expect("register message should encode"),
-            )
-            .expect_err("mismatched protocol version should fail");
+        let rejected = harness.register(
+            &connection.connection_id,
+            RegisterMessage {
+                worker_name: "gpu-box-a".to_string(),
+                models: vec!["llama-3.1-70b".to_string()],
+                max_concurrent: 1,
+                protocol_version: Some("katamari-pre-release".to_string()),
+            },
+        );
 
         assert_eq!(
-            failure,
-            HandshakeFailure {
-                code: CloseCode::ProtocolError,
-                reason: "unsupported protocol version `katamari-worker-v2`; expected `katamari-worker-v1`".to_string(),
-            }
+            rejected,
+            Err(HandshakeFailure::ProtocolMismatch {
+                close_code: CloseCode::UnsupportedData,
+                message: "unsupported worker protocol version 'katamari-pre-release'"
+                    .to_string(),
+            })
         );
     }
 
@@ -960,29 +907,22 @@ mod tests {
             ("anthropic", ProviderConfig::disabled("other-secret")),
         ]);
 
-        let unknown = harness
-            .connect(ConnectRequest::with_header_secret("missing", "top-secret"))
-            .expect_err("unknown provider should fail");
+        let unknown = harness.connect(ConnectRequest::with_header_secret("mystery", "top-secret"));
         assert_eq!(
             unknown,
-            HandshakeFailure {
-                code: CloseCode::PolicyViolation,
-                reason: "unknown provider `missing`".to_string(),
-            }
+            Err(HandshakeFailure::UnknownProvider {
+                close_code: CloseCode::PolicyViolation,
+                message: "unknown provider 'mystery'".to_string(),
+            })
         );
 
-        let disabled = harness
-            .connect(ConnectRequest::with_header_secret(
-                "anthropic",
-                "other-secret",
-            ))
-            .expect_err("disabled provider should fail");
+        let disabled = harness.connect(ConnectRequest::with_header_secret("anthropic", "other-secret"));
         assert_eq!(
             disabled,
-            HandshakeFailure {
-                code: CloseCode::PolicyViolation,
-                reason: "provider `anthropic` is disabled".to_string(),
-            }
+            Err(HandshakeFailure::DisabledProvider {
+                close_code: CloseCode::PolicyViolation,
+                message: "provider 'anthropic' is disabled".to_string(),
+            })
         );
     }
 
@@ -998,29 +938,27 @@ mod tests {
                     200,
                     vec![
                         ResponseHeader::new("content-type", "application/json"),
-                        ResponseHeader::new("x-request-id", "req_123"),
-                        ResponseHeader::new("set-cookie", "route=a"),
-                        ResponseHeader::new("set-cookie", "worker=box-01"),
+                        ResponseHeader::new("x-upstream-id", "cmp_123"),
                     ],
-                    r#"{"id":"chatcmpl-123","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#,
+                    r#"{"id":"chatcmpl-123","choices":[{"message":{"content":"hello"}}]}"#,
                 )
-                .with_token_counts(12, 5, 17),
+                .with_token_counts(42, 7, 49),
             )
-            .expect("response_complete should resolve the client response");
+            .expect("response should complete");
 
         assert_eq!(
             delivered,
             PassThroughOutcome {
+                request_id,
                 status: 200,
                 headers: vec![
                     ResponseHeader::new("content-type", "application/json"),
-                    ResponseHeader::new("x-request-id", "req_123"),
-                    ResponseHeader::new("set-cookie", "route=a"),
-                    ResponseHeader::new("set-cookie", "worker=box-01"),
+                    ResponseHeader::new("x-upstream-id", "cmp_123"),
                 ],
-                body: r#"{"id":"chatcmpl-123","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#.to_string(),
-                completion: Some(CompletionMetadata::new(12, 5, 17)),
+                body: r#"{"id":"chatcmpl-123","choices":[{"message":{"content":"hello"}}]}"#
+                    .to_string(),
                 streamed_chunks: Vec::new(),
+                completion: Some(CompletionMetadata::new(42, 7, 49)),
             }
         );
     }
@@ -1044,7 +982,7 @@ mod tests {
                 )
                 .with_token_counts(321, 0, 321),
             )
-            .expect("upstream errors should still produce a client response");
+            .expect("error response should still complete");
 
         assert_eq!(delivered.status, 503);
         assert_eq!(
@@ -1078,13 +1016,13 @@ mod tests {
         let first = harness.deliver_response_chunk(
             &request_id,
             ResponseChunk::new(
-                r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"Hel"}}]}\n\n"#,
+                r#"data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n"#,
             ),
         );
         let second = harness.deliver_response_chunk(
             &request_id,
             ResponseChunk::new(
-                r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"lo"}}]}\n\n"#,
+                r#"data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n"#,
             ),
         );
         let done =
@@ -1094,7 +1032,7 @@ mod tests {
             first,
             Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
                 1,
-                r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"Hel"}}]}\n\n"#,
+                r#"data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n"#,
                 true,
             )))
         );
@@ -1102,7 +1040,7 @@ mod tests {
             second,
             Some(StreamChunkDelivery::Forwarded(ForwardedChunk::new(
                 2,
-                r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"lo"}}]}\n\n"#,
+                r#"data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n"#,
                 true,
             )))
         );
@@ -1144,12 +1082,12 @@ mod tests {
             vec![
                 ForwardedChunk::new(
                     1,
-                    r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"Hel"}}]}\n\n"#,
+                    r#"data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n"#,
                     true,
                 ),
                 ForwardedChunk::new(
                     2,
-                    r#"data: {"id":"chatcmpl-123","choices":[{"delta":{"content":"lo"}}]}\n\n"#,
+                    r#"data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n"#,
                     true,
                 ),
                 ForwardedChunk::new(3, "data: [DONE]\n\n", true),
@@ -1255,6 +1193,86 @@ mod tests {
                 model: "claude-3-7-sonnet".to_string(),
                 is_streaming: true,
                 raw_body: body,
+            }
+        );
+    }
+
+    #[test]
+    fn openai_responses_worker_request_preserves_exact_envelope_and_compatibility_headers() {
+        let body = json!({
+            "model": "gpt-4.1-mini",
+            "input": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "metadata": {"trace_id": "trace-123"}
+        })
+        .to_string();
+
+        let forwarded = HttpCompatibilityHarness::forward_worker_request(
+            "/v1/responses",
+            &body,
+            [
+                ("authorization", "Bearer sk-openai"),
+                ("content-type", "application/json"),
+                ("openai-organization", "org_123"),
+                ("user-agent", "codex-test"),
+            ],
+        )
+        .expect("OpenAI-style request should forward to a worker envelope");
+
+        assert_eq!(
+            forwarded,
+            ForwardedWorkerRequest {
+                path: "/v1/responses".to_string(),
+                model: "gpt-4.1-mini".to_string(),
+                is_streaming: true,
+                raw_body: body,
+                headers: BTreeMap::from([
+                    ("authorization".to_string(), "Bearer sk-openai".to_string()),
+                    ("content-type".to_string(), "application/json".to_string()),
+                    ("openai-organization".to_string(), "org_123".to_string()),
+                ]),
+            }
+        );
+    }
+
+    #[test]
+    fn anthropic_messages_worker_request_preserves_exact_envelope_and_compatibility_headers() {
+        let body = json!({
+            "model": "claude-3-7-sonnet",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+            ],
+            "stream": true
+        })
+        .to_string();
+
+        let forwarded = HttpCompatibilityHarness::forward_worker_request(
+            "/v1/messages",
+            &body,
+            [
+                ("x-api-key", "anthropic-key"),
+                ("anthropic-version", "2023-06-01"),
+                ("anthropic-beta", "tools-2024-04-04"),
+                ("content-type", "application/json"),
+                ("user-agent", "claude-code"),
+            ],
+        )
+        .expect("Anthropic-style request should forward to a worker envelope");
+
+        assert_eq!(
+            forwarded,
+            ForwardedWorkerRequest {
+                path: "/v1/messages".to_string(),
+                model: "claude-3-7-sonnet".to_string(),
+                is_streaming: true,
+                raw_body: body,
+                headers: BTreeMap::from([
+                    ("anthropic-beta".to_string(), "tools-2024-04-04".to_string()),
+                    ("anthropic-version".to_string(), "2023-06-01".to_string()),
+                    ("content-type".to_string(), "application/json".to_string()),
+                    ("x-api-key".to_string(), "anthropic-key".to_string()),
+                ]),
             }
         );
     }
@@ -1560,6 +1578,48 @@ mod tests {
             }
         }
 
+        fn forward_worker_request(
+            path: &str,
+            body: &str,
+            headers: impl IntoIterator<Item = (&'static str, &'static str)>,
+        ) -> Result<ForwardedWorkerRequest, CompatibilityParseError> {
+            let parsed = Self::parse_client_request(path, body)?;
+            let allowlist = match path {
+                "/v1/chat/completions" | "/v1/responses" => {
+                    &["authorization", "content-type", "openai-organization"][..]
+                }
+                "/v1/messages" => &[
+                    "x-api-key",
+                    "anthropic-version",
+                    "anthropic-beta",
+                    "content-type",
+                ][..],
+                unsupported => {
+                    return Err(CompatibilityParseError::UnsupportedPath(
+                        unsupported.to_string(),
+                    ));
+                }
+            };
+
+            let headers = headers
+                .into_iter()
+                .filter_map(|(name, value)| {
+                    let normalized = name.to_ascii_lowercase();
+                    allowlist
+                        .contains(&normalized.as_str())
+                        .then(|| (normalized, value.to_string()))
+                })
+                .collect();
+
+            Ok(ForwardedWorkerRequest {
+                path: parsed.path,
+                model: parsed.model,
+                is_streaming: parsed.is_streaming,
+                raw_body: parsed.raw_body,
+                headers,
+            })
+        }
+
         fn models_response(&self) -> ModelsEndpointResponse {
             let mut seen = HashSet::new();
             let models = self
@@ -1591,6 +1651,15 @@ mod tests {
         model: String,
         is_streaming: bool,
         raw_body: String,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ForwardedWorkerRequest {
+        path: String,
+        model: String,
+        is_streaming: bool,
+        raw_body: String,
+        headers: BTreeMap<String, String>,
     }
 
     #[derive(Debug, PartialEq, Eq)]
