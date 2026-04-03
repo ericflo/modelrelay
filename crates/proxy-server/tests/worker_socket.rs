@@ -254,6 +254,16 @@ async fn register_test_worker_with(
     ack
 }
 
+async fn send_register_message(socket: &mut TestSocket, register: RegisterMessage) {
+    let register_payload = serde_json::to_string(&WorkerToServerMessage::Register(register))
+        .expect("serialize register");
+
+    socket
+        .send(Message::Text(register_payload.into()))
+        .await
+        .expect("send register");
+}
+
 fn expected_request_message(
     request_id: &str,
     body: &str,
@@ -405,19 +415,17 @@ async fn authenticated_worker_can_register_and_receive_register_ack() {
         .await
         .expect("connect websocket");
 
-    let register = WorkerToServerMessage::Register(RegisterMessage {
+    send_register_message(
+        &mut socket,
+        RegisterMessage {
         worker_name: "gpu-box-a".to_string(),
         models: vec!["llama-3.1-70b".to_string(), " mistral-large ".to_string()],
         max_concurrent: 2,
         protocol_version: Some("2026-04-bridge-v1".to_string()),
         current_load: Some(0),
-    });
-    let register_payload = serde_json::to_string(&register).expect("serialize register");
-
-    socket
-        .send(Message::Text(register_payload.into()))
-        .await
-        .expect("send register");
+        },
+    )
+    .await;
 
     let ack_message = timeout(std::time::Duration::from_secs(2), socket.next())
         .await
@@ -445,6 +453,34 @@ async fn authenticated_worker_can_register_and_receive_register_ack() {
         core.provider_models("openai"),
         vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()]
     );
+}
+
+#[tokio::test]
+async fn mismatched_protocol_version_is_closed_with_protocol_error() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+
+    send_register_message(
+        &mut socket,
+        RegisterMessage {
+            worker_name: "gpu-box-a".to_string(),
+            models: vec!["llama-3.1-70b".to_string()],
+            max_concurrent: 1,
+            protocol_version: Some("katamari-pre-release".to_string()),
+            current_load: Some(0),
+        },
+    )
+    .await;
+
+    let close_frame = next_close_message(&mut socket, "protocol version mismatch rejection").await;
+
+    assert_eq!(u16::from(close_frame.code), 1002);
+    assert_eq!(close_frame.reason, "worker registration protocol error");
+
+    let core = core.lock().await;
+    assert!(core.provider_models("openai").is_empty());
 }
 
 #[tokio::test]

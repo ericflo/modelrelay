@@ -22,6 +22,7 @@ use crate::{
 };
 
 const WORKER_SECRET_HEADER: &str = "x-worker-secret";
+const WORKER_PROTOCOL_VERSION: &str = "2026-04-bridge-v1";
 const CLOSE_REASON_AUTH_FAILED: &str = "worker authentication failed";
 const CLOSE_REASON_PROTOCOL_ERROR: &str = "worker registration protocol error";
 const CLOSE_REASON_GRACEFUL_SHUTDOWN_COMPLETE: &str = "graceful shutdown complete";
@@ -291,6 +292,11 @@ async fn register_authenticated_worker(
     let Ok(WorkerToServerMessage::Register(register)) = serde_json::from_str(&payload) else {
         return Err(());
     };
+    if let Some(protocol_version) = register.protocol_version.as_deref() {
+        if protocol_version != WORKER_PROTOCOL_VERSION {
+            return Err(());
+        }
+    }
 
     let registered = {
         let mut core = state.core.lock().await;
