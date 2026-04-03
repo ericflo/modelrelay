@@ -286,6 +286,54 @@ async fn worker_backed_chat_completions_route_forwards_request_and_preserves_res
 }
 
 #[tokio::test]
+async fn worker_backed_chat_completions_route_preserves_upstream_http_error() {
+    let addr = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"bad request"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
+
+    let ServerToWorkerMessage::Request(request) =
+        next_server_message(&mut socket, "worker request").await
+    else {
+        panic!("expected worker request message");
+    };
+
+    let error_body =
+        r#"{"error":{"message":"upstream rejected the payload","type":"invalid_request_error"}}"#;
+    let complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+        request_id: request.request_id,
+        status_code: 422,
+        headers: HeaderMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("retry-after".to_string(), "7".to_string()),
+            (
+                "x-upstream-request-id".to_string(),
+                "req-upstream-123".to_string(),
+            ),
+        ]),
+        body: Some(error_body.to_string()),
+        token_counts: None,
+    });
+    let complete_payload = serde_json::to_string(&complete).expect("serialize response_complete");
+
+    socket
+        .send(Message::Text(complete_payload.into()))
+        .await
+        .expect("send response_complete");
+
+    let response = http_request.await.expect("join http request task");
+    assert!(response.starts_with("HTTP/1.1 422 Unprocessable Entity\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nretry-after: 7\r\n"));
+    assert!(response.contains("\r\nx-upstream-request-id: req-upstream-123\r\n"));
+    assert!(response.ends_with(error_body));
+}
+
+#[tokio::test]
 async fn worker_backed_chat_completions_streams_live_sse_chunks() {
     let addr = spawn_server().await;
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
