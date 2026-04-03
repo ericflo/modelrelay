@@ -275,11 +275,7 @@ fn streaming_http_response(
                 Some(HttpResponseEvent::Chunk(chunk)) => {
                     Some((Ok(Bytes::from(chunk)), (None, event_rx, cancellation_guard)))
                 }
-                Some(HttpResponseEvent::Complete(_)) => {
-                    cancellation_guard.disarm();
-                    None
-                }
-                Some(HttpResponseEvent::Failure(_)) => {
+                Some(HttpResponseEvent::Complete(_) | HttpResponseEvent::Failure(_)) => {
                     cancellation_guard.disarm();
                     None
                 }
