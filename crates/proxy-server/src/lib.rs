@@ -1,0 +1,636 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use worker_protocol::{ModelsUpdateMessage, RegisterAck, RegisterMessage};
+
+#[derive(Debug, Default)]
+pub struct ProxyServerCore {
+    next_request_id: usize,
+    next_worker_id: usize,
+    worker_order: Vec<String>,
+    workers: HashMap<String, WorkerState>,
+    provider_queues: HashMap<String, VecDeque<RequestRecord>>,
+    provider_queue_policies: HashMap<String, ProviderQueuePolicy>,
+    selection_cursors: HashMap<SelectionKey, usize>,
+}
+
+impl ProxyServerCore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            next_request_id: 1,
+            next_worker_id: 1,
+            ..Self::default()
+        }
+    }
+
+    pub fn configure_provider_queue(
+        &mut self,
+        provider: impl Into<String>,
+        policy: ProviderQueuePolicy,
+    ) {
+        self.provider_queue_policies.insert(provider.into(), policy);
+    }
+
+    pub fn register_worker(
+        &mut self,
+        provider: impl Into<String>,
+        register: RegisterMessage,
+    ) -> RegisteredWorker {
+        let provider = provider.into();
+        let worker_id = format!("worker-{}", self.next_worker_id);
+        self.next_worker_id += 1;
+
+        let sanitized_models = sanitize_models(register.models);
+        let warnings = registration_warnings(&register.worker_name, &sanitized_models);
+        let current_load = register.current_load.unwrap_or(0) as usize;
+
+        self.worker_order.push(worker_id.clone());
+        self.workers.insert(
+            worker_id.clone(),
+            WorkerState {
+                provider,
+                worker_name: register.worker_name,
+                models: sanitized_models.clone(),
+                max_concurrent: register.max_concurrent.max(1) as usize,
+                reported_load: current_load,
+                in_flight_requests: Vec::new(),
+            },
+        );
+
+        RegisteredWorker {
+            worker_id: worker_id.clone(),
+            ack: RegisterAck {
+                worker_id,
+                models: sanitized_models,
+                warnings,
+                protocol_version: register.protocol_version,
+            },
+        }
+    }
+
+    pub fn update_worker_models(
+        &mut self,
+        worker_id: &str,
+        update: ModelsUpdateMessage,
+    ) -> Vec<DispatchAssignment> {
+        let Some(worker) = self.workers.get_mut(worker_id) else {
+            return Vec::new();
+        };
+
+        worker.models = sanitize_models(update.models);
+        worker.reported_load = update.current_load as usize;
+
+        let mut assignments = Vec::new();
+        while self.worker_has_capacity(worker_id) {
+            let Some(assignment) = self.dispatch_next_compatible(worker_id) else {
+                break;
+            };
+            assignments.push(assignment);
+        }
+
+        assignments
+    }
+
+    pub fn submit_request(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> SubmissionOutcome {
+        let request = RequestRecord {
+            request_id: format!("request-{}", self.next_request_id),
+            provider: provider.into(),
+            model: model.into(),
+        };
+        self.next_request_id += 1;
+
+        if let Some(worker_id) = self.find_eligible_worker_id(&request.provider, &request.model) {
+            self.assign_to_worker(&worker_id, &request.request_id);
+            return SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: request.request_id,
+                worker_id,
+            });
+        }
+
+        let queue = self
+            .provider_queues
+            .entry(request.provider.clone())
+            .or_default();
+        let policy = self
+            .provider_queue_policies
+            .get(&request.provider)
+            .copied()
+            .unwrap_or_default();
+
+        if queue.len() >= policy.max_queue_len {
+            return SubmissionOutcome::Rejected(RequestFailure {
+                request_id: request.request_id,
+                reason: RequestFailureReason::QueueFull,
+            });
+        }
+
+        queue.push_back(request.clone());
+        SubmissionOutcome::Queued(QueuedAssignment {
+            request_id: request.request_id,
+            queue_len: queue.len(),
+        })
+    }
+
+    pub fn finish_request(
+        &mut self,
+        worker_id: &str,
+        request_id: &str,
+    ) -> Option<DispatchAssignment> {
+        let worker = self.workers.get_mut(worker_id)?;
+        let position = worker
+            .in_flight_requests
+            .iter()
+            .position(|active_request_id| active_request_id == request_id)?;
+        worker.in_flight_requests.remove(position);
+        worker.reported_load = worker.reported_load.saturating_sub(1);
+
+        self.dispatch_next_compatible(worker_id)
+    }
+
+    #[must_use]
+    pub fn provider_models(&self, provider: &str) -> Vec<String> {
+        let mut seen = HashSet::new();
+
+        self.worker_order
+            .iter()
+            .filter_map(|worker_id| self.workers.get(worker_id))
+            .filter(|worker| worker.provider == provider)
+            .flat_map(|worker| worker.models.iter())
+            .filter(|model| seen.insert((*model).clone()))
+            .cloned()
+            .collect()
+    }
+
+    #[must_use]
+    pub fn queued_request_ids(&self, provider: &str) -> Vec<String> {
+        self.provider_queues
+            .get(provider)
+            .into_iter()
+            .flat_map(|queue| queue.iter().map(|request| request.request_id.clone()))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn worker_in_flight_request_ids(&self, worker_id: &str) -> Vec<String> {
+        self.workers
+            .get(worker_id)
+            .map(|worker| worker.in_flight_requests.clone())
+            .unwrap_or_default()
+    }
+
+    fn dispatch_next_compatible(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
+        let (provider, models) = {
+            let worker = self.workers.get(worker_id)?;
+            (worker.provider.clone(), worker.models.clone())
+        };
+
+        if !self.worker_has_capacity(worker_id) {
+            return None;
+        }
+
+        let queue = self.provider_queues.get_mut(&provider)?;
+        let queue_index = queue
+            .iter()
+            .position(|request| models.iter().any(|model| model == &request.model))?;
+        let request = queue.remove(queue_index)?;
+
+        self.assign_to_worker(worker_id, &request.request_id);
+        Some(DispatchAssignment {
+            request_id: request.request_id,
+            worker_id: worker_id.to_string(),
+        })
+    }
+
+    fn find_eligible_worker_id(&mut self, provider: &str, model: &str) -> Option<String> {
+        let eligible_workers = self
+            .worker_order
+            .iter()
+            .enumerate()
+            .filter_map(|(position, worker_id)| {
+                let worker = self.workers.get(worker_id)?;
+                let supports_exact_model = worker
+                    .models
+                    .iter()
+                    .any(|worker_model| worker_model == model);
+                let selection_load = worker.selection_load();
+                let has_capacity = selection_load < worker.max_concurrent;
+
+                if worker.provider == provider && supports_exact_model && has_capacity {
+                    Some((position, worker_id.clone(), selection_load))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let lowest_load = eligible_workers.iter().map(|(_, _, load)| *load).min()?;
+        let tied_workers = eligible_workers
+            .into_iter()
+            .filter(|(_, _, load)| *load == lowest_load)
+            .collect::<Vec<_>>();
+
+        let key = SelectionKey::new(provider, model);
+        let last_position = self.selection_cursors.get(&key).copied();
+
+        let (position, worker_id, _) = tied_workers
+            .iter()
+            .find(|(position, _, _)| last_position.is_none_or(|last| *position > last))
+            .or_else(|| tied_workers.first())?
+            .clone();
+
+        self.selection_cursors.insert(key, position);
+        Some(worker_id)
+    }
+
+    fn assign_to_worker(&mut self, worker_id: &str, request_id: &str) {
+        if let Some(worker) = self.workers.get_mut(worker_id) {
+            worker.in_flight_requests.push(request_id.to_string());
+            worker.reported_load = worker.reported_load.saturating_add(1);
+        }
+    }
+
+    fn worker_has_capacity(&self, worker_id: &str) -> bool {
+        self.workers
+            .get(worker_id)
+            .is_some_and(|worker| worker.selection_load() < worker.max_concurrent)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredWorker {
+    pub worker_id: String,
+    pub ack: RegisterAck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderQueuePolicy {
+    pub max_queue_len: usize,
+}
+
+impl Default for ProviderQueuePolicy {
+    fn default() -> Self {
+        Self {
+            max_queue_len: usize::MAX,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmissionOutcome {
+    Dispatched(DispatchAssignment),
+    Queued(QueuedAssignment),
+    Rejected(RequestFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchAssignment {
+    pub request_id: String,
+    pub worker_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedAssignment {
+    pub request_id: String,
+    pub queue_len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestFailure {
+    pub request_id: String,
+    pub reason: RequestFailureReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestFailureReason {
+    QueueFull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerState {
+    provider: String,
+    worker_name: String,
+    models: Vec<String>,
+    max_concurrent: usize,
+    reported_load: usize,
+    in_flight_requests: Vec<String>,
+}
+
+impl WorkerState {
+    fn selection_load(&self) -> usize {
+        self.reported_load.max(self.in_flight_requests.len())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequestRecord {
+    request_id: String,
+    provider: String,
+    model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SelectionKey {
+    provider: String,
+    model: String,
+}
+
+impl SelectionKey {
+    fn new(provider: &str, model: &str) -> Self {
+        Self {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        }
+    }
+}
+
+fn sanitize_models(models: Vec<String>) -> Vec<String> {
+    let mut sanitized = Vec::new();
+    let mut seen = HashSet::new();
+
+    for model in models {
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if seen.insert(trimmed.to_string()) {
+            sanitized.push(trimmed.to_string());
+        }
+    }
+
+    sanitized
+}
+
+fn registration_warnings(worker_name: &str, sanitized_models: &[String]) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if worker_name.trim().is_empty() {
+        warnings.push("worker_name was empty after trimming".to_string());
+    }
+    if sanitized_models.is_empty() {
+        warnings.push("worker registered without any routable models".to_string());
+    }
+
+    warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DispatchAssignment, ProviderQueuePolicy, ProxyServerCore, QueuedAssignment, RequestFailure,
+        RequestFailureReason, SubmissionOutcome,
+    };
+    use worker_protocol::{ModelsUpdateMessage, RegisterMessage};
+
+    fn register_message(
+        worker_name: &str,
+        models: &[&str],
+        max_concurrent: u32,
+        current_load: Option<u32>,
+    ) -> RegisterMessage {
+        RegisterMessage {
+            worker_name: worker_name.to_string(),
+            models: models.iter().map(|model| (*model).to_string()).collect(),
+            max_concurrent,
+            protocol_version: Some("2026-04-bridge-v1".to_string()),
+            current_load,
+        }
+    }
+
+    #[test]
+    fn registers_workers_and_tracks_provider_model_catalog() {
+        let mut core = ProxyServerCore::new();
+
+        let registered = core.register_worker(
+            "openai",
+            register_message(
+                "gpu-box-a",
+                &["llama-3.1-70b", "llama-3.1-70b", " mistral-large ", ""],
+                2,
+                Some(0),
+            ),
+        );
+
+        assert_eq!(registered.worker_id, "worker-1");
+        assert_eq!(registered.ack.worker_id, "worker-1");
+        assert_eq!(
+            registered.ack.models,
+            vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()]
+        );
+        assert_eq!(
+            registered.ack.protocol_version.as_deref(),
+            Some("2026-04-bridge-v1")
+        );
+        assert!(registered.ack.warnings.is_empty());
+        assert_eq!(
+            core.provider_models("openai"),
+            vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()]
+        );
+    }
+
+    #[test]
+    fn selects_lowest_load_and_rotates_among_equal_exact_matches() {
+        let mut core = ProxyServerCore::new();
+        let first = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 3, Some(0)),
+            )
+            .worker_id;
+        let second = core
+            .register_worker(
+                "openai",
+                register_message("gpu-b", &["llama-3.1-70b"], 3, Some(0)),
+            )
+            .worker_id;
+        let third = core
+            .register_worker(
+                "openai",
+                register_message("gpu-c", &["llama-3.1-70b"], 3, Some(1)),
+            )
+            .worker_id;
+
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: first.clone(),
+            })
+        );
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-2".to_string(),
+                worker_id: second.clone(),
+            })
+        );
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-3".to_string(),
+                worker_id: third.clone(),
+            })
+        );
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-4".to_string(),
+                worker_id: first.clone(),
+            })
+        );
+    }
+
+    #[test]
+    fn bounds_queue_per_provider_and_preserves_existing_entries() {
+        let mut core = ProxyServerCore::new();
+        core.configure_provider_queue("openai", ProviderQueuePolicy { max_queue_len: 1 });
+
+        let worker_id = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert!(matches!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(_)
+        ));
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Rejected(RequestFailure {
+                request_id: "request-3".to_string(),
+                reason: RequestFailureReason::QueueFull,
+            })
+        );
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+        assert_eq!(
+            core.worker_in_flight_request_ids(&worker_id),
+            vec!["request-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn models_update_changes_routing_without_worker_reconnect() {
+        let mut core = ProxyServerCore::new();
+        let worker_id = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert_eq!(
+            core.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-1".to_string(),
+                queue_len: 1,
+            })
+        );
+        assert_eq!(
+            core.update_worker_models(
+                &worker_id,
+                ModelsUpdateMessage {
+                    models: vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()],
+                    current_load: 0,
+                }
+            ),
+            vec![DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: worker_id.clone(),
+            }]
+        );
+        assert!(core.queued_request_ids("openai").is_empty());
+
+        assert_eq!(core.finish_request(&worker_id, "request-1"), None);
+
+        assert!(
+            core.update_worker_models(
+                &worker_id,
+                ModelsUpdateMessage {
+                    models: vec!["llama-3.1-70b".to_string()],
+                    current_load: 0,
+                }
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            core.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn queued_dispatch_remains_fifo_among_compatible_requests() {
+        let mut core = ProxyServerCore::new();
+        let llama_worker = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+        let mistral_worker = core
+            .register_worker(
+                "openai",
+                register_message("gpu-b", &["mistral-large"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert!(matches!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(_)
+        ));
+        assert!(matches!(
+            core.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Dispatched(_)
+        ));
+        assert!(matches!(
+            core.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(_)
+        ));
+        assert!(matches!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Queued(_)
+        ));
+        assert!(matches!(
+            core.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(_)
+        ));
+
+        assert_eq!(
+            core.finish_request(&llama_worker, "request-1"),
+            Some(DispatchAssignment {
+                request_id: "request-4".to_string(),
+                worker_id: llama_worker,
+            })
+        );
+        assert_eq!(
+            core.finish_request(&mistral_worker, "request-2"),
+            Some(DispatchAssignment {
+                request_id: "request-3".to_string(),
+                worker_id: mistral_worker,
+            })
+        );
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-5".to_string()]
+        );
+    }
+}
