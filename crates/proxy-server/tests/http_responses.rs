@@ -1,7 +1,10 @@
 use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
-use proxy_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
+use proxy_server::{
+    ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp,
+    WorkerSocketProviderConfig,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -21,10 +24,17 @@ type TestSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn spawn_server() -> SocketAddr {
-    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    spawn_server_with_core(Arc::new(Mutex::new(ProxyServerCore::new())), true).await
+}
+
+async fn spawn_server_with_core(
+    core: Arc<Mutex<ProxyServerCore>>,
+    provider_enabled: bool,
+) -> SocketAddr {
     let worker_socket_app = WorkerSocketApp::new(core.clone())
         .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
     let app = ProxyHttpApp::new(core)
+        .with_provider_enabled(provider_enabled)
         .with_worker_socket_app(worker_socket_app)
         .router();
 
@@ -40,6 +50,33 @@ async fn spawn_server() -> SocketAddr {
     });
 
     addr
+}
+
+async fn wait_for_request_state(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    request_id: &str,
+    expected: RequestState,
+) {
+    timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            {
+                let core = core.lock().await;
+                if core.request_state(request_id) == Some(expected.clone()) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("request {request_id} did not reach expected state"));
+}
+
+fn assert_service_unavailable(response: &str, message: &str) {
+    assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(response.contains("\r\ncontent-type: text/plain; charset=utf-8\r\n"));
+    assert!(response.contains("\r\nx-content-type-options: nosniff\r\n"));
+    assert!(response.ends_with(&format!("{message}\n")));
 }
 
 fn worker_connect_request(addr: SocketAddr, secret: &str) -> http::Request<()> {
@@ -355,5 +392,52 @@ async fn worker_backed_responses_route_cancels_in_flight_request_when_http_clien
             request_id: request.request_id,
             reason: CancelReason::ClientDisconnect,
         })
+    );
+}
+
+#[tokio::test]
+async fn worker_backed_responses_route_returns_sanitized_queue_timeout_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: Some(0),
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let body = r#"{"model":"gpt-4.1-mini","input":"timeout me"}"#;
+    let http_request = tokio::spawn(post_responses(
+        addr,
+        body,
+        &[("OpenAI-Beta", "responses=v1")],
+    ));
+    wait_for_request_state(&core, "request-1", RequestState::Queued).await;
+
+    {
+        let mut core = core.lock().await;
+        let failures = core.expire_queue_timeouts(std::time::Instant::now());
+        assert_eq!(failures.len(), 1);
+    }
+
+    let response = http_request.await.expect("join timed-out http request");
+    assert_service_unavailable(&response, "Request timed out waiting for worker");
+}
+
+#[tokio::test]
+async fn worker_backed_responses_route_returns_sanitized_provider_disabled_error() {
+    let addr = spawn_server_with_core(Arc::new(Mutex::new(ProxyServerCore::new())), false).await;
+
+    let body = r#"{"model":"gpt-4.1-mini","input":"hello from responses"}"#;
+    let response = post_responses(addr, body, &[("OpenAI-Beta", "responses=v1")]).await;
+
+    assert_service_unavailable(&response, "Provider is currently disabled");
+    assert!(
+        !response.contains("virtual provider is disabled"),
+        "the compatibility boundary should use the stable disabled message"
     );
 }

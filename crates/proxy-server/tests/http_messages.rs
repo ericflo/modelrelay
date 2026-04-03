@@ -1,7 +1,9 @@
 use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
-use proxy_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
+use proxy_server::{
+    ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -21,13 +23,20 @@ type TestSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn spawn_server() -> SocketAddr {
-    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    spawn_server_with_core(Arc::new(Mutex::new(ProxyServerCore::new())), true).await
+}
+
+async fn spawn_server_with_core(
+    core: Arc<Mutex<ProxyServerCore>>,
+    provider_enabled: bool,
+) -> SocketAddr {
     let worker_socket_app = WorkerSocketApp::new(core.clone()).with_provider(
         "anthropic",
         WorkerSocketProviderConfig::enabled("top-secret"),
     );
     let app = ProxyHttpApp::new(core)
         .with_models_provider("anthropic")
+        .with_provider_enabled(provider_enabled)
         .with_worker_socket_app(worker_socket_app)
         .router();
 
@@ -43,6 +52,13 @@ async fn spawn_server() -> SocketAddr {
     });
 
     addr
+}
+
+fn assert_service_unavailable(response: &str, message: &str) {
+    assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(response.contains("\r\ncontent-type: text/plain; charset=utf-8\r\n"));
+    assert!(response.contains("\r\nx-content-type-options: nosniff\r\n"));
+    assert!(response.ends_with(&format!("{message}\n")));
 }
 
 fn worker_connect_request(addr: SocketAddr, secret: &str) -> http::Request<()> {
@@ -373,5 +389,38 @@ async fn worker_backed_messages_route_cancels_in_flight_request_when_http_client
             request_id: request.request_id,
             reason: CancelReason::ClientDisconnect,
         })
+    );
+}
+
+#[tokio::test]
+async fn worker_backed_messages_route_returns_sanitized_no_workers_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "anthropic",
+            ProviderQueuePolicy {
+                max_queue_len: 0,
+                queue_timeout_ticks: None,
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core, true).await;
+
+    let body = r#"{"model":"claude-3-5-sonnet-20241022","max_tokens":64,"messages":[{"role":"user","content":"hello from messages"}]}"#;
+    let response = post_messages(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    )
+    .await;
+
+    assert_service_unavailable(&response, "No workers available to handle request");
+    assert!(
+        !response.contains("queue is full"),
+        "the client boundary should not expose the raw queue rejection"
     );
 }
