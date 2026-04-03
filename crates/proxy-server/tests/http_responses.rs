@@ -592,6 +592,87 @@ async fn worker_backed_responses_route_returns_sanitized_provider_disabled_error
 }
 
 #[tokio::test]
+async fn worker_backed_responses_route_requeues_live_request_after_worker_disconnect() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let (mut socket_one, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect first websocket");
+    register_test_worker(&mut socket_one).await;
+
+    let body = r#"{"model":"gpt-4.1-mini","input":"finish after reconnect"}"#;
+    let http_request = tokio::spawn(post_responses(
+        addr,
+        body,
+        &[("OpenAI-Beta", "responses=v1")],
+    ));
+
+    let ServerToWorkerMessage::Request(first_request) =
+        next_server_message(&mut socket_one, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+
+    socket_one
+        .close(None)
+        .await
+        .expect("close first worker socket");
+    wait_for_request_state(&core, &first_request.request_id, RequestState::Queued).await;
+
+    let (mut socket_two, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect second websocket");
+    register_test_worker(&mut socket_two).await;
+    send_models_update(&mut socket_two, vec!["gpt-4.1-mini".to_string()], 0).await;
+
+    let ServerToWorkerMessage::Request(requeued_request) =
+        next_server_message(&mut socket_two, "requeued worker request").await
+    else {
+        panic!("expected requeued worker request message");
+    };
+
+    assert_eq!(requeued_request.request_id, first_request.request_id);
+    assert_eq!(requeued_request.endpoint_path, "/v1/responses");
+    assert_eq!(requeued_request.body, body);
+    assert_eq!(
+        requeued_request.headers,
+        HeaderMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("openai-beta".to_string(), "responses=v1".to_string()),
+        ])
+    );
+
+    let complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+        request_id: requeued_request.request_id,
+        status_code: 200,
+        headers: HeaderMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("openai-beta".to_string(), "responses=v1".to_string()),
+            ("x-worker-backend".to_string(), "gpu-box-b".to_string()),
+        ]),
+        body: Some(r#"{"id":"resp_requeued","object":"response","output":[]}"#.to_string()),
+        token_counts: None,
+    });
+    let complete_payload = serde_json::to_string(&complete).expect("serialize response_complete");
+
+    socket_two
+        .send(Message::Text(complete_payload.into()))
+        .await
+        .expect("send response_complete");
+
+    let response = timeout(std::time::Duration::from_secs(2), http_request)
+        .await
+        .expect("http request completed before timeout")
+        .expect("join http request task");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
+    assert!(response.contains("\r\nx-worker-backend: gpu-box-b\r\n"));
+    assert!(response.ends_with(r#"{"id":"resp_requeued","object":"response","output":[]}"#));
+}
+
+#[tokio::test]
 async fn worker_backed_responses_route_returns_sanitized_requeue_exhaustion_error() {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let addr = spawn_server_with_core(core.clone(), true).await;
