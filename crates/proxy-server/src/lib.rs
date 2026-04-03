@@ -405,7 +405,9 @@ impl ProxyServerCore {
 
     #[must_use]
     pub fn worker_reported_load(&self, worker_id: &str) -> Option<usize> {
-        self.workers.get(worker_id).map(|worker| worker.reported_load)
+        self.workers
+            .get(worker_id)
+            .map(|worker| worker.reported_load)
     }
 
     #[must_use]

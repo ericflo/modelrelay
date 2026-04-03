@@ -91,7 +91,9 @@ async fn assert_no_non_heartbeat_message(socket: &mut TestSocket, wait_for: std:
             return;
         };
 
-        let Ok(ServerToWorkerMessage::Ping(_)) = serde_json::from_str::<ServerToWorkerMessage>(&payload) else {
+        let Ok(ServerToWorkerMessage::Ping(_)) =
+            serde_json::from_str::<ServerToWorkerMessage>(&payload)
+        else {
             panic!("unexpected non-heartbeat message while waiting for quiet socket");
         };
     }
@@ -666,7 +668,8 @@ async fn heartbeat_ping_pong_updates_live_worker_load_without_reconnect_or_early
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
         .await
         .expect("connect websocket");
-    let ack = register_test_worker_with(&mut socket, vec!["llama-3.1-70b".to_string()], 2, Some(0)).await;
+    let ack =
+        register_test_worker_with(&mut socket, vec!["llama-3.1-70b".to_string()], 2, Some(0)).await;
 
     {
         let mut core = core.lock().await;
@@ -696,8 +699,10 @@ async fn heartbeat_ping_pong_updates_live_worker_load_without_reconnect_or_early
     );
 
     assert_eq!(
-        serde_json::from_str::<ServerToWorkerMessage>(&next_text_message(&mut socket, "heartbeat ping").await)
-            .expect("deserialize heartbeat ping"),
+        serde_json::from_str::<ServerToWorkerMessage>(
+            &next_text_message(&mut socket, "heartbeat ping").await
+        )
+        .expect("deserialize heartbeat ping"),
         ServerToWorkerMessage::Ping(PingMessage {
             timestamp_unix_ms: None,
         })
