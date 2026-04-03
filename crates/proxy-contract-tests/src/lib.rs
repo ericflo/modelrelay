@@ -766,7 +766,10 @@ mod tests {
             let disconnected = harness
                 .disconnect_worker(&first_worker)
                 .expect("worker should disconnect while request is in flight");
-            assert_eq!(disconnected.requeued_request_ids, vec!["request-1".to_string()]);
+            assert_eq!(
+                disconnected.requeued_request_ids,
+                vec!["request-1".to_string()]
+            );
             assert!(disconnected.failed_requests.is_empty());
 
             let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
@@ -861,7 +864,8 @@ mod tests {
             .expect("legacy query secret should still work for backward compatibility");
         assert_eq!(accepted.connection_id, "conn-1".to_string());
 
-        let rejected = harness.connect(ConnectRequest::with_header_secret("openai", "wrong-secret"));
+        let rejected =
+            harness.connect(ConnectRequest::with_header_secret("openai", "wrong-secret"));
         assert_eq!(
             rejected,
             Err(HandshakeFailure::Unauthorized {
@@ -894,8 +898,7 @@ mod tests {
             rejected,
             Err(HandshakeFailure::ProtocolMismatch {
                 close_code: CloseCode::UnsupportedData,
-                message: "unsupported worker protocol version 'katamari-pre-release'"
-                    .to_string(),
+                message: "unsupported worker protocol version 'katamari-pre-release'".to_string(),
             })
         );
     }
@@ -916,7 +919,10 @@ mod tests {
             })
         );
 
-        let disabled = harness.connect(ConnectRequest::with_header_secret("anthropic", "other-secret"));
+        let disabled = harness.connect(ConnectRequest::with_header_secret(
+            "anthropic",
+            "other-secret",
+        ));
         assert_eq!(
             disabled,
             Err(HandshakeFailure::DisabledProvider {
