@@ -81,5 +81,5 @@ Source of truth:
 
 Ordered by leverage:
 
-1. Registration sanitization edge warnings:
-   Add characterization tests for warning-heavy registration edge cases, including truncated worker names, capped model lists, empty accepted-model registrations, and `max_concurrent` clamping so the Rust registration contract covers both the happy path and the noisy acknowledgements Katamari tolerated.
+1. Remaining HTTP error-surface characterization:
+   Remaining HTTP error-surface characterization should cover the client-facing compatibility boundary for the still-unpinned cases Katamari distinguishes internally: no-worker availability and requeue exhaustion, including the exact status and sanitized body text clients receive instead of raw internal queue/worker errors.
