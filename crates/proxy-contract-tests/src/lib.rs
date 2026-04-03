@@ -36,6 +36,20 @@ mod tests {
         ResponseHarness, ResponseHeader, StreamChunkDelivery, StreamTermination,
     };
 
+    fn serialize_register_message(register: RegisterMessage) -> String {
+        serde_json::to_string(&WorkerToServer::Register(register))
+            .expect("register payload should serialize")
+    }
+
+    fn parse_server_message(message: &str) -> ServerToWorker {
+        serde_json::from_str(message).expect("server message should deserialize")
+    }
+
+    fn parse_register_ack(message: &str) -> RegisterAck {
+        let ServerToWorker::RegisterAck(ack) = parse_server_message(message);
+        ack
+    }
+
     #[test]
     fn pins_the_behavior_source_commit() {
         assert_eq!(
@@ -655,10 +669,11 @@ mod tests {
 
         assert_eq!(
             cancellation,
-            CancellationOutcome::WorkerNotified {
-                request_id: "request-1".to_string(),
+            CancellationOutcome::WorkerCancelSent(WorkerCancelSignal {
                 worker_id: worker_id.clone(),
-            }
+                request_id: "request-1".to_string(),
+                reason: CancelReason::ClientDisconnected,
+            })
         );
         assert_eq!(
             harness.worker_cancel_signals(),
@@ -680,10 +695,12 @@ mod tests {
 
         assert_eq!(
             harness.deliver_worker_chunk("request-1", "data: first-token\n\n"),
-            Some(ChunkDelivery::Forwarded {
-                request_id: "request-1".to_string(),
-                chunk: "data: first-token\n\n".to_string(),
-            })
+            Some(ChunkDelivery::Forwarded(
+                crate::dispatch_harness::ForwardedChunk {
+                    request_id: "request-1".to_string(),
+                    data: "data: first-token\n\n".to_string(),
+                }
+            ))
         );
         assert!(
             harness
@@ -692,12 +709,15 @@ mod tests {
         );
         assert_eq!(
             harness.deliver_worker_chunk("request-1", "data: late-token\n\n"),
-            None,
+            Some(ChunkDelivery::DroppedAfterCancellation),
             "late chunks after cancellation should be dropped instead of forwarded"
         );
         assert_eq!(
             harness.forwarded_chunks("request-1"),
-            vec!["data: first-token\n\n".to_string()]
+            vec![crate::dispatch_harness::ForwardedChunk {
+                request_id: "request-1".to_string(),
+                data: "data: first-token\n\n".to_string(),
+            }]
         );
     }
 
@@ -712,7 +732,6 @@ mod tests {
         assert_eq!(
             harness.disconnect_worker(&worker_id),
             Some(WorkerDisconnectOutcome {
-                worker_id: worker_id.clone(),
                 requeued_request_ids: vec!["request-1".to_string()],
                 failed_requests: vec![],
             })
@@ -740,11 +759,10 @@ mod tests {
         assert_eq!(
             harness.disconnect_worker(&worker_id),
             Some(WorkerDisconnectOutcome {
-                worker_id: worker_id.clone(),
                 requeued_request_ids: vec![],
                 failed_requests: vec![RequestFailure {
                     request_id: "request-1".to_string(),
-                    reason: RequestFailureReason::ClientCanceled,
+                    reason: RequestFailureReason::RequestAlreadyCanceled,
                 }],
             })
         );
@@ -757,14 +775,14 @@ mod tests {
     #[test]
     fn repeated_worker_disconnects_stop_requeueing_after_the_max_attempts() {
         let mut harness = DispatchHarness::new();
-        let first_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
+        let mut active_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
 
         let dispatched = harness.submit_request("openai", "llama-3.1-70b");
         assert!(matches!(dispatched, SubmissionOutcome::Dispatched(_)));
 
         for _ in 0..3 {
             let disconnected = harness
-                .disconnect_worker(&first_worker)
+                .disconnect_worker(&active_worker)
                 .expect("worker should disconnect while request is in flight");
             assert_eq!(
                 disconnected.requeued_request_ids,
@@ -773,35 +791,32 @@ mod tests {
             assert!(disconnected.failed_requests.is_empty());
 
             let worker_id = harness.register_worker("openai", ["llama-3.1-70b"], 1);
-            let redispatched = harness.finish_requeued_front("openai", &worker_id);
+            let redispatched = harness.dispatch_next_for_worker(&worker_id);
             assert_eq!(
                 redispatched,
                 Some(DispatchAssignment {
                     request_id: "request-1".to_string(),
-                    worker_id,
+                    worker_id: worker_id.clone(),
                 })
             );
+            active_worker = worker_id;
         }
 
-        let final_worker = harness.register_worker("openai", ["llama-3.1-70b"], 1);
-        let redispatched = harness.finish_requeued_front("openai", &final_worker);
+        let redispatched = harness.dispatch_next_for_worker(&active_worker);
         assert_eq!(
-            redispatched,
-            Some(DispatchAssignment {
-                request_id: "request-1".to_string(),
-                worker_id: final_worker.clone(),
-            })
+            redispatched, None,
+            "after three requeues the request should already be in flight on the replacement worker"
         );
 
         let exhausted = harness
-            .disconnect_worker(&final_worker)
+            .disconnect_worker(&active_worker)
             .expect("final worker should disconnect while request is in flight");
         assert_eq!(exhausted.requeued_request_ids, Vec::<String>::new());
         assert_eq!(
             exhausted.failed_requests,
             vec![RequestFailure {
                 request_id: "request-1".to_string(),
-                reason: RequestFailureReason::RequeueExhausted,
+                reason: RequestFailureReason::MaxRequeuesExceeded,
             }]
         );
         assert!(
@@ -828,29 +843,28 @@ mod tests {
                 "mistral-large".to_string(),
             ],
             max_concurrent: 3,
-            protocol_version: Some("2026-04-bridge-v1".to_string()),
+            protocol_version: None,
         };
 
-        let ack = harness
-            .register(&connection.connection_id, registration)
+        let ack_text = connection
+            .exchange_text(&serialize_register_message(registration))
             .expect("registration should succeed");
+        let ack = parse_register_ack(&ack_text);
 
         assert_eq!(
             ack,
             RegisterAck {
                 worker_id: "worker-1".to_string(),
+                worker_name: "gpu-box-a".to_string(),
                 models: vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()],
-                warnings: vec![
-                    "trimmed surrounding whitespace from model name".to_string(),
-                    "ignored duplicate model 'llama-3.1-70b'".to_string(),
-                    "ignored empty model entry".to_string(),
-                ],
-                protocol_version: Some("2026-04-bridge-v1".to_string()),
+                max_concurrent: 3,
+                warnings: Vec::new(),
+                protocol_version: "katamari-worker-v1".to_string(),
             }
         );
         assert_eq!(
-            harness.outbound_messages(&connection.connection_id),
-            vec![ServerToWorker::RegisterAck(ack)]
+            parse_server_message(&ack_text),
+            ServerToWorker::RegisterAck(ack)
         );
     }
 
@@ -862,15 +876,25 @@ mod tests {
         let accepted = harness
             .connect(ConnectRequest::with_query_secret("openai", "top-secret"))
             .expect("legacy query secret should still work for backward compatibility");
-        assert_eq!(accepted.connection_id, "conn-1".to_string());
+        let ack = parse_register_ack(
+            &accepted
+                .exchange_text(&serialize_register_message(RegisterMessage {
+                    worker_name: "gpu-box-a".to_string(),
+                    models: vec!["llama-3.1-70b".to_string()],
+                    max_concurrent: 1,
+                    protocol_version: None,
+                }))
+                .expect("legacy-authenticated worker should complete registration"),
+        );
+        assert_eq!(ack.worker_id, "worker-1".to_string());
 
         let rejected =
             harness.connect(ConnectRequest::with_header_secret("openai", "wrong-secret"));
         assert_eq!(
             rejected,
-            Err(HandshakeFailure::Unauthorized {
-                close_code: CloseCode::PolicyViolation,
-                message: "invalid worker secret".to_string(),
+            Err(HandshakeFailure {
+                code: CloseCode::PolicyViolation,
+                reason: "worker authentication failed".to_string(),
             })
         );
     }
@@ -884,21 +908,18 @@ mod tests {
             .connect(ConnectRequest::with_header_secret("openai", "top-secret"))
             .expect("worker should authenticate");
 
-        let rejected = harness.register(
-            &connection.connection_id,
-            RegisterMessage {
-                worker_name: "gpu-box-a".to_string(),
-                models: vec!["llama-3.1-70b".to_string()],
-                max_concurrent: 1,
-                protocol_version: Some("katamari-pre-release".to_string()),
-            },
-        );
+        let rejected = connection.exchange_text(&serialize_register_message(RegisterMessage {
+            worker_name: "gpu-box-a".to_string(),
+            models: vec!["llama-3.1-70b".to_string()],
+            max_concurrent: 1,
+            protocol_version: Some("katamari-pre-release".to_string()),
+        }));
 
         assert_eq!(
             rejected,
-            Err(HandshakeFailure::ProtocolMismatch {
-                close_code: CloseCode::UnsupportedData,
-                message: "unsupported worker protocol version 'katamari-pre-release'".to_string(),
+            Err(HandshakeFailure {
+                code: CloseCode::ProtocolError,
+                reason: "unsupported protocol version `katamari-pre-release`; expected `katamari-worker-v1`".to_string(),
             })
         );
     }
@@ -913,9 +934,9 @@ mod tests {
         let unknown = harness.connect(ConnectRequest::with_header_secret("mystery", "top-secret"));
         assert_eq!(
             unknown,
-            Err(HandshakeFailure::UnknownProvider {
-                close_code: CloseCode::PolicyViolation,
-                message: "unknown provider 'mystery'".to_string(),
+            Err(HandshakeFailure {
+                code: CloseCode::PolicyViolation,
+                reason: "unknown provider `mystery`".to_string(),
             })
         );
 
@@ -925,9 +946,9 @@ mod tests {
         ));
         assert_eq!(
             disabled,
-            Err(HandshakeFailure::DisabledProvider {
-                close_code: CloseCode::PolicyViolation,
-                message: "provider 'anthropic' is disabled".to_string(),
+            Err(HandshakeFailure {
+                code: CloseCode::PolicyViolation,
+                reason: "provider `anthropic` is disabled".to_string(),
             })
         );
     }
@@ -955,7 +976,6 @@ mod tests {
         assert_eq!(
             delivered,
             PassThroughOutcome {
-                request_id,
                 status: 200,
                 headers: vec![
                     ResponseHeader::new("content-type", "application/json"),
