@@ -1,20 +1,20 @@
 # Architecture
 
-This is the planned Rust split for the extracted standalone project. It is intentionally narrower and cleaner than the Katamari package layout while preserving the public behavior.
+This is the current Rust split for the extracted standalone project. It stays narrower and cleaner than the Katamari package layout while preserving the public worker-proxy behavior.
 
-## Planned Workspace Shape
+## Workspace Shape
 
 - `crates/proxy-contract-tests`
-  Black-box behavior tests and test fixtures. This stays lightweight and grows first.
+  Black-box behavior tests and focused harnesses for registration, queueing, response streaming, cancellation, requeue, heartbeat, and graceful shutdown semantics.
 
 - `crates/worker-protocol`
   Shared Rust protocol types for the WebSocket bridge: registration, dispatch, streaming chunks, cancellation, heartbeats, and operational control messages.
 
 - `crates/proxy-server`
-  Central HTTP proxy. Responsible for client-facing compatibility layers, auth, provider config, worker registry, queueing, routing, cancellation, and graceful drain.
+  Central HTTP proxy. Owns the client-facing OpenAI and Anthropic compatibility layers, worker auth, provider config, worker registry, queueing, routing, cancellation, and graceful drain.
 
 - `crates/worker-daemon`
-  Remote worker process. Responsible for authenticating to the server, advertising models and capacity, forwarding requests to a local backend such as `llama-server`, streaming chunks back, and honoring cancellation.
+  Remote worker process. Authenticates to the server, advertises models and capacity, forwards requests to a local backend such as `llama-server`, streams chunks back, refreshes advertised models, reports live load in heartbeats, and honors cancellation plus graceful shutdown.
 
 ## Design Constraints
 
@@ -22,19 +22,17 @@ This is the planned Rust split for the extracted standalone project. It is inten
 - Queueing belongs at the central server, not at each worker.
 - Streaming and cancellation are first-class concerns, not add-ons.
 - The Rust rewrite should preserve behavior, not Go package boundaries.
-- Early implementation should optimize for testability and explicit state transitions over abstraction depth.
+- The implementation should optimize for testability and explicit state transitions over abstraction depth.
 
-## Early Implementation Order
+## Current Status
 
-1. Lock the contract with black-box tests in `proxy-contract-tests`.
-2. Introduce the shared worker protocol crate. This workspace now includes `crates/worker-protocol` for the bridge message schema.
-3. Build an in-memory proxy-server core that can satisfy the contract tests without real sockets.
-4. Add transport adapters for real WebSocket and HTTP boundaries.
-5. Add the worker daemon and local-backend integration.
+- The workspace has moved past bootstrap: the in-memory proxy core, real HTTP boundary, real worker WebSocket transport, and worker daemon all exist on `main`.
+- The shipped test surface already covers OpenAI chat/completions and responses flows, Anthropic messages flows, queueing and timeout behavior, streaming pass-through, cancellation propagation, worker disconnect and requeue behavior, heartbeat/load reporting, model refresh, auth cooldown recovery, and graceful shutdown/drain.
+- The main remaining work is depth and hardening around the existing architecture, not proving that the transport split is viable.
 
 ## Questions Deferred On Purpose
 
-- Final public crate naming beyond this bootstrap.
+- Final public crate naming beyond the current workspace split.
 - Persistence model for provider and worker metadata.
 - Metrics, tracing, and admin API details.
 - Packaging and release workflow.
