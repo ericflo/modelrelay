@@ -63,9 +63,10 @@ mod tests {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
         assert!(doc.contains("First Characterization Tests To Write Next"));
-        assert!(doc.contains("Registration sanitization edge warnings"));
-        assert!(doc.contains("truncated worker names"));
-        assert!(doc.contains("max_concurrent"));
+        assert!(doc.contains("Remaining HTTP error-surface characterization"));
+        assert!(doc.contains("no-worker availability"));
+        assert!(doc.contains("requeue exhaustion"));
+        assert!(!doc.contains("Registration sanitization edge warnings"));
         assert!(!doc.contains("Dynamic model catalog updates and `/v1/models` coherence"));
         assert!(!doc.contains("1. OpenAI-style and Anthropic-style compatibility:"));
         assert!(!doc.contains("1. Graceful shutdown and drain:"));
@@ -1563,6 +1564,88 @@ mod tests {
     }
 
     #[test]
+    fn queue_timeout_http_boundary_returns_sanitized_service_unavailable_text() {
+        for path in ["/v1/responses", "/v1/messages"] {
+            let response = HttpCompatibilityHarness::error_response(
+                path,
+                CompatibilityBoundaryError::QueueTimedOut,
+            )
+            .expect("supported compatibility path should map queue timeout");
+
+            assert_eq!(
+                response,
+                CompatibilityErrorResponse::service_unavailable(
+                    "Request timed out waiting for worker",
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn queue_full_http_boundary_returns_capacity_message_without_internal_reason() {
+        for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+            let response = HttpCompatibilityHarness::error_response(
+                path,
+                CompatibilityBoundaryError::QueueFull,
+            )
+            .expect("supported compatibility path should map queue-full rejection");
+
+            assert_eq!(
+                response,
+                CompatibilityErrorResponse::service_unavailable(
+                    "Service temporarily at capacity, please retry",
+                )
+            );
+            assert!(
+                !response.body.contains("queue is full"),
+                "the client boundary should not expose the internal queue error string"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_provider_http_boundary_returns_sanitized_disabled_message() {
+        for path in ["/v1/responses", "/v1/messages"] {
+            let response = HttpCompatibilityHarness::error_response(
+                path,
+                CompatibilityBoundaryError::ProviderDisabled,
+            )
+            .expect("supported compatibility path should map provider-disabled failures");
+
+            assert_eq!(
+                response,
+                CompatibilityErrorResponse::service_unavailable("Provider is currently disabled",)
+            );
+            assert!(
+                !response.body.contains("virtual provider is disabled"),
+                "the compatibility boundary should use the stable client-facing disabled message"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_deletion_http_boundary_hides_internal_delete_reason_behind_generic_service_error() {
+        for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+            let response = HttpCompatibilityHarness::error_response(
+                path,
+                CompatibilityBoundaryError::ProviderDeleted,
+            )
+            .expect("supported compatibility path should map provider-deletion drain failures");
+
+            assert_eq!(
+                response,
+                CompatibilityErrorResponse::service_unavailable(
+                    "Internal server error processing request",
+                )
+            );
+            assert!(
+                !response.body.contains("provider was deleted"),
+                "provider deletion should not leak the internal drain reason to clients"
+            );
+        }
+    }
+
+    #[test]
     fn models_endpoint_returns_openai_compatible_catalog_shape_for_advertised_models() {
         let harness =
             HttpCompatibilityHarness::new(["llama-3.1-70b", "mistral-large", "llama-3.1-70b"]);
@@ -2013,6 +2096,33 @@ mod tests {
                 }),
             }
         }
+
+        fn error_response(
+            path: &str,
+            error: CompatibilityBoundaryError,
+        ) -> Result<CompatibilityErrorResponse, CompatibilityParseError> {
+            match path {
+                "/v1/chat/completions" | "/v1/responses" | "/v1/messages" => {}
+                unsupported => {
+                    return Err(CompatibilityParseError::UnsupportedPath(
+                        unsupported.to_string(),
+                    ));
+                }
+            }
+
+            let message = match error {
+                CompatibilityBoundaryError::QueueTimedOut => "Request timed out waiting for worker",
+                CompatibilityBoundaryError::QueueFull => {
+                    "Service temporarily at capacity, please retry"
+                }
+                CompatibilityBoundaryError::ProviderDisabled => "Provider is currently disabled",
+                CompatibilityBoundaryError::ProviderDeleted => {
+                    "Internal server error processing request"
+                }
+            };
+
+            Ok(CompatibilityErrorResponse::service_unavailable(message))
+        }
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -2036,6 +2146,34 @@ mod tests {
     struct ModelsEndpointResponse {
         status: u16,
         body: Value,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CompatibilityErrorResponse {
+        status: u16,
+        headers: Vec<ResponseHeader>,
+        body: String,
+    }
+
+    impl CompatibilityErrorResponse {
+        fn service_unavailable(message: &str) -> Self {
+            Self {
+                status: 503,
+                headers: vec![
+                    ResponseHeader::new("content-type", "text/plain; charset=utf-8"),
+                    ResponseHeader::new("x-content-type-options", "nosniff"),
+                ],
+                body: format!("{message}\n"),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CompatibilityBoundaryError {
+        QueueTimedOut,
+        QueueFull,
+        ProviderDisabled,
+        ProviderDeleted,
     }
 
     #[derive(Debug, PartialEq, Eq)]
