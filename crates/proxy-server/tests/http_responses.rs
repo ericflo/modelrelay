@@ -13,8 +13,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    HeaderMap, RegisterMessage, ResponseCompleteMessage, ServerToWorkerMessage,
-    WorkerToServerMessage,
+    HeaderMap, RegisterMessage, ResponseChunkMessage, ResponseCompleteMessage,
+    ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -116,6 +116,64 @@ async fn post_responses(addr: SocketAddr, body: &str, headers: &[(&str, &str)]) 
     String::from_utf8(response).expect("http response is utf8")
 }
 
+async fn open_responses_request(
+    addr: SocketAddr,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> TcpStream {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .expect("connect to test server");
+
+    let mut request = format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        write!(request, "{name}: {value}\r\n").expect("append http request header");
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write http request");
+
+    stream
+}
+
+async fn read_until_contains(stream: &mut TcpStream, needle: &str) -> String {
+    let mut response = Vec::new();
+
+    loop {
+        if String::from_utf8_lossy(&response).contains(needle) {
+            return String::from_utf8(response).expect("http response is utf8");
+        }
+
+        let mut chunk = [0_u8; 1024];
+        let read = timeout(std::time::Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("read response chunk before timeout")
+            .expect("read response chunk");
+        assert!(read > 0, "response closed before expected bytes arrived");
+        response.extend_from_slice(&chunk[..read]);
+    }
+}
+
+async fn send_response_chunk(socket: &mut TestSocket, request_id: &str, chunk: &str) {
+    let message = WorkerToServerMessage::ResponseChunk(ResponseChunkMessage {
+        request_id: request_id.to_string(),
+        chunk: chunk.to_string(),
+    });
+    let payload = serde_json::to_string(&message).expect("serialize response_chunk");
+
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .expect("send response_chunk");
+}
+
 #[tokio::test]
 async fn worker_backed_responses_route_forwards_request_and_preserves_response() {
     let addr = spawn_server().await;
@@ -179,4 +237,83 @@ async fn worker_backed_responses_route_forwards_request_and_preserves_response()
     assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
     assert!(response.contains("\r\nx-worker-backend: gpu-box-a\r\n"));
     assert!(response.ends_with(r#"{"id":"resp_1","object":"response","output":[]}"#));
+}
+
+#[tokio::test]
+async fn worker_backed_responses_route_streams_live_sse_chunks() {
+    let addr = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"gpt-4.1-mini","stream":true,"input":"hello from responses"}"#;
+    let mut http_stream =
+        open_responses_request(addr, body, &[("OpenAI-Beta", "responses=v1")]).await;
+
+    let ServerToWorkerMessage::Request(request) =
+        next_server_message(&mut socket, "streaming worker request").await
+    else {
+        panic!("expected worker request message");
+    };
+
+    assert_eq!(request.endpoint_path, "/v1/responses");
+    assert!(request.is_streaming);
+    assert_eq!(request.body, body);
+
+    send_response_chunk(
+        &mut socket,
+        &request.request_id,
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+    )
+    .await;
+
+    let first_fragment = read_until_contains(
+        &mut http_stream,
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+    )
+    .await;
+    assert!(first_fragment.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(first_fragment.contains("\r\ncontent-type: text/event-stream\r\n"));
+    assert!(
+        first_fragment
+            .contains("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n")
+    );
+    assert!(!first_fragment.contains("data: [DONE]\n\n"));
+
+    send_response_chunk(
+        &mut socket,
+        &request.request_id,
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+    )
+    .await;
+    send_response_chunk(&mut socket, &request.request_id, "data: [DONE]\n\n").await;
+
+    let complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+        request_id: request.request_id,
+        status_code: 200,
+        headers: HeaderMap::from([("content-type".to_string(), "text/event-stream".to_string())]),
+        body: Some(String::new()),
+        token_counts: None,
+    });
+    let complete_payload = serde_json::to_string(&complete).expect("serialize response_complete");
+
+    socket
+        .send(Message::Text(complete_payload.into()))
+        .await
+        .expect("send response_complete");
+
+    let mut rest = Vec::new();
+    http_stream
+        .read_to_end(&mut rest)
+        .await
+        .expect("read streaming http response");
+    let full_response = first_fragment + &String::from_utf8(rest).expect("http response is utf8");
+
+    assert!(
+        full_response
+            .contains("data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n")
+    );
+    assert!(full_response.contains("data: [DONE]\n\n"));
+    assert!(full_response.ends_with("0\r\n\r\n"));
 }

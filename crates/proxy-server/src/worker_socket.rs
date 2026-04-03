@@ -344,15 +344,9 @@ async fn handle_worker_message(state: &WorkerSocketState, worker_id: &str, paylo
             );
             true
         }
-        Ok(WorkerToServerMessage::ResponseChunk(ResponseChunkMessage { request_id, .. })) => {
-            let core = state.core.lock().await;
-            matches!(
-                core.request_state(&request_id),
-                Some(crate::RequestState::InFlight {
-                    worker_id: active_worker_id,
-                    ..
-                }) if active_worker_id == worker_id
-            )
+        Ok(WorkerToServerMessage::ResponseChunk(ResponseChunkMessage { request_id, chunk })) => {
+            let mut core = state.core.lock().await;
+            core.stream_http_response_chunk(worker_id, &request_id, chunk)
         }
         Ok(WorkerToServerMessage::ResponseComplete(response)) => {
             let request_id = response.request_id.clone();
