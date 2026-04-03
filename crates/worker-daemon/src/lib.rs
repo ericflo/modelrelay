@@ -1,8 +1,13 @@
-use std::{collections::HashMap, error::Error, io};
+use std::{collections::HashMap, error::Error, io, time::SystemTime};
 
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use reqwest::header::{CONNECTION, CONTENT_LENGTH, HOST, HeaderMap as ReqwestHeaderMap};
-use tokio::{select, sync::mpsc, task::JoinHandle};
+use tokio::{
+    select,
+    sync::mpsc,
+    task::JoinHandle,
+    time::{Duration, sleep},
+};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -76,13 +81,17 @@ impl WorkerDaemon {
         }
     }
 
-    /// Runs the worker loop until the proxy closes the connection or the task is cancelled.
+    /// Runs one connection session.
+    ///
+    /// Returns `Ok(true)` when the proxy sent a `GracefulShutdown` before closing
+    /// (the caller should not reconnect), and `Ok(false)` when the connection was
+    /// lost unexpectedly (the caller should reconnect).
     ///
     /// # Errors
     ///
     /// Returns an error when the daemon cannot connect, authenticate, serialize protocol
     /// messages, or proxy a backend response.
-    pub async fn run(self) -> Result<(), BoxError> {
+    async fn run_session(&self) -> Result<bool, BoxError> {
         let mut request = self.config.websocket_url().into_client_request()?;
         request
             .headers_mut()
@@ -158,7 +167,66 @@ impl WorkerDaemon {
             handle.abort();
         }
 
-        Ok(())
+        Ok(shutting_down)
+    }
+
+    /// Runs the worker loop until the proxy closes the connection or the task is cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the daemon cannot connect, authenticate, serialize protocol
+    /// messages, or proxy a backend response.
+    pub async fn run(self) -> Result<(), BoxError> {
+        self.run_session().await.map(|_| ())
+    }
+
+    /// Runs the worker loop, reconnecting after unexpected disconnections.
+    ///
+    /// Exits cleanly on a graceful proxy shutdown or task cancellation. On connection
+    /// errors or unexpected drops, waits with exponential backoff (1 s base, 30 s cap,
+    /// up to 500 ms of jitter) before reconnecting. Each attempt is logged to stderr.
+    ///
+    /// # Errors
+    ///
+    /// Only returns an error if the underlying machinery cannot be set up at all (e.g.
+    /// invalid config that cannot form a URL or header value). Transient network errors
+    /// are retried indefinitely.
+    pub async fn run_with_reconnect(self) -> Result<(), BoxError> {
+        let config = self.config;
+        let mut backoff_ms: u64 = 1_000;
+        let mut attempt: u32 = 0;
+
+        loop {
+            let daemon = Self::new(config.clone());
+            match daemon.run_session().await {
+                Ok(true) => {
+                    eprintln!("worker-daemon: graceful shutdown received, exiting");
+                    return Ok(());
+                }
+                Ok(false) => {
+                    attempt += 1;
+                    let jitter_ms = subsecond_jitter_ms();
+                    eprintln!(
+                        "worker-daemon: connection closed unexpectedly \
+                         (attempt {attempt}), reconnecting in {}ms",
+                        backoff_ms + jitter_ms
+                    );
+                    sleep(Duration::from_millis(backoff_ms + jitter_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(30_000);
+                }
+                Err(e) => {
+                    attempt += 1;
+                    let jitter_ms = subsecond_jitter_ms();
+                    eprintln!(
+                        "worker-daemon: error: {e} \
+                         (attempt {attempt}), reconnecting in {}ms",
+                        backoff_ms + jitter_ms
+                    );
+                    sleep(Duration::from_millis(backoff_ms + jitter_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(30_000);
+                }
+            }
+        }
     }
 
     async fn handle_server_message(
@@ -331,6 +399,19 @@ async fn forward_request(
         body: Some(body),
         token_counts: None,
     })
+}
+
+/// Returns a pseudo-random jitter value in the range 0–499 ms derived from the
+/// subsecond component of the system clock.  Not cryptographically strong, but
+/// sufficient for backoff spread across independent processes.
+fn subsecond_jitter_ms() -> u64 {
+    u64::from(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.subsec_millis())
+            .unwrap_or(0)
+            % 500,
+    )
 }
 
 async fn refresh_models(

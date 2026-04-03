@@ -71,7 +71,7 @@ async fn main() {
     let daemon = WorkerDaemon::new(config);
 
     tokio::select! {
-        result = daemon.run() => {
+        result = daemon.run_with_reconnect() => {
             if let Err(e) = result {
                 eprintln!("worker-daemon error: {e}");
                 std::process::exit(1);

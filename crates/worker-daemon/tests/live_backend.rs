@@ -2233,3 +2233,102 @@ async fn worker_daemon_recovers_after_worker_auth_rate_limit_window_expires() {
 
     recovered_daemon_handle.abort();
 }
+
+#[tokio::test]
+async fn worker_daemon_run_with_reconnect_reconnects_after_proxy_restart() {
+    // Bind a listener to claim an ephemeral port, then use it as a "flaky proxy"
+    // that drops connections immediately.  After the first failed attempt the daemon
+    // should back off and retry; at that point the real proxy is already listening on
+    // the same address.
+    let flaky_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind flaky listener");
+    let proxy_addr = flaky_listener.local_addr().expect("get proxy addr");
+
+    let (backend_addr, observed_request_rx, _) = spawn_mock_backend().await;
+
+    // Start the daemon before the flaky listener accepts anything.
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-reconnect".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+    let daemon_handle = tokio::spawn(async move { daemon.run_with_reconnect().await });
+
+    // Accept one connection and immediately drop it; the daemon will receive a
+    // connection-reset or EOF and trigger its reconnect path.
+    let (dropped_stream, _) = timeout(Duration::from_secs(2), flaky_listener.accept())
+        .await
+        .expect("flaky listener accepted before timeout")
+        .expect("accept connection");
+    drop(dropped_stream);
+    drop(flaky_listener); // release the port so the real proxy can bind it
+
+    // Give the OS a moment to release the port.
+    sleep(Duration::from_millis(50)).await;
+
+    // Bring up the real proxy on the same address.
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let worker_socket_app = WorkerSocketApp::new(core.clone())
+        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
+    let real_app = ProxyHttpApp::new(core.clone())
+        .with_models_provider("openai")
+        .with_worker_socket_app(worker_socket_app)
+        .router();
+
+    let real_listener = TcpListener::bind(proxy_addr)
+        .await
+        .expect("rebind proxy port for real proxy");
+    tokio::spawn(async move {
+        axum::serve(real_listener, real_app)
+            .await
+            .expect("serve real proxy");
+    });
+
+    // After the daemon's backoff (~1 s) it should reconnect and register.
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if get_models(proxy_addr).await.1["data"]
+                .as_array()
+                .is_some_and(|arr| arr.iter().any(|e| e["id"] == "gpt-4.1-mini"))
+            {
+                return;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("daemon reconnected and registered model within 5 s");
+
+    // Confirm the reconnected daemon can serve a real request end-to-end.
+    let request_body =
+        json!({"model": "gpt-4.1-mini", "input": "hello after reconnect"}).to_string();
+    let response = post_responses(
+        proxy_addr,
+        &request_body,
+        &[
+            ("Authorization", "Bearer test-openai-key"),
+            ("OpenAI-Beta", "responses=v1"),
+        ],
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend received request before timeout")
+        .expect("backend observed request");
+    assert_eq!(observed_request.path, "/v1/responses");
+    assert_eq!(
+        observed_request.authorization,
+        Some("Bearer test-openai-key".to_string())
+    );
+    assert_eq!(observed_request.body, request_body);
+    assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+
+    daemon_handle.abort();
+}
