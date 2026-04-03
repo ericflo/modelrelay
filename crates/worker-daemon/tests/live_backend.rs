@@ -1693,6 +1693,78 @@ async fn worker_daemon_cancels_in_flight_backend_request_when_proxy_client_disco
 }
 
 #[tokio::test]
+async fn worker_daemon_cancels_in_flight_anthropic_backend_request_when_proxy_client_disconnects() {
+    let (proxy_addr, _) = spawn_proxy_server("anthropic").await;
+    let (backend_addr, observed_request_rx, cancelled_rx) = spawn_slow_cancellation_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "anthropic".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["claude-3-7-sonnet-20250219".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "claude-3-7-sonnet-20250219").await;
+
+    let request_body = json!({
+        "model": "claude-3-7-sonnet-20250219",
+        "stream": true,
+        "max_tokens": 128,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "cancel me"}]}]
+    })
+    .to_string();
+    let mut response_stream = open_messages_request(
+        proxy_addr,
+        &request_body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "tools-2024-04-04"),
+        ],
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/messages".to_string(),
+            authorization: None,
+            openai_organization: None,
+            openai_beta: None,
+            x_api_key: Some("test-anthropic-key".to_string()),
+            anthropic_version: Some("2023-06-01".to_string()),
+            anthropic_beta: Some("tools-2024-04-04".to_string()),
+            content_type: Some("application/json".to_string()),
+            body: request_body,
+        }
+    );
+
+    response_stream
+        .shutdown()
+        .await
+        .expect("shutdown disconnected proxy client");
+    drop(response_stream);
+
+    timeout(Duration::from_secs(2), cancelled_rx)
+        .await
+        .expect("backend cancellation before timeout")
+        .expect("backend cancellation result")
+        .expect("backend request was canceled");
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
 async fn worker_daemon_refreshes_models_catalog_without_reconnect() {
     let (proxy_addr, core) = spawn_proxy_server("openai").await;
     let (backend_addr, _observed_request_rx, advertised_models) = spawn_mock_backend().await;
