@@ -31,7 +31,7 @@ Source of truth:
   If no eligible worker can accept the request, the request is queued per virtual provider. The queue is bounded and FIFO among requests compatible with a worker's model list. Requests remain keyed by original queue time so requeue does not grant infinite timeout extensions.
 
 - Request dispatch over WebSocket:
-  Requests are forwarded to workers as `request` messages with `request_id`, `model`, raw JSON body string, selected headers, target endpoint path, and `is_streaming`. The central proxy accepts ordinary provider-style HTTP requests and delegates only the worker-backed providers through this path.
+  Requests are forwarded to workers as `request` messages with `request_id`, `model`, raw JSON body string, selected compatibility headers, target endpoint path, and `is_streaming`. The central proxy accepts ordinary provider-style HTTP requests and delegates only the worker-backed providers through this path. Compatibility-critical request headers include OpenAI-style `authorization`, `content-type`, and `openai-organization`, plus Anthropic-style `x-api-key`, `anthropic-version`, `anthropic-beta`, and `content-type`; incidental transport headers like `user-agent` are not part of the worker envelope contract.
 
 - Non-streaming response pass-through:
   Workers reply with `response_complete` containing the final HTTP status, response headers, full body, and token counts. The proxy must forward status, headers, and body faithfully, including upstream 4xx and 5xx responses, rather than collapsing them into generic proxy errors.
