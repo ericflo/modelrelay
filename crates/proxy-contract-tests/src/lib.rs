@@ -1554,6 +1554,46 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_completions_worker_request_preserves_exact_envelope_and_compatibility_headers() {
+        let body = json!({
+            "model": "llama-3.1-70b",
+            "messages": [
+                {"role": "system", "content": "You are terse."},
+                {"role": "user", "content": "say hi"}
+            ],
+            "stream": true
+        })
+        .to_string();
+
+        let forwarded = HttpCompatibilityHarness::forward_worker_request(
+            "/v1/chat/completions",
+            &body,
+            [
+                ("authorization", "Bearer sk-openai"),
+                ("content-type", "application/json"),
+                ("openai-organization", "org_123"),
+                ("user-agent", "codex-test"),
+            ],
+        )
+        .expect("OpenAI chat completions request should forward to a worker envelope");
+
+        assert_eq!(
+            forwarded,
+            ForwardedWorkerRequest {
+                path: "/v1/chat/completions".to_string(),
+                model: "llama-3.1-70b".to_string(),
+                is_streaming: true,
+                raw_body: body,
+                headers: BTreeMap::from([
+                    ("authorization".to_string(), "Bearer sk-openai".to_string()),
+                    ("content-type".to_string(), "application/json".to_string()),
+                    ("openai-organization".to_string(), "org_123".to_string()),
+                ]),
+            }
+        );
+    }
+
+    #[test]
     fn anthropic_messages_worker_request_preserves_exact_envelope_and_compatibility_headers() {
         let body = json!({
             "model": "claude-3-7-sonnet",
