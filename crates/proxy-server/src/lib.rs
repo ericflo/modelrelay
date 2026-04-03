@@ -2,7 +2,9 @@ pub mod worker_socket;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use worker_protocol::{ModelsUpdateMessage, RegisterAck, RegisterMessage};
+use worker_protocol::{
+    HeaderMap, ModelsUpdateMessage, RegisterAck, RegisterMessage, RequestMessage,
+};
 
 pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
 
@@ -18,6 +20,7 @@ pub struct ProxyServerCore {
     provider_queue_policies: HashMap<String, ProviderQueuePolicy>,
     selection_cursors: HashMap<SelectionKey, usize>,
     active_requests: HashMap<String, ActiveRequestState>,
+    pending_worker_requests: HashMap<String, VecDeque<RequestMessage>>,
     worker_cancel_signals: Vec<WorkerCancelSignal>,
 }
 
@@ -104,10 +107,35 @@ impl ProxyServerCore {
         provider: impl Into<String>,
         model: impl Into<String>,
     ) -> SubmissionOutcome {
+        self.submit_transport_request(
+            provider,
+            model,
+            "/".to_string(),
+            false,
+            String::new(),
+            HeaderMap::new(),
+        )
+    }
+
+    pub fn submit_transport_request(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        is_streaming: bool,
+        body: impl Into<String>,
+        headers: HeaderMap,
+    ) -> SubmissionOutcome {
         let request = RequestRecord {
             request_id: format!("request-{}", self.next_request_id),
             provider: provider.into(),
             model: model.into(),
+            transport: RequestTransport {
+                endpoint_path: endpoint_path.into(),
+                is_streaming,
+                body: body.into(),
+                headers,
+            },
             requeue_count: 0,
         };
         self.next_request_id += 1;
@@ -166,6 +194,16 @@ impl ProxyServerCore {
         self.active_requests.remove(request_id);
 
         self.dispatch_next_compatible(worker_id)
+    }
+
+    #[must_use]
+    pub fn take_pending_worker_requests(&mut self, worker_id: &str) -> Vec<RequestMessage> {
+        self.pending_worker_requests
+            .remove(worker_id)
+            .map(VecDeque::into_iter)
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     pub fn disconnect_worker(&mut self, worker_id: &str) -> Option<WorkerDisconnectOutcome> {
@@ -398,6 +436,10 @@ impl ProxyServerCore {
             worker.in_flight_requests.push(request.request_id.clone());
             worker.reported_load = worker.reported_load.saturating_add(1);
         }
+        self.pending_worker_requests
+            .entry(worker_id.to_string())
+            .or_default()
+            .push_back(request.to_worker_request());
         self.active_requests.insert(
             request.request_id.clone(),
             ActiveRequestState::InFlight {
@@ -521,7 +563,29 @@ struct RequestRecord {
     request_id: String,
     provider: String,
     model: String,
+    transport: RequestTransport,
     requeue_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequestTransport {
+    endpoint_path: String,
+    is_streaming: bool,
+    body: String,
+    headers: HeaderMap,
+}
+
+impl RequestRecord {
+    fn to_worker_request(&self) -> RequestMessage {
+        RequestMessage {
+            request_id: self.request_id.clone(),
+            model: self.model.clone(),
+            endpoint_path: self.transport.endpoint_path.clone(),
+            is_streaming: self.transport.is_streaming,
+            body: self.transport.body.clone(),
+            headers: self.transport.headers.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

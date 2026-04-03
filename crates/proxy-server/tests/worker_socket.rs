@@ -1,13 +1,18 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
-use proxy_server::{ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
+use proxy_server::{
+    ProxyServerCore, RequestState, SubmissionOutcome, WorkerSocketApp, WorkerSocketProviderConfig,
+};
 use tokio::{net::TcpListener, sync::Mutex, time::timeout};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
-use worker_protocol::{RegisterMessage, ServerToWorkerMessage, WorkerToServerMessage};
+use worker_protocol::{
+    HeaderMap, RegisterMessage, ResponseCompleteMessage, ServerToWorkerMessage,
+    WorkerToServerMessage,
+};
 
 async fn spawn_server() -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
@@ -110,4 +115,167 @@ async fn rejected_auth_connection_is_closed_with_policy_violation() {
 
     let core = core.lock().await;
     assert!(core.provider_models("openai").is_empty());
+}
+
+#[tokio::test]
+async fn registered_worker_receives_request_and_response_complete_dispatches_next_queued_request() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+
+    let register = WorkerToServerMessage::Register(RegisterMessage {
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["llama-3.1-70b".to_string()],
+        max_concurrent: 1,
+        protocol_version: Some("2026-04-bridge-v1".to_string()),
+        current_load: Some(0),
+    });
+    let register_payload = serde_json::to_string(&register).expect("serialize register");
+
+    socket
+        .send(Message::Text(register_payload.into()))
+        .await
+        .expect("send register");
+
+    let ack_message = timeout(std::time::Duration::from_secs(2), socket.next())
+        .await
+        .expect("receive register_ack before timeout")
+        .expect("socket message")
+        .expect("websocket message");
+    let Message::Text(ack_payload) = ack_message else {
+        panic!("expected text register_ack");
+    };
+    let ack = serde_json::from_str::<ServerToWorkerMessage>(&ack_payload)
+        .expect("deserialize register ack");
+    let ServerToWorkerMessage::RegisterAck(ack) = ack else {
+        panic!("expected register_ack message");
+    };
+
+    let first_headers = HeaderMap::from([
+        ("authorization".to_string(), "Bearer token-1".to_string()),
+        ("x-trace-id".to_string(), "trace-1".to_string()),
+    ]);
+    let second_headers = HeaderMap::from([("x-trace-id".to_string(), "trace-2".to_string())]);
+
+    {
+        let mut core = core.lock().await;
+        assert_eq!(
+            core.submit_transport_request(
+                "openai",
+                "llama-3.1-70b",
+                "/v1/chat/completions",
+                false,
+                r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hi"}]}"#,
+                first_headers.clone(),
+            ),
+            SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: ack.worker_id.clone(),
+            })
+        );
+        assert_eq!(
+            core.submit_transport_request(
+                "openai",
+                "llama-3.1-70b",
+                "/v1/chat/completions",
+                false,
+                r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"next"}]}"#,
+                second_headers.clone(),
+            ),
+            SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+    }
+
+    let request_message = timeout(std::time::Duration::from_secs(2), socket.next())
+        .await
+        .expect("receive dispatched request before timeout")
+        .expect("socket message")
+        .expect("websocket message");
+    let Message::Text(request_payload) = request_message else {
+        panic!("expected text request message");
+    };
+    let request = serde_json::from_str::<ServerToWorkerMessage>(&request_payload)
+        .expect("deserialize worker request");
+    assert_eq!(
+        request,
+        ServerToWorkerMessage::Request(worker_protocol::RequestMessage {
+            request_id: "request-1".to_string(),
+            model: "llama-3.1-70b".to_string(),
+            endpoint_path: "/v1/chat/completions".to_string(),
+            is_streaming: false,
+            body: r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hi"}]}"#
+                .to_string(),
+            headers: first_headers,
+        })
+    );
+
+    {
+        let core = core.lock().await;
+        assert_eq!(
+            core.request_state("request-1"),
+            Some(RequestState::InFlight {
+                worker_id: ack.worker_id.clone(),
+                cancellation: None,
+            })
+        );
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+    }
+
+    let complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+        request_id: "request-1".to_string(),
+        status_code: 200,
+        headers: HeaderMap::from([("content-type".to_string(), "application/json".to_string())]),
+        body: Some(r#"{"id":"resp-1"}"#.to_string()),
+        token_counts: None,
+    });
+    let complete_payload = serde_json::to_string(&complete).expect("serialize response_complete");
+    socket
+        .send(Message::Text(complete_payload.into()))
+        .await
+        .expect("send response_complete");
+
+    let next_request_message = timeout(std::time::Duration::from_secs(2), socket.next())
+        .await
+        .expect("receive next dispatched request before timeout")
+        .expect("socket message")
+        .expect("websocket message");
+    let Message::Text(next_request_payload) = next_request_message else {
+        panic!("expected text next request message");
+    };
+    let next_request = serde_json::from_str::<ServerToWorkerMessage>(&next_request_payload)
+        .expect("deserialize next worker request");
+    assert_eq!(
+        next_request,
+        ServerToWorkerMessage::Request(worker_protocol::RequestMessage {
+            request_id: "request-2".to_string(),
+            model: "llama-3.1-70b".to_string(),
+            endpoint_path: "/v1/chat/completions".to_string(),
+            is_streaming: false,
+            body: r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"next"}]}"#
+                .to_string(),
+            headers: second_headers,
+        })
+    );
+
+    let core = core.lock().await;
+    assert_eq!(core.request_state("request-1"), None);
+    assert_eq!(
+        core.request_state("request-2"),
+        Some(RequestState::InFlight {
+            worker_id: ack.worker_id,
+            cancellation: None,
+        })
+    );
+    assert!(core.queued_request_ids("openai").is_empty());
+    assert_eq!(
+        core.worker_in_flight_request_ids("worker-1"),
+        vec!["request-2".to_string()]
+    );
 }
