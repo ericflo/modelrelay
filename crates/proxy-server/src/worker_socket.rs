@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     sync::Arc,
     time::{Duration as StdDuration, Instant},
 };
@@ -8,7 +7,7 @@ use std::{
 use axum::{
     Router,
     extract::{
-        ConnectInfo, Query, State,
+        Query, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     },
     routing::get,
@@ -132,11 +131,25 @@ struct FailedAuthState {
 async fn worker_connect_handler(
     ws: WebSocketUpgrade,
     State(state): State<WorkerSocketState>,
-    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     Query(query): Query<WorkerConnectQuery>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    match authenticate_connection(&state, client_addr.ip().to_string(), &headers, &query).await {
+    let client_identity = headers
+        .get(axum::http::header::FORWARDED)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "unknown-client".to_string());
+
+    match authenticate_connection(&state, client_identity, &headers, &query).await {
         AuthOutcome::Authenticated { provider } => ws.on_upgrade(move |socket| async move {
             handle_authenticated_socket(socket, state, provider).await;
         }),
