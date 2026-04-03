@@ -956,7 +956,7 @@ mod tests {
                     worker_name: "gpu-box-a".to_string(),
                     models: vec![
                         " ".to_string(),
-                        "".to_string(),
+                        String::new(),
                         "\t".to_string(),
                         "   ".to_string(),
                     ],
