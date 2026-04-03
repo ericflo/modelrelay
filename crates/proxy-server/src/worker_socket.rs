@@ -292,10 +292,10 @@ async fn register_authenticated_worker(
     let Ok(WorkerToServerMessage::Register(register)) = serde_json::from_str(&payload) else {
         return Err(());
     };
-    if let Some(protocol_version) = register.protocol_version.as_deref() {
-        if protocol_version != WORKER_PROTOCOL_VERSION {
-            return Err(());
-        }
+    if let Some(protocol_version) = register.protocol_version.as_deref()
+        && protocol_version != WORKER_PROTOCOL_VERSION
+    {
+        return Err(());
     }
 
     let registered = {
