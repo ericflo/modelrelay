@@ -63,9 +63,7 @@ mod tests {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
         assert!(doc.contains("First Characterization Tests To Write Next"));
-        assert!(doc.contains("Remaining HTTP error-surface characterization"));
-        assert!(doc.contains("no-worker availability"));
-        assert!(doc.contains("requeue exhaustion"));
+        assert!(doc.contains("No additional characterization slices are currently pinned"));
         assert!(!doc.contains("Registration sanitization edge warnings"));
         assert!(!doc.contains("Dynamic model catalog updates and `/v1/models` coherence"));
         assert!(!doc.contains("1. OpenAI-style and Anthropic-style compatibility:"));
@@ -74,6 +72,8 @@ mod tests {
         assert!(!doc.contains("4. Client cancellation:"));
         assert!(!doc.contains("4. Streaming pass-through:"));
         assert!(!doc.contains("OpenAI `/v1/responses` compatibility coverage"));
+        assert!(!doc.contains("1. Remaining HTTP error-surface characterization:"));
+        assert!(!doc.contains("still-unpinned cases Katamari distinguishes internally"));
     }
 
     #[test]
@@ -1604,6 +1604,28 @@ mod tests {
     }
 
     #[test]
+    fn no_workers_http_boundary_returns_sanitized_worker_unavailable_text() {
+        for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+            let response = HttpCompatibilityHarness::error_response(
+                path,
+                CompatibilityBoundaryError::NoWorkersAvailable,
+            )
+            .expect("supported compatibility path should map no-worker failures");
+
+            assert_eq!(
+                response,
+                CompatibilityErrorResponse::service_unavailable(
+                    "No workers available to handle request",
+                )
+            );
+            assert!(
+                !response.body.contains("no workers available"),
+                "the compatibility boundary should expose the stable client message rather than the raw internal error"
+            );
+        }
+    }
+
+    #[test]
     fn disabled_provider_http_boundary_returns_sanitized_disabled_message() {
         for path in ["/v1/responses", "/v1/messages"] {
             let response = HttpCompatibilityHarness::error_response(
@@ -1619,6 +1641,28 @@ mod tests {
             assert!(
                 !response.body.contains("virtual provider is disabled"),
                 "the compatibility boundary should use the stable client-facing disabled message"
+            );
+        }
+    }
+
+    #[test]
+    fn requeue_exhaustion_http_boundary_returns_sanitized_retry_exhausted_text() {
+        for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+            let response = HttpCompatibilityHarness::error_response(
+                path,
+                CompatibilityBoundaryError::MaxRequeuesExceeded,
+            )
+            .expect("supported compatibility path should map requeue-exhaustion failures");
+
+            assert_eq!(
+                response,
+                CompatibilityErrorResponse::service_unavailable(
+                    "Request could not be processed after multiple attempts",
+                )
+            );
+            assert!(
+                !response.body.contains("exceeded maximum requeue"),
+                "the compatibility boundary should hide the internal requeue error wording"
             );
         }
     }
@@ -2115,7 +2159,13 @@ mod tests {
                 CompatibilityBoundaryError::QueueFull => {
                     "Service temporarily at capacity, please retry"
                 }
+                CompatibilityBoundaryError::NoWorkersAvailable => {
+                    "No workers available to handle request"
+                }
                 CompatibilityBoundaryError::ProviderDisabled => "Provider is currently disabled",
+                CompatibilityBoundaryError::MaxRequeuesExceeded => {
+                    "Request could not be processed after multiple attempts"
+                }
                 CompatibilityBoundaryError::ProviderDeleted => {
                     "Internal server error processing request"
                 }
@@ -2172,7 +2222,9 @@ mod tests {
     enum CompatibilityBoundaryError {
         QueueTimedOut,
         QueueFull,
+        NoWorkersAvailable,
         ProviderDisabled,
+        MaxRequeuesExceeded,
         ProviderDeleted,
     }
 

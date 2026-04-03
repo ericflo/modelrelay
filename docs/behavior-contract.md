@@ -79,7 +79,4 @@ Source of truth:
 
 ## First Characterization Tests To Write Next
 
-Ordered by leverage:
-
-1. Remaining HTTP error-surface characterization:
-   Remaining HTTP error-surface characterization should cover the client-facing compatibility boundary for the still-unpinned cases Katamari distinguishes internally: no-worker availability and requeue exhaustion, including the exact status and sanitized body text clients receive instead of raw internal queue/worker errors.
+No additional characterization slices are currently pinned. Refresh this section after the next archaeology pass or when a new uncovered client-visible behavior is identified.
