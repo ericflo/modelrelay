@@ -2,8 +2,8 @@ use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
 use proxy_server::{
-    ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp,
-    WorkerSocketProviderConfig,
+    CancelReason as ProxyCancelReason, ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore,
+    RequestState, WorkerSocketApp, WorkerSocketProviderConfig,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -343,6 +343,79 @@ async fn assert_worker_socket_closes(socket: &mut TestSocket) {
     }
 }
 
+async fn assert_timed_out_request_state(core: &Arc<Mutex<ProxyServerCore>>, request_id: &str) {
+    let core = core.lock().await;
+    assert_eq!(
+        core.request_state(request_id),
+        Some(RequestState::InFlight {
+            worker_id: "worker-1".to_string(),
+            cancellation: Some(ProxyCancelReason::RequestTimedOut),
+        })
+    );
+    assert_eq!(core.request_state("request-2"), Some(RequestState::Queued));
+    assert_eq!(
+        core.queued_request_ids("openai"),
+        vec!["request-2".to_string()]
+    );
+}
+
+async fn assert_worker_emits_single_timeout_cancel_and_stays_idle(
+    socket: &mut TestSocket,
+    request_id: &str,
+) {
+    assert_eq!(
+        next_server_message(socket, "worker timeout cancel").await,
+        ServerToWorkerMessage::Cancel(CancelMessage {
+            request_id: request_id.to_string(),
+            reason: CancelReason::Timeout,
+        })
+    );
+
+    for _ in 0..2 {
+        let Ok(Some(message)) = timeout(std::time::Duration::from_millis(60), socket.next()).await
+        else {
+            continue;
+        };
+        let message = message.expect("websocket message while waiting for timed-out request");
+        let Message::Text(payload) = message else {
+            panic!("expected only text heartbeat messages while timed-out request is uncleared");
+        };
+        match serde_json::from_str::<ServerToWorkerMessage>(&payload)
+            .expect("deserialize server message while waiting for timed-out request")
+        {
+            ServerToWorkerMessage::Ping(_) => {}
+            ServerToWorkerMessage::Cancel(_) => {
+                panic!("timed-out request should emit exactly one worker cancel");
+            }
+            ServerToWorkerMessage::Request(_) => {
+                panic!("queued follow-up should remain queued until timed-out request clears");
+            }
+            _ => panic!("unexpected server message while timed-out request is uncleared"),
+        }
+    }
+}
+
+async fn assert_timeout_keeps_http_clients_pending(
+    first_http_request: &mut tokio::task::JoinHandle<String>,
+    second_http_stream: &mut TcpStream,
+) {
+    assert!(
+        timeout(std::time::Duration::from_millis(200), first_http_request)
+            .await
+            .is_err(),
+        "timed-out in-flight HTTP request should remain pending until the worker completes it"
+    );
+    assert!(
+        timeout(
+            std::time::Duration::from_millis(200),
+            read_until_contains(second_http_stream, "HTTP/1.1"),
+        )
+        .await
+        .is_err(),
+        "queued follow-up HTTP request should remain pending while the timed-out request is uncleared"
+    );
+}
+
 async fn connect_and_register_replacement_worker(addr: SocketAddr) -> TestSocket {
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
         .await
@@ -566,6 +639,113 @@ async fn worker_backed_chat_completions_route_cancels_in_flight_request_when_htt
             request_id: request.request_id,
             reason: CancelReason::ClientDisconnect,
         })
+    );
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_times_out_in_flight_request_before_redispatching_queued_work()
+ {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let first_body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"time out before completion"}]}"#;
+    let second_body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued until timeout clears"}]}"#;
+
+    let mut first_http_request = tokio::spawn(post_chat_completions(addr, first_body, &[]));
+    let ServerToWorkerMessage::Request(first_request) =
+        next_server_message(&mut socket, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+    assert_eq!(first_request.body, first_body);
+
+    let mut second_http_stream = open_chat_completions_request(addr, second_body, &[]).await;
+    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
+
+    {
+        let mut core = core.lock().await;
+        assert_eq!(
+            core.cancel_request(
+                &first_request.request_id,
+                ProxyCancelReason::RequestTimedOut
+            ),
+            Some(proxy_server::CancellationOutcome::WorkerCancelSent(
+                proxy_server::WorkerCancelSignal {
+                    worker_id: "worker-1".to_string(),
+                    request_id: first_request.request_id.clone(),
+                    reason: ProxyCancelReason::RequestTimedOut,
+                }
+            ))
+        );
+    }
+    assert_timed_out_request_state(&core, &first_request.request_id).await;
+    assert_worker_emits_single_timeout_cancel_and_stays_idle(
+        &mut socket,
+        &first_request.request_id,
+    )
+    .await;
+    assert_timeout_keeps_http_clients_pending(&mut first_http_request, &mut second_http_stream)
+        .await;
+
+    send_response_complete(
+        &mut socket,
+        &first_request.request_id,
+        "gpu-box-a",
+        r#"{"id":"chatcmpl-timeout-1","object":"chat.completion","choices":[]}"#,
+    )
+    .await;
+
+    let _first_response = timeout(std::time::Duration::from_secs(2), &mut first_http_request)
+        .await
+        .expect("first timed-out http request completed before timeout")
+        .expect("join first timed-out http request task");
+
+    {
+        let core = core.lock().await;
+        assert_eq!(core.request_state("request-2"), Some(RequestState::Queued));
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+    }
+
+    assert_worker_socket_closes(&mut socket).await;
+    let mut replacement_socket = connect_and_register_replacement_worker(addr).await;
+
+    let ServerToWorkerMessage::Request(second_request) = next_server_message(
+        &mut replacement_socket,
+        "queued worker request after timeout clears",
+    )
+    .await
+    else {
+        panic!("expected queued worker request after timeout clears");
+    };
+    assert_eq!(second_request.request_id, "request-2");
+    assert_eq!(second_request.endpoint_path, "/v1/chat/completions");
+    assert_eq!(second_request.body, second_body);
+
+    send_response_complete(
+        &mut replacement_socket,
+        &second_request.request_id,
+        "gpu-box-b",
+        r#"{"id":"chatcmpl-timeout-2","object":"chat.completion","choices":[]}"#,
+    )
+    .await;
+
+    let second_response = read_http_response(&mut second_http_stream).await;
+    assert_chat_completion_response(
+        &second_response,
+        "gpu-box-b",
+        r#"{"id":"chatcmpl-timeout-2","object":"chat.completion","choices":[]}"#,
+    );
+    assert!(
+        !second_response.contains("chatcmpl-timeout-1"),
+        "late output from the timed-out request should not leak into the queued follow-up response"
     );
 }
 
