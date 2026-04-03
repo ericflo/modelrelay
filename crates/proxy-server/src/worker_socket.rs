@@ -64,6 +64,8 @@ pub struct WorkerSocketApp {
 }
 
 impl WorkerSocketApp {
+    pub const ROUTE_PATH: &str = "/v1/worker/connect";
+
     #[must_use]
     pub fn new(core: Arc<Mutex<ProxyServerCore>>) -> Self {
         Self {
@@ -86,7 +88,7 @@ impl WorkerSocketApp {
 
     pub fn router(self) -> Router {
         Router::new()
-            .route("/v1/worker/connect", get(worker_connect_handler))
+            .route(Self::ROUTE_PATH, get(worker_connect_handler))
             .with_state(self.state)
     }
 }
