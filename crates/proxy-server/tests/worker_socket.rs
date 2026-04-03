@@ -12,8 +12,8 @@ use tokio_tungstenite::{
 };
 use worker_protocol::{
     CancelMessage, CancelReason as ProtocolCancelReason, HeaderMap, ModelsUpdateMessage,
-    RegisterMessage, ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage,
-    WorkerToServerMessage,
+    PingMessage, PongMessage, RegisterMessage, ResponseChunkMessage, ResponseCompleteMessage,
+    ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -63,9 +63,108 @@ async fn next_text_message(socket: &mut TestSocket, context: &str) -> String {
     payload.to_string()
 }
 
+async fn next_non_heartbeat_text_message(socket: &mut TestSocket, context: &str) -> String {
+    loop {
+        let payload = next_text_message(socket, context).await;
+        let Ok(ServerToWorkerMessage::Ping(_)) = serde_json::from_str(&payload) else {
+            return payload;
+        };
+    }
+}
+
 async fn next_server_message(socket: &mut TestSocket, context: &str) -> ServerToWorkerMessage {
-    serde_json::from_str(&next_text_message(socket, context).await)
+    serde_json::from_str(&next_non_heartbeat_text_message(socket, context).await)
         .unwrap_or_else(|_| panic!("deserialize {context}"))
+}
+
+async fn assert_no_non_heartbeat_message(socket: &mut TestSocket, wait_for: std::time::Duration) {
+    let deadline = tokio::time::Instant::now() + wait_for;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+
+        let next = timeout(remaining, socket.next()).await;
+        let Ok(Some(Ok(Message::Text(payload)))) = next else {
+            return;
+        };
+
+        let Ok(ServerToWorkerMessage::Ping(_)) =
+            serde_json::from_str::<ServerToWorkerMessage>(&payload)
+        else {
+            panic!("unexpected non-heartbeat message while waiting for quiet socket");
+        };
+    }
+}
+
+async fn wait_for_worker_reported_load(
+    core: &Arc<Mutex<ProxyServerCore>>,
+    worker_id: &str,
+    expected_load: usize,
+) {
+    timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            {
+                let core = core.lock().await;
+                if core.worker_reported_load(worker_id) == Some(expected_load) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("worker {worker_id} reported load did not reach {expected_load}"));
+}
+
+async fn submit_heartbeat_initial_request(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"heartbeat me"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+            request_id: "request-1".to_string(),
+            worker_id: worker_id.to_string(),
+        })
+    );
+}
+
+async fn submit_heartbeat_follow_up_request(core: &Arc<Mutex<ProxyServerCore>>) {
+    let mut core = core.lock().await;
+    assert_eq!(
+        core.submit_transport_request(
+            "openai",
+            "llama-3.1-70b",
+            "/v1/chat/completions",
+            false,
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued until complete"}]}"#,
+            HeaderMap::new(),
+        ),
+        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            request_id: "request-2".to_string(),
+            queue_len: 1,
+        })
+    );
+}
+
+async fn assert_heartbeat_ping(socket: &mut TestSocket) {
+    assert_eq!(
+        serde_json::from_str::<ServerToWorkerMessage>(
+            &next_text_message(socket, "heartbeat ping").await
+        )
+        .expect("deserialize heartbeat ping"),
+        ServerToWorkerMessage::Ping(PingMessage {
+            timestamp_unix_ms: None,
+        })
+    );
 }
 
 async fn register_test_worker(socket: &mut TestSocket) -> worker_protocol::RegisterAck {
@@ -511,11 +610,7 @@ async fn streaming_response_chunks_preserve_in_flight_request_until_response_com
     send_response_chunk(&mut socket, "request-1", "data: {\"delta\":\"hel\"}\n\n").await;
     send_response_chunk(&mut socket, "request-1", "data: {\"delta\":\"lo\"}\n\n").await;
 
-    let no_message = timeout(std::time::Duration::from_millis(150), socket.next()).await;
-    assert!(
-        no_message.is_err(),
-        "response chunks should not dispatch queued work before response_complete"
-    );
+    assert_no_non_heartbeat_message(&mut socket, std::time::Duration::from_millis(150)).await;
 
     {
         let core = core.lock().await;
@@ -590,11 +685,7 @@ async fn canceling_in_flight_request_emits_single_worker_cancel_until_response_c
         })
     );
 
-    let no_message = timeout(std::time::Duration::from_millis(150), socket.next()).await;
-    assert!(
-        no_message.is_err(),
-        "cancel should not duplicate or dispatch queued work before response_complete"
-    );
+    assert_no_non_heartbeat_message(&mut socket, std::time::Duration::from_millis(150)).await;
 
     assert_canceled_request_state(&core, &ack.worker_id).await;
 
@@ -616,5 +707,80 @@ async fn canceling_in_flight_request_emits_single_worker_cancel_until_response_c
             worker_id: ack.worker_id,
             cancellation: None,
         })
+    );
+}
+
+#[tokio::test]
+async fn heartbeat_ping_pong_updates_live_worker_load_without_reconnect_or_early_dispatch() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack =
+        register_test_worker_with(&mut socket, vec!["llama-3.1-70b".to_string()], 2, Some(0)).await;
+
+    submit_heartbeat_initial_request(&core, &ack.worker_id).await;
+
+    assert_eq!(
+        next_server_message(&mut socket, "initial request before heartbeat").await,
+        expected_request_message(
+            "request-1",
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"heartbeat me"}]}"#,
+            HeaderMap::new(),
+        )
+    );
+
+    assert_heartbeat_ping(&mut socket).await;
+
+    let pong = WorkerToServerMessage::Pong(PongMessage {
+        current_load: 2,
+        timestamp_unix_ms: None,
+    });
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&pong).expect("serialize pong").into(),
+        ))
+        .await
+        .expect("send pong");
+
+    wait_for_worker_reported_load(&core, &ack.worker_id, 2).await;
+
+    {
+        let core = core.lock().await;
+        assert!(core.has_worker(&ack.worker_id));
+        assert_eq!(core.worker_reported_load(&ack.worker_id), Some(2));
+        assert_eq!(
+            core.request_state("request-1"),
+            Some(RequestState::InFlight {
+                worker_id: ack.worker_id.clone(),
+                cancellation: None,
+            })
+        );
+    }
+
+    submit_heartbeat_follow_up_request(&core).await;
+
+    assert_no_non_heartbeat_message(&mut socket, std::time::Duration::from_millis(150)).await;
+
+    {
+        let core = core.lock().await;
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+        assert_eq!(
+            core.worker_in_flight_request_ids(&ack.worker_id),
+            vec!["request-1".to_string()]
+        );
+    }
+
+    send_response_complete(&mut socket, "request-1").await;
+    assert_eq!(
+        next_server_message(&mut socket, "queued request after heartbeat").await,
+        expected_request_message(
+            "request-2",
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued until complete"}]}"#,
+            HeaderMap::new(),
+        )
     );
 }

@@ -3,7 +3,7 @@ pub mod worker_socket;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use worker_protocol::{
-    HeaderMap, ModelsUpdateMessage, RegisterAck, RegisterMessage, RequestMessage,
+    HeaderMap, ModelsUpdateMessage, PongMessage, RegisterAck, RegisterMessage, RequestMessage,
 };
 
 pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
@@ -90,6 +90,28 @@ impl ProxyServerCore {
 
         worker.models = sanitize_models(update.models);
         worker.reported_load = update.current_load as usize;
+
+        let mut assignments = Vec::new();
+        while self.worker_has_capacity(worker_id) {
+            let Some(assignment) = self.dispatch_next_compatible(worker_id) else {
+                break;
+            };
+            assignments.push(assignment);
+        }
+
+        assignments
+    }
+
+    pub fn record_worker_pong(
+        &mut self,
+        worker_id: &str,
+        pong: &PongMessage,
+    ) -> Vec<DispatchAssignment> {
+        let Some(worker) = self.workers.get_mut(worker_id) else {
+            return Vec::new();
+        };
+
+        worker.reported_load = pong.current_load as usize;
 
         let mut assignments = Vec::new();
         while self.worker_has_capacity(worker_id) {
@@ -379,6 +401,13 @@ impl ProxyServerCore {
     #[must_use]
     pub fn has_worker(&self, worker_id: &str) -> bool {
         self.workers.contains_key(worker_id)
+    }
+
+    #[must_use]
+    pub fn worker_reported_load(&self, worker_id: &str) -> Option<usize> {
+        self.workers
+            .get(worker_id)
+            .map(|worker| worker.reported_load)
     }
 
     #[must_use]

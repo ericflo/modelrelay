@@ -13,8 +13,8 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use worker_protocol::{
-    CancelMessage, CancelReason, ModelsUpdateMessage, ResponseChunkMessage,
-    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+    CancelMessage, CancelReason, ModelsUpdateMessage, PingMessage, PongMessage,
+    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 use crate::{ProxyServerCore, WorkerCancelSignal};
@@ -24,6 +24,7 @@ const CLOSE_REASON_AUTH_FAILED: &str = "worker authentication failed";
 const CLOSE_REASON_PROTOCOL_ERROR: &str = "worker registration protocol error";
 const CLOSE_CODE_POLICY_VIOLATION: u16 = 1008;
 const CLOSE_CODE_PROTOCOL_ERROR: u16 = 1002;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSocketProviderConfig {
@@ -172,6 +173,8 @@ async fn handle_authenticated_socket(
     state: WorkerSocketState,
     provider: String,
 ) {
+    let mut last_heartbeat_sent_at = tokio::time::Instant::now();
+
     let Some(Ok(Message::Text(payload))) = socket.recv().await else {
         close_socket(
             socket,
@@ -227,6 +230,7 @@ async fn handle_authenticated_socket(
 
         match timeout(Duration::from_millis(25), socket.recv()).await {
             Ok(Some(Ok(Message::Text(payload)))) => {
+                last_heartbeat_sent_at = tokio::time::Instant::now();
                 if !handle_worker_message(&state, &worker_id, &payload).await {
                     close_socket(
                         socket,
@@ -244,7 +248,19 @@ async fn handle_authenticated_socket(
                 let _ = core.disconnect_worker(&worker_id);
                 return;
             }
-            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) | Err(_) => {}
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {
+                last_heartbeat_sent_at = tokio::time::Instant::now();
+            }
+            Err(_) => {
+                if last_heartbeat_sent_at.elapsed() >= HEARTBEAT_INTERVAL {
+                    if send_heartbeat_ping(&mut socket).await.is_err() {
+                        let mut core = state.core.lock().await;
+                        let _ = core.disconnect_worker(&worker_id);
+                        return;
+                    }
+                    last_heartbeat_sent_at = tokio::time::Instant::now();
+                }
+            }
             Ok(Some(Ok(Message::Binary(_)))) => {
                 close_socket(
                     socket,
@@ -275,6 +291,23 @@ async fn handle_worker_message(state: &WorkerSocketState, worker_id: &str, paylo
                 ModelsUpdateMessage {
                     models,
                     current_load,
+                },
+            );
+            true
+        }
+        Ok(WorkerToServerMessage::Pong(PongMessage {
+            current_load,
+            timestamp_unix_ms,
+        })) => {
+            let mut core = state.core.lock().await;
+            if !core.has_worker(worker_id) {
+                return false;
+            }
+            let _ = core.record_worker_pong(
+                worker_id,
+                &PongMessage {
+                    current_load,
+                    timestamp_unix_ms,
                 },
             );
             true
@@ -353,6 +386,17 @@ fn cancel_message(cancel: WorkerCancelSignal) -> ServerToWorkerMessage {
             crate::CancelReason::RequestTimedOut => CancelReason::Timeout,
         },
     })
+}
+
+async fn send_heartbeat_ping(socket: &mut WebSocket) -> Result<(), ()> {
+    let payload = serde_json::to_string(&ServerToWorkerMessage::Ping(PingMessage {
+        timestamp_unix_ms: None,
+    }))
+    .map_err(|_| ())?;
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|_| ())
 }
 
 async fn close_socket(mut socket: WebSocket, code: u16, reason: &'static str) {
