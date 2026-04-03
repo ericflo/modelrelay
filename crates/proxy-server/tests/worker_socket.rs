@@ -418,11 +418,11 @@ async fn authenticated_worker_can_register_and_receive_register_ack() {
     send_register_message(
         &mut socket,
         RegisterMessage {
-        worker_name: "gpu-box-a".to_string(),
-        models: vec!["llama-3.1-70b".to_string(), " mistral-large ".to_string()],
-        max_concurrent: 2,
-        protocol_version: Some("2026-04-bridge-v1".to_string()),
-        current_load: Some(0),
+            worker_name: "gpu-box-a".to_string(),
+            models: vec!["llama-3.1-70b".to_string(), " mistral-large ".to_string()],
+            max_concurrent: 2,
+            protocol_version: Some("2026-04-bridge-v1".to_string()),
+            current_load: Some(0),
         },
     )
     .await;
