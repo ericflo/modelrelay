@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Write as _, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeMap, error::Error, fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use axum::{
     Router,
@@ -665,6 +665,61 @@ async fn wait_for_worker_disconnect(core: &Arc<Mutex<ProxyServerCore>>, worker_i
     .unwrap_or_else(|_| panic!("worker {worker_id} did not disconnect before timeout"));
 }
 
+fn spawn_openai_daemon(
+    proxy_addr: SocketAddr,
+    worker_name: &str,
+    backend_addr: SocketAddr,
+) -> tokio::task::JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> {
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: worker_name.to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    tokio::spawn(async move { daemon.run().await })
+}
+
+fn assert_openai_responses_request(
+    observed_request: &ObservedBackendRequest,
+    authorization: &str,
+    body: &str,
+) {
+    assert_eq!(
+        observed_request,
+        &ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: Some(authorization.to_string()),
+            openai_organization: None,
+            openai_beta: Some("responses=v1".to_string()),
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: body.to_string(),
+        }
+    );
+}
+
+fn assert_created_responses_response(response: &str, trace_header: &str, body: &str) {
+    assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
+    assert!(response.contains(&format!("\r\nx-backend-trace: {trace_header}\r\n")));
+    assert!(response.ends_with(body));
+}
+
+async fn begin_graceful_shutdown(core: &Arc<Mutex<ProxyServerCore>>, worker_id: &str) {
+    let mut core = core.lock().await;
+    let signals =
+        core.begin_graceful_shutdown(Some("proxy server shutting down"), Duration::from_secs(1));
+    assert_eq!(signals.len(), 1);
+    assert!(core.worker_is_draining(worker_id));
+}
+
 #[tokio::test]
 async fn worker_daemon_forwards_anthropic_messages_request_through_live_proxy() {
     let (proxy_addr, _) = spawn_proxy_server("anthropic").await;
@@ -1010,18 +1065,8 @@ async fn worker_daemon_drains_in_flight_request_before_replacement_receives_queu
     let (proxy_addr, core) = spawn_proxy_server("openai").await;
     let (draining_backend_addr, first_observed_request_rx, release_response_tx) =
         spawn_delayed_responses_backend().await;
-
-    let draining_daemon = WorkerDaemon::new(WorkerDaemonConfig {
-        proxy_base_url: format!("http://{proxy_addr}"),
-        provider: "openai".to_string(),
-        worker_secret: "top-secret".to_string(),
-        worker_name: "gpu-box-a".to_string(),
-        models: vec!["gpt-4.1-mini".to_string()],
-        max_concurrent: 1,
-        backend_base_url: format!("http://{draining_backend_addr}"),
-    });
-
-    let draining_daemon_handle = tokio::spawn(async move { draining_daemon.run().await });
+    let draining_daemon_handle =
+        spawn_openai_daemon(proxy_addr, "gpu-box-a", draining_backend_addr);
 
     wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
     let draining_worker_id = wait_for_worker_id(&core, "openai").await;
@@ -1047,19 +1092,10 @@ async fn worker_daemon_drains_in_flight_request_before_replacement_receives_queu
         .await
         .expect("first backend observed request before timeout")
         .expect("first backend observed request");
-    assert_eq!(
-        first_observed_request,
-        ObservedBackendRequest {
-            path: "/v1/responses".to_string(),
-            authorization: Some("Bearer test-openai-key".to_string()),
-            openai_organization: None,
-            openai_beta: Some("responses=v1".to_string()),
-            x_api_key: None,
-            anthropic_version: None,
-            anthropic_beta: None,
-            content_type: Some("application/json".to_string()),
-            body: first_body.clone(),
-        }
+    assert_openai_responses_request(
+        &first_observed_request,
+        "Bearer test-openai-key",
+        &first_body,
     );
 
     let mut queued_request_stream = open_responses_request(
@@ -1073,14 +1109,7 @@ async fn worker_daemon_drains_in_flight_request_before_replacement_receives_queu
     .await;
 
     wait_for_request_state(&core, "request-2", RequestState::Queued).await;
-
-    {
-        let mut core = core.lock().await;
-        let signals = core
-            .begin_graceful_shutdown(Some("proxy server shutting down"), Duration::from_secs(1));
-        assert_eq!(signals.len(), 1);
-        assert!(core.worker_is_draining(&draining_worker_id));
-    }
+    begin_graceful_shutdown(&core, &draining_worker_id).await;
 
     assert!(
         timeout(
@@ -1100,13 +1129,11 @@ async fn worker_daemon_drains_in_flight_request_before_replacement_receives_queu
         .await
         .expect("first request completed before timeout")
         .expect("join first request task");
-    assert!(first_response.starts_with("HTTP/1.1 201 Created\r\n"));
-    assert!(first_response.contains("\r\ncontent-type: application/json\r\n"));
-    assert!(first_response.contains("\r\nopenai-beta: responses=v1\r\n"));
-    assert!(first_response.contains("\r\nx-backend-trace: delayed-openai-responses-backend\r\n"));
-    assert!(first_response.ends_with(
-        r#"{"id":"resp_drain_1","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_drain_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"drain completed"}]}]}"#
-    ));
+    assert_created_responses_response(
+        &first_response,
+        "delayed-openai-responses-backend",
+        r#"{"id":"resp_drain_1","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_drain_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"drain completed"}]}]}"#,
+    );
 
     timeout(Duration::from_secs(2), draining_daemon_handle)
         .await
@@ -1125,34 +1152,17 @@ async fn worker_daemon_drains_in_flight_request_before_replacement_receives_queu
     }
 
     let (replacement_backend_addr, second_observed_request_rx, _) = spawn_mock_backend().await;
-    let replacement_daemon = WorkerDaemon::new(WorkerDaemonConfig {
-        proxy_base_url: format!("http://{proxy_addr}"),
-        provider: "openai".to_string(),
-        worker_secret: "top-secret".to_string(),
-        worker_name: "gpu-box-b".to_string(),
-        models: vec!["gpt-4.1-mini".to_string()],
-        max_concurrent: 1,
-        backend_base_url: format!("http://{replacement_backend_addr}"),
-    });
-    let replacement_daemon_handle = tokio::spawn(async move { replacement_daemon.run().await });
+    let replacement_daemon_handle =
+        spawn_openai_daemon(proxy_addr, "gpu-box-b", replacement_backend_addr);
 
     let second_observed_request = timeout(Duration::from_secs(2), second_observed_request_rx)
         .await
         .expect("replacement backend observed request before timeout")
         .expect("replacement backend observed request");
-    assert_eq!(
-        second_observed_request,
-        ObservedBackendRequest {
-            path: "/v1/responses".to_string(),
-            authorization: Some("Bearer queued-openai-key".to_string()),
-            openai_organization: None,
-            openai_beta: Some("responses=v1".to_string()),
-            x_api_key: None,
-            anthropic_version: None,
-            anthropic_beta: None,
-            content_type: Some("application/json".to_string()),
-            body: second_body,
-        }
+    assert_openai_responses_request(
+        &second_observed_request,
+        "Bearer queued-openai-key",
+        &second_body,
     );
 
     let second_response = read_until_contains(
@@ -1160,8 +1170,11 @@ async fn worker_daemon_drains_in_flight_request_before_replacement_receives_queu
         r#"{"id":"resp_123","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_123","status":"completed","role":"assistant","content":[{"type":"output_text","text":"responses proxy success"}]}]}"#,
     )
     .await;
-    assert!(second_response.starts_with("HTTP/1.1 201 Created\r\n"));
-    assert!(second_response.contains("\r\nx-backend-trace: openai-responses-backend\r\n"));
+    assert_created_responses_response(
+        &second_response,
+        "openai-responses-backend",
+        r#"{"id":"resp_123","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","id":"msg_123","status":"completed","role":"assistant","content":[{"type":"output_text","text":"responses proxy success"}]}]}"#,
+    );
 
     replacement_daemon_handle.abort();
 }
