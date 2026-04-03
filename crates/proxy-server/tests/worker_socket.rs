@@ -10,8 +10,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use worker_protocol::{
-    HeaderMap, RegisterMessage, ResponseCompleteMessage, ServerToWorkerMessage,
-    WorkerToServerMessage,
+    HeaderMap, RegisterMessage, ResponseChunkMessage, ResponseCompleteMessage,
+    ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -118,6 +118,19 @@ async fn send_response_complete(socket: &mut TestSocket, request_id: &str) {
         .send(Message::Text(complete_payload.into()))
         .await
         .expect("send response_complete");
+}
+
+async fn send_response_chunk(socket: &mut TestSocket, request_id: &str, chunk: &str) {
+    let chunk = WorkerToServerMessage::ResponseChunk(ResponseChunkMessage {
+        request_id: request_id.to_string(),
+        chunk: chunk.to_string(),
+    });
+    let chunk_payload = serde_json::to_string(&chunk).expect("serialize response_chunk");
+
+    socket
+        .send(Message::Text(chunk_payload.into()))
+        .await
+        .expect("send response_chunk");
 }
 
 #[tokio::test]
@@ -285,5 +298,109 @@ async fn registered_worker_receives_request_and_response_complete_dispatches_nex
     assert_eq!(
         core.worker_in_flight_request_ids("worker-1"),
         vec!["request-2".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn streaming_response_chunks_preserve_in_flight_request_until_response_complete() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack = register_test_worker(&mut socket).await;
+
+    let second_headers =
+        HeaderMap::from([("x-trace-id".to_string(), "trace-stream-next".to_string())]);
+
+    {
+        let mut core = core.lock().await;
+        assert_eq!(
+            core.submit_transport_request(
+                "openai",
+                "llama-3.1-70b",
+                "/v1/chat/completions",
+                true,
+                r#"{"model":"llama-3.1-70b","stream":true,"messages":[{"role":"user","content":"stream"}]}"#,
+                HeaderMap::new(),
+            ),
+            SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: ack.worker_id.clone(),
+            })
+        );
+        assert_eq!(
+            core.submit_transport_request(
+                "openai",
+                "llama-3.1-70b",
+                "/v1/chat/completions",
+                false,
+                r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after-stream"}]}"#,
+                second_headers.clone(),
+            ),
+            SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+                request_id: "request-2".to_string(),
+                queue_len: 1,
+            })
+        );
+    }
+
+    assert_eq!(
+        next_server_message(&mut socket, "streaming dispatched request").await,
+        ServerToWorkerMessage::Request(worker_protocol::RequestMessage {
+            request_id: "request-1".to_string(),
+            model: "llama-3.1-70b".to_string(),
+            endpoint_path: "/v1/chat/completions".to_string(),
+            is_streaming: true,
+            body: r#"{"model":"llama-3.1-70b","stream":true,"messages":[{"role":"user","content":"stream"}]}"#.to_string(),
+            headers: HeaderMap::new(),
+        })
+    );
+
+    send_response_chunk(&mut socket, "request-1", "data: {\"delta\":\"hel\"}\n\n").await;
+    send_response_chunk(&mut socket, "request-1", "data: {\"delta\":\"lo\"}\n\n").await;
+
+    let no_message = timeout(std::time::Duration::from_millis(150), socket.next()).await;
+    assert!(
+        no_message.is_err(),
+        "response chunks should not dispatch queued work before response_complete"
+    );
+
+    {
+        let core = core.lock().await;
+        assert_eq!(
+            core.request_state("request-1"),
+            Some(RequestState::InFlight {
+                worker_id: ack.worker_id.clone(),
+                cancellation: None,
+            })
+        );
+        assert_eq!(
+            core.queued_request_ids("openai"),
+            vec!["request-2".to_string()]
+        );
+        assert_eq!(
+            core.worker_in_flight_request_ids("worker-1"),
+            vec!["request-1".to_string()]
+        );
+    }
+
+    send_response_complete(&mut socket, "request-1").await;
+    assert_eq!(
+        next_server_message(&mut socket, "post-stream queued dispatch").await,
+        expected_request_message(
+            "request-2",
+            r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after-stream"}]}"#,
+            second_headers,
+        )
+    );
+
+    let core = core.lock().await;
+    assert_eq!(core.request_state("request-1"), None);
+    assert_eq!(
+        core.request_state("request-2"),
+        Some(RequestState::InFlight {
+            worker_id: ack.worker_id,
+            cancellation: None,
+        })
     );
 }
