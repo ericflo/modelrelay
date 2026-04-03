@@ -114,7 +114,7 @@ impl WorkerDaemon {
                     match message? {
                         Message::Text(payload) => {
                             let server_message = serde_json::from_str::<ServerToWorkerMessage>(&payload)?;
-                            if !self.handle_server_message(&event_tx, &mut active_requests, server_message)? {
+                            if !self.handle_server_message(&event_tx, &mut active_requests, server_message).await? {
                                 break;
                             }
                         }
@@ -155,7 +155,7 @@ impl WorkerDaemon {
         Ok(())
     }
 
-    fn handle_server_message(
+    async fn handle_server_message(
         &self,
         event_tx: &mpsc::UnboundedSender<DaemonEvent>,
         active_requests: &mut HashMap<String, JoinHandle<()>>,
@@ -203,11 +203,12 @@ impl WorkerDaemon {
             }
             ServerToWorkerMessage::GracefulShutdown(_) => Ok(false),
             ServerToWorkerMessage::ModelsRefresh(_) => {
+                let models = refresh_models(self.client.clone(), &self.config).await?;
                 event_tx
                     .send(DaemonEvent::Outbound(WorkerToServerMessage::ModelsUpdate(
                         ModelsUpdateMessage {
-                            models: self.config.models.clone(),
-                            current_load: 0,
+                            models,
+                            current_load: u32::try_from(active_requests.len()).unwrap_or(u32::MAX),
                         },
                     )))
                     .map_err(|error| -> BoxError {
@@ -314,4 +315,24 @@ async fn forward_request(
         body: Some(body),
         token_counts: None,
     })
+}
+
+async fn refresh_models(
+    client: reqwest::Client,
+    config: &WorkerDaemonConfig,
+) -> Result<Vec<String>, BoxError> {
+    let response = client.get(config.backend_url("/v1/models")).send().await?;
+    let response = response.error_for_status()?;
+    let body = response.json::<serde_json::Value>().await?;
+    let Some(data) = body.get("data").and_then(serde_json::Value::as_array) else {
+        return Err(Box::new(io::Error::other(
+            "backend /v1/models response missing data array",
+        )));
+    };
+
+    Ok(data
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect())
 }

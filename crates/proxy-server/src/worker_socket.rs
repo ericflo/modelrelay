@@ -23,6 +23,7 @@ use worker_protocol::{
 
 use crate::{
     GracefulShutdownDisconnectReason, GracefulShutdownSignal, ProxyServerCore, WorkerCancelSignal,
+    WorkerModelsRefreshSignal,
 };
 
 const WORKER_SECRET_HEADER: &str = "x-worker-secret";
@@ -323,6 +324,14 @@ async fn handle_authenticated_socket(
             return;
         }
 
+        if flush_pending_models_refreshes(&mut socket, &state, &worker_id)
+            .await
+            .is_err()
+        {
+            disconnect_worker(&state, &worker_id).await;
+            return;
+        }
+
         if let Some((code, reason)) = graceful_shutdown_close_action(&state, &worker_id).await {
             close_socket(socket, code, reason).await;
             return;
@@ -514,6 +523,27 @@ async fn flush_pending_graceful_shutdowns(
     Ok(())
 }
 
+async fn flush_pending_models_refreshes(
+    socket: &mut WebSocket,
+    state: &WorkerSocketState,
+    worker_id: &str,
+) -> Result<(), ()> {
+    let refreshes = {
+        let mut core = state.core.lock().await;
+        core.take_pending_worker_models_refresh_signals(worker_id)
+    };
+
+    for refresh in refreshes {
+        let payload = serde_json::to_string(&models_refresh_message(refresh)).map_err(|_| ())?;
+        socket
+            .send(Message::Text(payload.into()))
+            .await
+            .map_err(|_| ())?;
+    }
+
+    Ok(())
+}
+
 async fn flush_pending_cancels(
     socket: &mut WebSocket,
     state: &WorkerSocketState,
@@ -549,6 +579,12 @@ fn graceful_shutdown_message(shutdown: GracefulShutdownSignal) -> ServerToWorker
     ServerToWorkerMessage::GracefulShutdown(GracefulShutdownMessage {
         reason: shutdown.reason,
         drain_timeout_secs: Some(shutdown.drain_timeout.as_secs().max(1)),
+    })
+}
+
+fn models_refresh_message(refresh: WorkerModelsRefreshSignal) -> ServerToWorkerMessage {
+    ServerToWorkerMessage::ModelsRefresh(worker_protocol::ModelsRefreshMessage {
+        reason: refresh.reason,
     })
 }
 
