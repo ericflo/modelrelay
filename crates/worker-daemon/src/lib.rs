@@ -114,7 +114,7 @@ impl WorkerDaemon {
                     match message? {
                         Message::Text(payload) => {
                             let server_message = serde_json::from_str::<ServerToWorkerMessage>(&payload)?;
-                            if !self.handle_server_message(&event_tx, &mut active_requests, server_message).await? {
+                            if !self.handle_server_message(&event_tx, &mut active_requests, server_message)? {
                                 break;
                             }
                         }
@@ -155,7 +155,7 @@ impl WorkerDaemon {
         Ok(())
     }
 
-    async fn handle_server_message(
+    fn handle_server_message(
         &self,
         event_tx: &mpsc::UnboundedSender<DaemonEvent>,
         active_requests: &mut HashMap<String, JoinHandle<()>>,
