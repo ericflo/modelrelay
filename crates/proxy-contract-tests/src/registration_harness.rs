@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_PROTOCOL_VERSION: &str = "katamari-worker-v1";
 const MAX_WORKER_NAME_LEN: usize = 32;
 const MAX_MODELS_PER_WORKER: usize = 4;
+const DEFAULT_CLIENT_IDENTITY: &str = "127.0.0.1";
+const FAILED_AUTH_RATE_LIMIT_THRESHOLD: usize = 3;
+const FAILED_AUTH_RATE_LIMIT_WINDOW_TICKS: u64 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderConfig {
@@ -35,6 +38,7 @@ pub struct ConnectRequest {
     pub provider: String,
     pub header_secret: Option<String>,
     pub query_secret: Option<String>,
+    pub client_identity: String,
 }
 
 impl ConnectRequest {
@@ -44,6 +48,7 @@ impl ConnectRequest {
             provider: provider.into(),
             header_secret: Some(secret.into()),
             query_secret: None,
+            client_identity: DEFAULT_CLIENT_IDENTITY.to_string(),
         }
     }
 
@@ -53,7 +58,14 @@ impl ConnectRequest {
             provider: provider.into(),
             header_secret: None,
             query_secret: Some(secret.into()),
+            client_identity: DEFAULT_CLIENT_IDENTITY.to_string(),
         }
+    }
+
+    #[must_use]
+    pub fn with_client_identity(mut self, client_identity: impl Into<String>) -> Self {
+        self.client_identity = client_identity.into();
+        self
     }
 }
 
@@ -73,6 +85,8 @@ pub struct HandshakeFailure {
 pub struct RegistrationHarness {
     providers: HashMap<String, ProviderConfig>,
     next_worker_id: usize,
+    current_tick: u64,
+    failed_auth_attempts: HashMap<String, FailedAuthRateLimitState>,
 }
 
 impl RegistrationHarness {
@@ -84,7 +98,14 @@ impl RegistrationHarness {
                 .map(|(name, config)| (name.into(), config))
                 .collect(),
             next_worker_id: 1,
+            current_tick: 0,
+            failed_auth_attempts: HashMap::new(),
         }
+    }
+
+    pub fn advance_time(&mut self, ticks: u64) {
+        self.current_tick += ticks;
+        self.expire_failed_auth_rate_limits();
     }
 
     /// Authenticates an incoming worker connection for a configured provider.
@@ -97,6 +118,18 @@ impl RegistrationHarness {
         &mut self,
         request: ConnectRequest,
     ) -> Result<RegistrationSession, HandshakeFailure> {
+        self.expire_failed_auth_rate_limits();
+
+        let client_identity = request.client_identity.clone();
+        if self.client_is_rate_limited(&client_identity) {
+            return Err(HandshakeFailure {
+                code: CloseCode::PolicyViolation,
+                reason: format!(
+                    "worker authentication rate limited for client `{client_identity}`"
+                ),
+            });
+        }
+
         let provider = self
             .providers
             .get(&request.provider)
@@ -121,17 +154,57 @@ impl RegistrationHarness {
             })?;
 
         if presented_secret != provider.worker_secret {
+            self.record_failed_auth(client_identity);
             return Err(HandshakeFailure {
                 code: CloseCode::PolicyViolation,
                 reason: "worker authentication failed".to_string(),
             });
         }
 
+        self.failed_auth_attempts.remove(&request.client_identity);
+
         let worker_id = format!("worker-{}", self.next_worker_id);
         self.next_worker_id += 1;
 
         Ok(RegistrationSession { worker_id })
     }
+
+    fn client_is_rate_limited(&self, client_identity: &str) -> bool {
+        self.failed_auth_attempts
+            .get(client_identity)
+            .and_then(|state| state.limited_until_tick)
+            .is_some_and(|limited_until_tick| limited_until_tick > self.current_tick)
+    }
+
+    fn record_failed_auth(&mut self, client_identity: String) {
+        let state =
+            self.failed_auth_attempts
+                .entry(client_identity)
+                .or_insert(FailedAuthRateLimitState {
+                    failed_attempts: 0,
+                    limited_until_tick: None,
+                    expires_at_tick: self.current_tick + FAILED_AUTH_RATE_LIMIT_WINDOW_TICKS,
+                });
+
+        state.failed_attempts += 1;
+        state.expires_at_tick = self.current_tick + FAILED_AUTH_RATE_LIMIT_WINDOW_TICKS;
+        if state.failed_attempts >= FAILED_AUTH_RATE_LIMIT_THRESHOLD {
+            state.limited_until_tick =
+                Some(self.current_tick + FAILED_AUTH_RATE_LIMIT_WINDOW_TICKS);
+        }
+    }
+
+    fn expire_failed_auth_rate_limits(&mut self) {
+        self.failed_auth_attempts
+            .retain(|_, state| state.expires_at_tick > self.current_tick);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FailedAuthRateLimitState {
+    failed_attempts: usize,
+    limited_until_tick: Option<u64>,
+    expires_at_tick: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

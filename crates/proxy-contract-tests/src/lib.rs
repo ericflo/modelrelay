@@ -63,13 +63,16 @@ mod tests {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
         assert!(doc.contains("First Characterization Tests To Write Next"));
-        assert!(doc.contains("OpenAI `/v1/responses` compatibility coverage"));
+        assert!(doc.contains("Registration sanitization edge warnings"));
+        assert!(doc.contains("truncated worker names"));
+        assert!(doc.contains("max_concurrent"));
         assert!(!doc.contains("Dynamic model catalog updates and `/v1/models` coherence"));
         assert!(!doc.contains("1. OpenAI-style and Anthropic-style compatibility:"));
         assert!(!doc.contains("1. Graceful shutdown and drain:"));
         assert!(!doc.contains("5. Queue timeout and queue-full surfaces:"));
         assert!(!doc.contains("4. Client cancellation:"));
         assert!(!doc.contains("4. Streaming pass-through:"));
+        assert!(!doc.contains("OpenAI `/v1/responses` compatibility coverage"));
     }
 
     #[test]
@@ -896,6 +899,107 @@ mod tests {
                 code: CloseCode::PolicyViolation,
                 reason: "worker authentication failed".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn repeated_failed_auth_attempts_are_rate_limited_by_client_identity() {
+        let mut harness =
+            RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
+
+        let repeated_bad_secret = || {
+            ConnectRequest::with_header_secret("openai", "wrong-secret")
+                .with_client_identity("198.51.100.24")
+        };
+
+        for _ in 0..3 {
+            assert_eq!(
+                harness.connect(repeated_bad_secret()),
+                Err(HandshakeFailure {
+                    code: CloseCode::PolicyViolation,
+                    reason: "worker authentication failed".to_string(),
+                })
+            );
+        }
+
+        assert_eq!(
+            harness.connect(repeated_bad_secret()),
+            Err(HandshakeFailure {
+                code: CloseCode::PolicyViolation,
+                reason: "worker authentication rate limited for client `198.51.100.24`".to_string(),
+            })
+        );
+
+        let other_client = harness
+            .connect(
+                ConnectRequest::with_header_secret("openai", "top-secret")
+                    .with_client_identity("203.0.113.10"),
+            )
+            .expect("rate limit should be scoped to the failing client identity");
+        assert_eq!(
+            parse_register_ack(
+                &other_client
+                    .exchange_text(&serialize_register_message(RegisterMessage {
+                        worker_name: "gpu-box-b".to_string(),
+                        models: vec!["llama-3.1-70b".to_string()],
+                        max_concurrent: 1,
+                        protocol_version: None,
+                    }))
+                    .expect("other client should finish registration"),
+            )
+            .worker_id,
+            "worker-1".to_string()
+        );
+    }
+
+    #[test]
+    fn failed_auth_rate_limit_entries_expire_and_allow_a_later_valid_connection() {
+        let mut harness =
+            RegistrationHarness::new([("openai", ProviderConfig::enabled("top-secret"))]);
+
+        let rate_limited_client = || {
+            ConnectRequest::with_header_secret("openai", "wrong-secret")
+                .with_client_identity("198.51.100.24")
+        };
+
+        for _ in 0..3 {
+            assert_eq!(
+                harness.connect(rate_limited_client()),
+                Err(HandshakeFailure {
+                    code: CloseCode::PolicyViolation,
+                    reason: "worker authentication failed".to_string(),
+                })
+            );
+        }
+        assert_eq!(
+            harness.connect(rate_limited_client()),
+            Err(HandshakeFailure {
+                code: CloseCode::PolicyViolation,
+                reason: "worker authentication rate limited for client `198.51.100.24`".to_string(),
+            })
+        );
+
+        harness.advance_time(5);
+
+        let accepted = harness
+            .connect(
+                ConnectRequest::with_header_secret("openai", "top-secret")
+                    .with_client_identity("198.51.100.24"),
+            )
+            .expect("expired failed-auth limiter should allow a later valid connection");
+        assert_eq!(
+            parse_register_ack(
+                &accepted
+                    .exchange_text(&serialize_register_message(RegisterMessage {
+                        worker_name: "gpu-box-a".to_string(),
+                        models: vec!["llama-3.1-70b".to_string()],
+                        max_concurrent: 1,
+                        protocol_version: None,
+                    }))
+                    .expect("valid worker should complete registration after limiter expiry"),
+            )
+            .worker_id,
+            "worker-1".to_string()
         );
     }
 
