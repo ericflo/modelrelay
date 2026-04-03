@@ -228,7 +228,7 @@ async fn next_close_frame(
         panic!("expected close frame for {context}");
     };
 
-    close_frame.to_owned()
+    close_frame.clone()
 }
 
 async fn assert_worker_socket_closes(socket: &mut TestSocket) {

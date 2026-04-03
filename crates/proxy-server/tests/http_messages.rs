@@ -247,7 +247,7 @@ async fn next_close_frame(
         panic!("expected close frame for {context}");
     };
 
-    close_frame.to_owned()
+    close_frame.clone()
 }
 
 fn assert_messages_response(response: &str, worker_backend: &str, body: &str) {
