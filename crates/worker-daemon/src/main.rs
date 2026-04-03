@@ -1,4 +1,5 @@
 use clap::Parser;
+use tracing_subscriber::EnvFilter;
 use worker_daemon::{WorkerDaemon, WorkerDaemonConfig};
 
 /// Remote LLM worker daemon.
@@ -35,11 +36,22 @@ struct Args {
     /// Base URL of the local model backend (e.g. `http://127.0.0.1:8000`)
     #[arg(long, env = "BACKEND_URL", default_value = "http://127.0.0.1:8000")]
     backend_url: String,
+
+    /// Log level filter (e.g. info, debug, warn, error, or a directive like
+    /// `worker_daemon=debug`). Overridden by `RUST_LOG` if set.
+    #[arg(long, env = "LOG_LEVEL", default_value = "info")]
+    log_level: String,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&args.log_level)),
+        )
+        .init();
 
     let models: Vec<String> = args
         .models
@@ -58,14 +70,14 @@ async fn main() {
         backend_base_url: args.backend_url.clone(),
     };
 
-    eprintln!(
-        "worker-daemon starting: proxy={} provider={} name={} models={} concurrency={} backend={}",
-        args.proxy_url,
-        args.provider,
-        args.worker_name,
-        models.join(","),
-        args.max_concurrency,
-        args.backend_url
+    tracing::info!(
+        proxy = %args.proxy_url,
+        provider = %args.provider,
+        name = %args.worker_name,
+        models = %models.join(","),
+        concurrency = args.max_concurrency,
+        backend = %args.backend_url,
+        "worker-daemon starting"
     );
 
     let daemon = WorkerDaemon::new(config);
@@ -73,12 +85,12 @@ async fn main() {
     tokio::select! {
         result = daemon.run_with_reconnect() => {
             if let Err(e) = result {
-                eprintln!("worker-daemon error: {e}");
+                tracing::error!(error = %e, "worker-daemon error");
                 std::process::exit(1);
             }
         }
         () = shutdown_signal() => {
-            eprintln!("worker-daemon shutting down gracefully");
+            tracing::info!("worker-daemon shutting down gracefully");
         }
     }
 }
@@ -106,5 +118,5 @@ async fn shutdown_signal() {
         () = sigterm => {},
     }
 
-    eprintln!("shutting down gracefully");
+    tracing::info!("shutting down gracefully");
 }
