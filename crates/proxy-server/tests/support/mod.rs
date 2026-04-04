@@ -133,12 +133,31 @@ pub async fn assert_worker_socket_closes(socket: &mut TestSocket) {
         let message = timeout(std::time::Duration::from_secs(2), socket.next())
             .await
             .expect("receive worker close frame before timeout")
-            .expect("socket message")
-            .expect("websocket message");
+            .expect("socket message");
+
+        // On Windows, the OS may deliver a ConnectionAborted (error 10053) or
+        // ConnectionReset instead of a clean WebSocket close frame when the
+        // server tears down the connection. Treat these IO errors as equivalent
+        // to a successful close.
+        let message = match message {
+            Ok(msg) => msg,
+            Err(tokio_tungstenite::tungstenite::Error::Io(ref e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                return;
+            }
+            Err(e) => panic!("unexpected websocket error while waiting for close: {e}"),
+        };
 
         match message {
             Message::Close(Some(close_frame)) => {
                 assert_eq!(u16::from(close_frame.code), 1000);
+                return;
+            }
+            Message::Close(None) => {
                 return;
             }
             Message::Text(payload) => match serde_json::from_str::<ServerToWorkerMessage>(&payload)
