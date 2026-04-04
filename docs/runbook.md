@@ -1,8 +1,8 @@
 # Operational Runbook
 
 This guide covers day-to-day operations for running ModelRelay in
-production.  It assumes you have one `proxy-server` instance and one or
-more `worker-daemon` processes.
+production.  It assumes you have one `modelrelay-server` instance and one or
+more `modelrelay-worker` processes.
 
 ---
 
@@ -65,7 +65,7 @@ If a worker's models don't appear within ~10 seconds:
 
 To remove a worker from rotation without dropping in-flight requests:
 
-1. **Send SIGTERM** to the worker-daemon process.  The daemon initiates a
+1. **Send SIGTERM** to the modelrelay-worker process.  The daemon initiates a
    graceful disconnect — the proxy sends a `GracefulShutdown` message and
    stops routing new requests to that worker.
 
@@ -77,7 +77,7 @@ To remove a worker from rotation without dropping in-flight requests:
 
 ```bash
 # Graceful stop via systemd
-systemctl stop worker-daemon@gpu-box-1
+systemctl stop modelrelay-worker@gpu-box-1
 
 # Or with Docker
 docker stop --time 60 worker-gpu-box-1
@@ -94,14 +94,14 @@ messages until they finish.
 
 ### Adding a worker
 
-Start a new `worker-daemon` instance pointing at the same proxy:
+Start a new `modelrelay-worker` instance pointing at the same proxy:
 
 ```bash
 PROXY_URL=http://proxy:8080 \
 WORKER_SECRET=your-secret \
 WORKER_NAME=gpu-box-4 \
 BACKEND_URL=http://localhost:8000 \
-  worker-daemon --models llama3-8b
+  modelrelay-worker --models llama3-8b
 ```
 
 The proxy discovers it within seconds via the WebSocket registration
@@ -155,8 +155,8 @@ The proxy is a single-process server.  To scale:
 Set `LOG_LEVEL` environment variable on either component:
 
 ```bash
-LOG_LEVEL=debug proxy-server   # trace, debug, info (default), warn, error
-LOG_LEVEL=debug worker-daemon
+LOG_LEVEL=debug modelrelay-server   # trace, debug, info (default), warn, error
+LOG_LEVEL=debug modelrelay-worker
 ```
 
 ---

@@ -10,10 +10,10 @@ This document describes the internal architecture of ModelRelay: how the compone
 - `crates/worker-protocol`
   Shared Rust protocol types for the WebSocket bridge: registration, dispatch, streaming chunks, cancellation, heartbeats, and operational control messages.
 
-- `crates/proxy-server`
+- `crates/modelrelay-server`
   Central HTTP proxy. Owns the client-facing OpenAI and Anthropic compatibility layers, worker auth, provider config, worker registry, queueing, routing, cancellation, and graceful drain.
 
-- `crates/worker-daemon`
+- `crates/modelrelay-worker`
   Remote worker process. Authenticates to the server, advertises models and capacity, forwards requests to a local backend such as `llama-server`, streams chunks back, refreshes advertised models, reports live load in heartbeats, and honors cancellation plus graceful shutdown.
 
 ## Component Overview
