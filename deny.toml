@@ -1,38 +1,33 @@
 [advisories]
-db-path = '~/.cargo/advisory-db'
-db-urls = ['https://github.com/rustsec/advisory-db']
-# Deny known security vulnerabilities; allow warnings for initial introduction
-vulnerability = 'deny'
-unmaintained = 'allow'
-yanked = 'allow'
-notice = 'allow'
+# cargo-deny v2: vulnerability advisories hard-error by default
+# unmaintained scope: "workspace" = only direct deps, not transitive
+unmaintained = "workspace"
+yanked = "warn"
 
 [licenses]
-# Allow all commonly used open source licenses
+# Allow commonly used open source licenses
 allow = [
-    'MIT',
-    'Apache-2.0',
-    'Apache-2.0 WITH LLVM-exception',
-    'BSD-2-Clause',
-    'BSD-3-Clause',
-    'ISC',
-    'Unicode-DFS-2016',
-    'Unicode-3.0',
-    'Zlib',
-    'CC0-1.0',
-    'OpenSSL',
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "OpenSSL",
+    "MPL-2.0",
 ]
-copyleft = 'allow'
-allow-osi-fsf-free = 'either'
-default = 'deny'
-private = { ignore = true }
+confidence-threshold = 0.8
+unused-allowed-license = "allow"
 
 [bans]
-multiple-versions = 'allow'
-wildcards = 'allow'
-highlight = 'all'
+multiple-versions = "warn"
+wildcards = "warn"
 
 [sources]
-unknown-registry = 'allow'
-unknown-git = 'allow'
-allow-registry = ['https://github.com/rust-lang/crates.io-index']
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
