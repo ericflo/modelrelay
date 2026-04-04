@@ -1,8 +1,8 @@
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-/// Initialize the PostgreSQL connection pool from DATABASE_URL.
-/// Returns None if DATABASE_URL is not set, allowing the app to run without a database.
+/// Initialize the PostgreSQL connection pool from `DATABASE_URL`.
+/// Returns `None` if `DATABASE_URL` is not set, allowing the app to run without a database.
 pub async fn connect() -> Option<PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
 
