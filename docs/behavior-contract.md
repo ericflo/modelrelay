@@ -1,19 +1,6 @@
 # Behavior Contract
 
-This document captures the externally observable contract to preserve when rewriting Katamari's worker-proxy system in Rust.
-
-Source of truth:
-
-- Repository: `ericflo/katamari`
-- Commit: `ab5e90f6a2ff05a063663ce478146bf0b6829429`
-- Primary files inspected:
-  - `platform/aiproxyd/internal/worker/messages.go`
-  - `platform/aiproxyd/internal/worker/connection.go`
-  - `platform/aiproxyd/internal/worker/manager.go`
-  - `platform/aiproxyd/internal/worker/queue.go`
-  - `platform/aiproxyd/internal/worker/integration_test.go`
-  - `platform/aiproxyd/internal/proxy/handler.go`
-  - `libs/aiproxy-worker-protocol/protocol.go`
+This document captures the externally observable behavior contract for ModelRelay — the behaviors that must hold across versions and that users and contributors can rely on. The contract test suite in `modelrelay-contract-tests` is the automated expression of these requirements.
 
 ## Core Contract
 
@@ -77,6 +64,6 @@ Source of truth:
 - Streaming remains SSE-shaped end to end.
 - Worker churn or late chunks must not leave requests hanging forever.
 
-## First Characterization Tests To Write Next
+## Extension Points
 
-No additional characterization slices are currently pinned. Refresh this section after the next archaeology pass or when a new uncovered client-visible behavior is identified.
+When adding new behaviors, add a contract test in `modelrelay-contract-tests` before implementing. This keeps the test suite as the primary specification. If a behavior described above is not yet covered by an automated test, that gap is the highest-priority work item.

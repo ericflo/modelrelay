@@ -59,11 +59,13 @@ mod tests {
     }
 
     #[test]
-    fn behavior_contract_doc_mentions_next_characterization_tests() {
+    fn behavior_contract_doc_mentions_extension_points() {
         let doc = include_str!("../../../docs/behavior-contract.md");
 
-        assert!(doc.contains("First Characterization Tests To Write Next"));
-        assert!(doc.contains("No additional characterization slices are currently pinned"));
+        assert!(doc.contains("Extension Points"));
+        assert!(
+            doc.contains("add a contract test in `modelrelay-contract-tests` before implementing")
+        );
         assert!(!doc.contains("Registration sanitization edge warnings"));
         assert!(!doc.contains("Dynamic model catalog updates and `/v1/models` coherence"));
         assert!(!doc.contains("1. OpenAI-style and Anthropic-style compatibility:"));
