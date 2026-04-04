@@ -39,7 +39,14 @@ The toolchain is pinned to `1.94.1` via `rust-toolchain.toml`. CI runs `cargo fm
 
 ## Branch naming
 
-Use the `ce/` prefix for agent-generated branches. Human contributors can use any reasonable convention, e.g. `feat/`, `fix/`, `docs/`.
+Use a short descriptive prefix that reflects the type of change:
+
+- `feat/` — new feature or behavior
+- `fix/` — bug fix
+- `docs/` — documentation only
+- `chore/` — maintenance, dependencies, CI
+
+Examples: `feat/reconnect-backoff`, `fix/cancel-race`, `docs/tls-example`
 
 ## PR expectations
 
