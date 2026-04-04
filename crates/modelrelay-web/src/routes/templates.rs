@@ -2,6 +2,7 @@
 ///
 /// `logged_in` controls the nav links: when `true`, shows Dashboard + Pricing + Log out;
 /// when `false`, shows Dashboard + Pricing only (login/signup are reached via their own pages).
+#[allow(clippy::too_many_lines)]
 pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     let nav_links = if logged_in {
         r#"<a href="/dashboard">Dashboard</a>
