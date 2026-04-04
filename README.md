@@ -101,7 +101,7 @@ Download the latest release for your platform from the [Releases page](https://g
 
 ### From crates.io
 
-> **Note:** The crates are not yet published to crates.io. Use [pre-built binaries](#from-github-releases) or [Docker](#docker) in the meantime. See [CONTRIBUTING.md](CONTRIBUTING.md#ci-secrets) for how to configure the `CRATES_IO_TOKEN` secret for publishing.
+> **Note:** The crates are not yet published to crates.io. Use [pre-built binaries](#pre-built-binaries) or [Docker](#docker-recommended) in the meantime. See [CONTRIBUTING.md](CONTRIBUTING.md#ci-secrets) for how to configure the `CRATES_IO_TOKEN` secret for publishing.
 
 ```bash
 cargo install modelrelay-server modelrelay-worker
