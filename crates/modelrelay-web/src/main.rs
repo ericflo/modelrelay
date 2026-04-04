@@ -38,6 +38,13 @@ async fn main() {
         tracing::warn!("STRIPE_WEBHOOK_SECRET not set — webhook verification disabled");
     }
 
+    // Admin API for key provisioning (optional — keys won't be provisioned without it)
+    let admin_url = std::env::var("MODELRELAY_ADMIN_URL").ok();
+    let admin_token = std::env::var("MODELRELAY_ADMIN_TOKEN").ok();
+    if admin_url.is_none() || admin_token.is_none() {
+        tracing::warn!("MODELRELAY_ADMIN_URL or MODELRELAY_ADMIN_TOKEN not set — API key provisioning disabled");
+    }
+
     // Set up session layer if we have a DB
     let session_layer = if let Some(ref p) = pool {
         let session_store = tower_sessions_sqlx_store::PostgresStore::new(p.clone());
@@ -60,6 +67,8 @@ async fn main() {
         db: pool,
         stripe_key,
         webhook_secret,
+        admin_url,
+        admin_token,
     });
 
     let mut app = Router::new()

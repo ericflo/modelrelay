@@ -27,9 +27,9 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
         Err(_) => return Redirect::to("/login").into_response(),
     };
 
-    // Query user info
+    // Query user info (including api_key for display)
     let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id, email, stripe_customer_id FROM users WHERE id = $1",
+        "SELECT id, email, stripe_customer_id, api_key FROM users WHERE id = $1",
     )
     .bind(user_id)
     .fetch_optional(pool)
@@ -62,7 +62,7 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
     };
 
     let has_stripe_customer = user.stripe_customer_id.is_some();
-    let html = dashboard_html(&user.email, sub.as_ref(), has_stripe_customer);
+    let html = dashboard_html(&user.email, sub.as_ref(), has_stripe_customer, user.api_key.as_deref());
     Html(page_shell("Dashboard", &html)).into_response()
 }
 
@@ -166,6 +166,7 @@ struct UserRow {
     id: uuid::Uuid,
     email: String,
     stripe_customer_id: Option<String>,
+    api_key: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -195,7 +196,7 @@ fn no_db_html() -> String {
         .to_string()
 }
 
-fn dashboard_html(email: &str, sub: Option<&SubscriptionRow>, has_stripe_customer: bool) -> String {
+fn dashboard_html(email: &str, sub: Option<&SubscriptionRow>, has_stripe_customer: bool, api_key: Option<&str>) -> String {
     let email_escaped = html_escape(email);
 
     let sub_card = if let Some(s) = sub {
@@ -241,7 +242,7 @@ fn dashboard_html(email: &str, sub: Option<&SubscriptionRow>, has_stripe_custome
     };
 
     let api_key_card = if let Some(s) = sub {
-        if let Some(ref key_id) = s.api_key_id {
+        if let Some(key) = api_key {
             format!(
                 "<div class=\"card\">\
                    <h2>API Key</h2>\
@@ -251,8 +252,16 @@ fn dashboard_html(email: &str, sub: Option<&SubscriptionRow>, has_stripe_custome
                    </div>\
                    <p style=\"margin-top:8px;color:#8b949e;\">Use this key in your <code>modelrelay-server</code> configuration.</p>\
                  </div>",
-                html_escape(key_id),
+                html_escape(key),
             )
+        } else if s.api_key_id.is_some() {
+            "<div class=\"card\">\
+               <h2>API Key</h2>\
+               <p style=\"margin-top:8px;\"><span class=\"badge badge-active\">Provisioned</span></p>\
+               <p style=\"margin-top:12px;color:#8b949e;\">Your API key has been provisioned. \
+                  The raw key was shown once at creation and is stored securely.</p>\
+             </div>"
+                .to_string()
         } else if s.status == "active" {
             "<div class=\"card\">\
                <h2>API Key</h2>\
