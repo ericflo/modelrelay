@@ -1318,3 +1318,150 @@ async fn worker_daemon_reports_live_in_flight_load_in_heartbeat_pongs() {
 
     daemon_handle.abort();
 }
+
+#[derive(Clone)]
+struct SlowStreamingBackendState {
+    observed_request_tx: Arc<Mutex<Option<oneshot::Sender<ObservedBackendRequest>>>>,
+    backend_abort_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+async fn spawn_slow_streaming_backend() -> (
+    SocketAddr,
+    oneshot::Receiver<ObservedBackendRequest>,
+    oneshot::Receiver<()>,
+) {
+    let (observed_request_tx, observed_request_rx) = oneshot::channel();
+    let (backend_abort_tx, backend_abort_rx) = oneshot::channel();
+    let state = SlowStreamingBackendState {
+        observed_request_tx: Arc::new(Mutex::new(Some(observed_request_tx))),
+        backend_abort_tx: Arc::new(Mutex::new(Some(backend_abort_tx))),
+    };
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(slow_streaming_chat_handler),
+        )
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind slow streaming backend listener");
+    let addr = listener
+        .local_addr()
+        .expect("slow streaming backend listener local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve slow streaming backend app");
+    });
+
+    (addr, observed_request_rx, backend_abort_rx)
+}
+
+async fn slow_streaming_chat_handler(
+    State(state): State<SlowStreamingBackendState>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    if let Some(tx) = state.observed_request_tx.lock().await.take() {
+        let _ = tx.send(ObservedBackendRequest {
+            path: "/v1/chat/completions".to_string(),
+            authorization: header_value(&headers, "authorization"),
+            openai_organization: header_value(&headers, "openai-organization"),
+            x_api_key: header_value(&headers, "x-api-key"),
+            anthropic_version: header_value(&headers, "anthropic-version"),
+            anthropic_beta: header_value(&headers, "anthropic-beta"),
+            content_type: header_value(&headers, "content-type"),
+            body,
+        });
+    }
+
+    // The sentinel is held in the stream state. When the stream is dropped (because the
+    // reqwest client in the worker daemon aborted), the sentinel drops, which closes the
+    // oneshot channel — the test-side receiver observes Err(RecvError).
+    let sentinel = state.backend_abort_tx.lock().await.take();
+
+    let stream = stream::unfold(
+        (0_usize, sentinel),
+        |(idx, sentinel)| async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let chunk = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"chunk-{idx}\"}}}}]}}\n\n"
+            );
+            Some((
+                Ok::<Bytes, Infallible>(Bytes::from(chunk)),
+                (idx + 1, sentinel),
+            ))
+        },
+    );
+
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        "content-type",
+        "text/event-stream"
+            .parse()
+            .expect("parse content-type header"),
+    );
+    response
+}
+
+#[tokio::test]
+async fn worker_daemon_cancels_backend_request_when_http_client_disconnects() {
+    let (proxy_addr, _core) = spawn_proxy_server("openai").await;
+    let (backend_addr, observed_request_rx, backend_abort_rx) =
+        spawn_slow_streaming_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    // Open a streaming request — stream:true causes the proxy to use the streaming path
+    // with an HttpRequestCancellationGuard that fires when the response Body is dropped.
+    let request_body = r#"{"model":"gpt-4.1-mini","stream":true,"messages":[{"role":"user","content":"cancel me"}]}"#;
+    let mut client_stream = open_chat_completions_request(
+        proxy_addr,
+        request_body,
+        &[("Authorization", "Bearer client-token")],
+    )
+    .await;
+
+    // Wait for the backend to receive the request, confirming the worker daemon has
+    // forwarded it and the in-flight backend request is active.
+    timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend received request before timeout")
+        .expect("backend received request");
+
+    // Wait for at least the first SSE chunk to arrive at the proxy client. This confirms
+    // the streaming pipeline is live end-to-end before we simulate a disconnect.
+    let _ = read_until_contains(&mut client_stream, "data:").await;
+
+    // Simulate HTTP client disconnect by dropping the TCP stream. The chain that follows:
+    //   proxy Body stream dropped -> HttpRequestCancellationGuard fires
+    //   -> core.cancel_request(ClientDisconnected)
+    //   -> Cancel message sent to worker daemon over WebSocket
+    //   -> worker daemon calls handle.abort() on the in-flight task
+    //   -> forward_request future dropped -> reqwest connection to backend closed
+    //   -> backend Body::from_stream stream dropped -> sentinel (oneshot::Sender) dropped
+    //   -> backend_abort_rx resolves with Err(RecvError)
+    drop(client_stream);
+
+    let result = timeout(Duration::from_secs(5), backend_abort_rx).await;
+    assert!(
+        result.is_ok(),
+        "backend stream should have been aborted within 5s after HTTP client disconnect"
+    );
+
+    daemon_handle.abort();
+}
