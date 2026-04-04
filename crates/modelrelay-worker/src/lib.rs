@@ -434,3 +434,117 @@ async fn refresh_models(
         .map(ToOwned::to_owned)
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(proxy_base_url: &str, backend_base_url: &str) -> WorkerDaemonConfig {
+        WorkerDaemonConfig {
+            proxy_base_url: proxy_base_url.to_string(),
+            provider: "test-provider".to_string(),
+            worker_secret: "secret".to_string(),
+            worker_name: "test-worker".to_string(),
+            models: vec!["model-a".to_string()],
+            max_concurrent: 4,
+            backend_base_url: backend_base_url.to_string(),
+        }
+    }
+
+    #[test]
+    fn websocket_url_converts_http_to_ws() {
+        let cfg = test_config("http://proxy.local:8080", "http://backend:11434");
+        assert_eq!(
+            cfg.websocket_url(),
+            "ws://proxy.local:8080/v1/worker/connect?provider=test-provider"
+        );
+    }
+
+    #[test]
+    fn websocket_url_converts_https_to_wss() {
+        let cfg = test_config("https://proxy.example.com", "http://backend:11434");
+        assert_eq!(
+            cfg.websocket_url(),
+            "wss://proxy.example.com/v1/worker/connect?provider=test-provider"
+        );
+    }
+
+    #[test]
+    fn websocket_url_strips_trailing_slash() {
+        let cfg = test_config("http://proxy.local:8080/", "http://backend:11434");
+        assert_eq!(
+            cfg.websocket_url(),
+            "ws://proxy.local:8080/v1/worker/connect?provider=test-provider"
+        );
+    }
+
+    #[test]
+    fn websocket_url_strips_multiple_trailing_slashes() {
+        let cfg = test_config("https://proxy.local///", "http://backend:11434");
+        assert_eq!(
+            cfg.websocket_url(),
+            "wss://proxy.local/v1/worker/connect?provider=test-provider"
+        );
+    }
+
+    #[test]
+    fn websocket_url_passthrough_when_no_http_prefix() {
+        let cfg = test_config("ws://already-ws.local", "http://backend:11434");
+        assert_eq!(
+            cfg.websocket_url(),
+            "ws://already-ws.local/v1/worker/connect?provider=test-provider"
+        );
+    }
+
+    #[test]
+    fn backend_url_joins_path() {
+        let cfg = test_config("http://proxy.local", "http://localhost:11434");
+        assert_eq!(
+            cfg.backend_url("/v1/chat/completions"),
+            "http://localhost:11434/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn backend_url_strips_trailing_slash_on_base() {
+        let cfg = test_config("http://proxy.local", "http://localhost:11434/");
+        assert_eq!(
+            cfg.backend_url("/v1/models"),
+            "http://localhost:11434/v1/models"
+        );
+    }
+
+    #[test]
+    fn backend_url_with_subpath_base() {
+        let cfg = test_config("http://proxy.local", "http://localhost:11434/api/v2/");
+        assert_eq!(
+            cfg.backend_url("/chat"),
+            "http://localhost:11434/api/v2/chat"
+        );
+    }
+
+    #[test]
+    fn backend_url_empty_endpoint_path() {
+        let cfg = test_config("http://proxy.local", "http://localhost:11434");
+        assert_eq!(cfg.backend_url(""), "http://localhost:11434");
+    }
+
+    #[test]
+    fn subsecond_jitter_ms_within_range() {
+        // Run multiple times to increase confidence (the function is time-derived)
+        for _ in 0..50 {
+            let jitter = subsecond_jitter_ms();
+            assert!(jitter < 500, "jitter {jitter} must be < 500");
+        }
+    }
+
+    #[test]
+    fn config_debug_and_clone() {
+        let cfg = test_config("http://proxy.local", "http://backend:11434");
+        let cloned = cfg.clone();
+        assert_eq!(cfg, cloned);
+        // Ensure Debug is implemented (compilation check + format)
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("proxy_base_url"));
+    }
+}
