@@ -1,4 +1,5 @@
 [![CI](https://github.com/ericflo/llm-worker-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/ericflo/llm-worker-proxy/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/ericflo/llm-worker-proxy/branch/main/graph/badge.svg)](https://codecov.io/gh/ericflo/llm-worker-proxy)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 # llm-worker-proxy
