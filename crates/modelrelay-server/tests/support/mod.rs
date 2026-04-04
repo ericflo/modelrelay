@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
+use modelrelay_protocol::{CancelMessage, CancelReason, ServerToWorkerMessage};
 use modelrelay_server::{ProxyServerCore, RequestState};
 use tokio::{io::AsyncReadExt, net::TcpStream, sync::Mutex, time::timeout};
 use tokio_tungstenite::tungstenite::Message;
-use modelrelay_protocol::{CancelMessage, CancelReason, ServerToWorkerMessage};
 
 pub type TestSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;

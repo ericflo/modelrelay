@@ -4,11 +4,11 @@ pub mod worker_socket;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, oneshot};
 use modelrelay_protocol::{
     HeaderMap, ModelsUpdateMessage, PongMessage, RegisterAck, RegisterMessage, RequestMessage,
     ResponseCompleteMessage,
 };
+use tokio::sync::{mpsc, oneshot};
 
 pub use http::ProxyHttpApp;
 pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
@@ -1237,8 +1237,8 @@ mod tests {
         ProxyServerCore, QueuedAssignment, RequestFailure, RequestFailureReason, RequestState,
         SubmissionOutcome, WorkerCancelSignal, WorkerDisconnectOutcome,
     };
-    use std::time::Duration;
     use modelrelay_protocol::{ModelsUpdateMessage, RegisterMessage};
+    use std::time::Duration;
 
     fn register_message(
         worker_name: &str,

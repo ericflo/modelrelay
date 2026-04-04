@@ -12,6 +12,7 @@ use futures_util::stream;
 use modelrelay_server::{
     ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp, WorkerSocketProviderConfig,
 };
+use modelrelay_worker::{WorkerDaemon, WorkerDaemonConfig};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -19,7 +20,6 @@ use tokio::{
     sync::{Mutex, oneshot},
     time::{Duration, timeout},
 };
-use modelrelay_worker::{WorkerDaemon, WorkerDaemonConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObservedBackendRequest {

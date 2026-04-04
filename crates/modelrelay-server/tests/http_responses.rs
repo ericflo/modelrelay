@@ -4,6 +4,10 @@ use support::*;
 use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use futures_util::SinkExt;
+use modelrelay_protocol::{
+    CancelMessage, CancelReason, HeaderMap, ModelsUpdateMessage, RegisterMessage,
+    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+};
 use modelrelay_server::{
     CancelReason as ProxyCancelReason, ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore,
     RequestState, WorkerSocketApp, WorkerSocketProviderConfig,
@@ -17,10 +21,6 @@ use tokio::{
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
-};
-use modelrelay_protocol::{
-    CancelMessage, CancelReason, HeaderMap, ModelsUpdateMessage, RegisterMessage,
-    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 async fn spawn_server() -> SocketAddr {

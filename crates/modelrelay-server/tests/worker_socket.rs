@@ -1,6 +1,11 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
+use modelrelay_protocol::{
+    CancelMessage, CancelReason as ProtocolCancelReason, GracefulShutdownMessage, HeaderMap,
+    ModelsUpdateMessage, PingMessage, PongMessage, RegisterMessage, ResponseChunkMessage,
+    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+};
 use modelrelay_server::{
     CancelReason as ProxyCancelReason, ProxyServerCore, RequestState, SubmissionOutcome,
     WorkerSocketApp, WorkerSocketProviderConfig,
@@ -13,11 +18,6 @@ use tokio::{
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
-};
-use modelrelay_protocol::{
-    CancelMessage, CancelReason as ProtocolCancelReason, GracefulShutdownMessage, HeaderMap,
-    ModelsUpdateMessage, PingMessage, PongMessage, RegisterMessage, ResponseChunkMessage,
-    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =

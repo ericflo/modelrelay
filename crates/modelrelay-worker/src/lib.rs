@@ -1,6 +1,10 @@
 use std::{collections::HashMap, error::Error, io, time::SystemTime};
 
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
+use modelrelay_protocol::{
+    ModelsUpdateMessage, PongMessage, RegisterMessage, RequestMessage, ResponseChunkMessage,
+    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+};
 use reqwest::header::{CONNECTION, CONTENT_LENGTH, HOST, HeaderMap as ReqwestHeaderMap};
 use tokio::{
     select,
@@ -11,10 +15,6 @@ use tokio::{
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
-};
-use modelrelay_protocol::{
-    ModelsUpdateMessage, PongMessage, RegisterMessage, RequestMessage, ResponseChunkMessage,
-    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type BoxError = Box<dyn Error + Send + Sync>;

@@ -1,6 +1,6 @@
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 use modelrelay_worker::{WorkerDaemon, WorkerDaemonConfig};
+use tracing_subscriber::EnvFilter;
 
 /// Remote LLM worker daemon.
 ///

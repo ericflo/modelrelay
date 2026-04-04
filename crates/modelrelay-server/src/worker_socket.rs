@@ -12,14 +12,14 @@ use axum::{
     },
     routing::get,
 };
-use serde::Deserialize;
-use subtle::ConstantTimeEq;
-use tokio::sync::Mutex;
-use tokio::time::{Duration, timeout};
 use modelrelay_protocol::{
     CancelMessage, CancelReason, GracefulShutdownMessage, ModelsUpdateMessage, PingMessage,
     PongMessage, ResponseChunkMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
+use serde::Deserialize;
+use subtle::ConstantTimeEq;
+use tokio::sync::Mutex;
+use tokio::time::{Duration, timeout};
 
 use crate::{
     GracefulShutdownDisconnectReason, GracefulShutdownSignal, ProxyServerCore, WorkerCancelSignal,

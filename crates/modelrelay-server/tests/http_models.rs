@@ -1,13 +1,15 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use modelrelay_server::{ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig};
+use modelrelay_protocol::{ModelsUpdateMessage, RegisterMessage};
+use modelrelay_server::{
+    ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig,
+};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Mutex,
 };
-use modelrelay_protocol::{ModelsUpdateMessage, RegisterMessage};
 
 async fn spawn_server() -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
