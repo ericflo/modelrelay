@@ -87,7 +87,7 @@ jobs:
           fi
         shell: bash
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.artifact_suffix }}
           path: dist/
