@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 /// This provides health checks and the admin monitoring dashboard for
 /// self-hosted deployments. The commercial `modelrelay-cloud` crate adds
 /// Stripe billing, user accounts, and its own routes on top.
-#[must_use]
 pub fn router() -> Router {
     Router::new()
         .route("/", get(landing))
