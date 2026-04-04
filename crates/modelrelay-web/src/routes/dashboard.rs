@@ -13,7 +13,12 @@ use crate::state::AppState;
 /// If user found: shows subscription status, API key, and billing portal link.
 pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Response {
     let Some(ref pool) = state.db else {
-        return Html(super::templates::page_shell("Dashboard", &no_db_html(), true)).into_response();
+        return Html(super::templates::page_shell(
+            "Dashboard",
+            &no_db_html(),
+            true,
+        ))
+        .into_response();
     };
 
     let user_id: Option<String> = session.get("user_id").await.unwrap_or(None);
@@ -40,7 +45,12 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
         Ok(None) => return Redirect::to("/login").into_response(),
         Err(e) => {
             tracing::error!("dashboard user query error: {e}");
-            return Html(super::templates::page_shell("Dashboard", "<div class=\"card\"><h2>Error</h2><p>Could not load your account. Please try again later.</p></div>", true)).into_response();
+            return Html(super::templates::page_shell(
+                "Dashboard",
+                "<div class=\"card\"><h2>Error</h2><p>Could not load your account. Please try again later.</p></div>",
+                true,
+            ))
+            .into_response();
         }
     };
 
@@ -68,7 +78,12 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
         has_stripe_customer,
         user.api_key.as_deref(),
     );
-    Html(super::templates::page_shell("Dashboard", &html, true)).into_response()
+    Html(super::templates::page_shell(
+        "Dashboard",
+        &html,
+        true,
+    ))
+    .into_response()
 }
 
 /// POST /dashboard/billing-portal — create a Stripe billing portal session and redirect.
@@ -315,4 +330,3 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#x27;")
 }
-

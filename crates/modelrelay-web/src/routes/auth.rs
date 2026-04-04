@@ -29,7 +29,12 @@ pub async fn signup_page(session: Session) -> Response {
     if let Ok(Some(_)) = session.get::<String>("user_id").await {
         return Redirect::to("/dashboard").into_response();
     }
-    Html(super::templates::page_shell("Sign Up", &signup_form_html(None), false)).into_response()
+    Html(super::templates::page_shell(
+        "Sign Up",
+        &signup_form_html(None),
+        false,
+    ))
+    .into_response()
 }
 
 /// POST /signup — create a new user account.
@@ -139,7 +144,12 @@ pub async fn login_page(session: Session) -> Response {
     if let Ok(Some(_)) = session.get::<String>("user_id").await {
         return Redirect::to("/dashboard").into_response();
     }
-    Html(super::templates::page_shell("Log In", &login_form_html(None), false)).into_response()
+    Html(super::templates::page_shell(
+        "Log In",
+        &login_form_html(None),
+        false,
+    ))
+    .into_response()
 }
 
 /// POST /login — verify credentials and set session.
