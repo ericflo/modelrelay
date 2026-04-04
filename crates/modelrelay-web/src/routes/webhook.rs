@@ -228,7 +228,7 @@ async fn handle_checkout_completed(
     .map_err(|e| format!("subscription upsert error: {e}"))?;
 
     // Provision API key via admin API
-    if let (Some(ref admin_url), Some(ref admin_token)) = (&state.admin_url, &state.admin_token) {
+    if let (Some(admin_url), Some(admin_token)) = (&state.admin_url, &state.admin_token) {
         let key_name = format!("user-{email}");
         match provision_api_key(admin_url, admin_token, &key_name).await {
             Ok((key_id, raw_key)) => {
@@ -323,9 +323,8 @@ async fn handle_subscription_deleted(
     .flatten();
 
     // Revoke the API key via admin API
-    if let Some(ref key_id) = api_key_id {
-        if let (Some(ref admin_url), Some(ref admin_token)) = (&state.admin_url, &state.admin_token)
-        {
+    if let Some(key_id) = &api_key_id {
+        if let (Some(admin_url), Some(admin_token)) = (&state.admin_url, &state.admin_token) {
             match revoke_api_key(admin_url, admin_token, key_id).await {
                 Ok(()) => {
                     tracing::info!("revoked API key {key_id} for subscription {sub_id}");
