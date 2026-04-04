@@ -252,6 +252,31 @@ fn signup_form_html(error: Option<&str>) -> String {
     )
 }
 
+fn login_form_html(error: Option<&str>) -> String {
+    let error_html = error
+        .map(|e| format!("<div class=\"error-msg\">{e}</div>"))
+        .unwrap_or_default();
+
+    format!(
+        r#"<div class="card">
+  <h2>Log In</h2>
+  {error_html}
+  <form method="POST" action="/login" class="auth-form">
+    <div class="form-group">
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required placeholder="you@example.com">
+    </div>
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required placeholder="Your password">
+    </div>
+    <button type="submit" class="btn">Log In</button>
+  </form>
+  <p class="auth-switch">Don't have an account? <a href="/signup">Sign up</a></p>
+</div>"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,29 +325,4 @@ mod tests {
         assert!(verify_password("", &hash));
         assert!(!verify_password("notempty", &hash));
     }
-}
-
-fn login_form_html(error: Option<&str>) -> String {
-    let error_html = error
-        .map(|e| format!("<div class=\"error-msg\">{e}</div>"))
-        .unwrap_or_default();
-
-    format!(
-        r#"<div class="card">
-  <h2>Log In</h2>
-  {error_html}
-  <form method="POST" action="/login" class="auth-form">
-    <div class="form-group">
-      <label for="email">Email</label>
-      <input type="email" id="email" name="email" required placeholder="you@example.com">
-    </div>
-    <div class="form-group">
-      <label for="password">Password</label>
-      <input type="password" id="password" name="password" required placeholder="Your password">
-    </div>
-    <button type="submit" class="btn">Log In</button>
-  </form>
-  <p class="auth-switch">Don't have an account? <a href="/signup">Sign up</a></p>
-</div>"#
-    )
 }
