@@ -1,6 +1,6 @@
 # worker-daemon
 
-Worker daemon that connects to the proxy server and forwards LLM inference requests to a local backend (llama-server, Ollama, vLLM, etc.). Part of the [llm-worker-proxy](https://github.com/ericflo/llm-worker-proxy) system.
+Worker daemon that connects to the proxy server and forwards LLM inference requests to a local backend (llama-server, Ollama, vLLM, etc.). Part of the [ModelRelay](https://github.com/ericflo/modelrelay) system.
 
 ## Install
 
@@ -8,7 +8,7 @@ Worker daemon that connects to the proxy server and forwards LLM inference reque
 cargo install worker-daemon
 ```
 
-Or download pre-built binaries from [GitHub Releases](https://github.com/ericflo/llm-worker-proxy/releases).
+Or download pre-built binaries from [GitHub Releases](https://github.com/ericflo/modelrelay/releases).
 
 ## Usage
 
@@ -22,7 +22,7 @@ worker-daemon \
 
 The worker connects out to the proxy over WebSocket, so no inbound ports are needed on the GPU box.
 
-See the [main repository](https://github.com/ericflo/llm-worker-proxy) for full documentation, configuration options, and quickstart guides.
+See the [main repository](https://github.com/ericflo/modelrelay) for full documentation, configuration options, and quickstart guides.
 
 ## License
 

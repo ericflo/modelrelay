@@ -24,4 +24,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform release binaries (Linux x86_64/aarch64, macOS x86_64/aarch64) via GitHub Actions.
 - CI pipeline with formatting, linting, and test checks.
 
-[0.1.0]: https://github.com/ericflo/llm-worker-proxy/releases/tag/v0.1.0
+[0.1.0]: https://github.com/ericflo/modelrelay/releases/tag/v0.1.0
