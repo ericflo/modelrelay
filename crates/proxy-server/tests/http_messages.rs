@@ -1158,3 +1158,92 @@ async fn worker_backed_messages_route_returns_sanitized_requeue_exhaustion_error
         "the client boundary should not expose the raw requeue exhaustion reason"
     );
 }
+
+#[tokio::test]
+async fn worker_backed_messages_route_oversized_stream_emits_sse_error_and_terminates() {
+    let addr = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"claude-3-5-sonnet-20241022","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"overflow"}]}"#;
+    let mut http_stream = open_messages_request(
+        addr,
+        body,
+        &[
+            ("x-api-key", "test-anthropic-key"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+    )
+    .await;
+
+    let ServerToWorkerMessage::Request(request) =
+        next_server_message(&mut socket, "oversized streaming worker request").await
+    else {
+        panic!("expected oversized streaming worker request message");
+    };
+
+    send_response_chunk(
+        &mut socket,
+        &request.request_id,
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+    )
+    .await;
+
+    let first_fragment = read_until_contains(
+        &mut http_stream,
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+    )
+    .await;
+    assert!(first_fragment.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(first_fragment.contains("\r\ncontent-type: text/event-stream\r\n"));
+
+    let oversized_marker = "oversized-boundary-".repeat(4_200);
+    let oversized_chunk = format!(
+        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"text_delta\",\"text\":\"{oversized_marker}\"}}}}\n\n"
+    );
+    send_response_chunk(&mut socket, &request.request_id, &oversized_chunk).await;
+
+    let rest = timeout(
+        std::time::Duration::from_secs(2),
+        read_http_response(&mut http_stream),
+    )
+    .await
+    .expect("oversized streaming response should terminate before timeout");
+    let full_response = first_fragment + &rest;
+
+    assert!(
+        full_response.contains(
+            "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":\"stream exceeded size limit\"}}\n\n"
+        ),
+        "oversized streams should terminate with the contract SSE error"
+    );
+    assert!(
+        !full_response.contains(&oversized_marker),
+        "the oversized chunk should not be forwarded to the HTTP client"
+    );
+    assert!(
+        !full_response.contains("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+        "oversized termination should close the HTTP stream before late completion chunks arrive"
+    );
+    assert!(
+        !full_response.contains("\"id\":\"msg-late\""),
+        "late completion metadata should not be forwarded after oversized termination"
+    );
+    assert!(full_response.ends_with("0\r\n\r\n"));
+
+    send_response_complete(
+        &mut socket,
+        &request.request_id,
+        "gpu-box-a",
+        r#"{"id":"msg-late","type":"message","role":"assistant","content":[]}"#,
+    )
+    .await;
+    send_response_chunk(
+        &mut socket,
+        &request.request_id,
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    )
+    .await;
+}
