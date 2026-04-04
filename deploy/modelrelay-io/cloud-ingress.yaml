@@ -1,7 +1,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: web
+  name: cloud
   namespace: modelrelay
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
@@ -23,7 +23,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: web
+                name: cloud
                 port:
                   number: 8000
     - host: www.modelrelay.io
@@ -33,6 +33,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: web
+                name: cloud
                 port:
                   number: 8000

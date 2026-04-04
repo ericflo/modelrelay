@@ -1,8 +1,8 @@
 use sqlx::PgPool;
 
-/// Shared application state available to all route handlers.
+/// Shared application state for the commercial ModelRelay cloud service.
 #[derive(Clone)]
-pub struct AppState {
+pub struct CloudState {
     /// `PostgreSQL` pool — `None` when `DATABASE_URL` is not set.
     pub db: Option<PgPool>,
     /// Stripe secret key — `None` when `STRIPE_SECRET_KEY` is not set.

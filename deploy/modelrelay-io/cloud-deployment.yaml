@@ -1,27 +1,27 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: web
+  name: cloud
   namespace: modelrelay
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: web
+      app: cloud
   template:
     metadata:
       labels:
-        app: web
+        app: cloud
     spec:
       terminationGracePeriodSeconds: 10
       containers:
-        - name: web
-          image: ghcr.io/ericflo/modelrelay/modelrelay-web:latest
+        - name: cloud
+          image: ghcr.io/ericflo/modelrelay/modelrelay-cloud:latest
           ports:
             - containerPort: 8000
           envFrom:
             - secretRef:
-                name: modelrelay-web
+                name: modelrelay-cloud
           resources:
             requests:
               memory: "256Mi"

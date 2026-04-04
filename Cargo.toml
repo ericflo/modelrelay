@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/modelrelay-cloud",
     "crates/modelrelay-contract-tests",
     "crates/modelrelay-protocol",
     "crates/modelrelay-server",

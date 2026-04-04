@@ -4,16 +4,16 @@ use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use tower_sessions::Session;
 
-use crate::state::AppState;
+use crate::state::CloudState;
 
 /// GET /dashboard — show subscription status and API key info.
 ///
 /// Reads `user_id` from the session (set during checkout success).
 /// If no session or user: prompts to subscribe.
 /// If user found: shows subscription status, API key, and billing portal link.
-pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Response {
+pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let Some(ref pool) = state.db else {
-        return Html(super::templates::page_shell(
+        return Html(modelrelay_web::templates::page_shell(
             "Dashboard",
             &no_db_html(),
             true,
@@ -45,7 +45,7 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
         Ok(None) => return Redirect::to("/login").into_response(),
         Err(e) => {
             tracing::error!("dashboard user query error: {e}");
-            return Html(super::templates::page_shell(
+            return Html(modelrelay_web::templates::page_shell(
                 "Dashboard",
                 "<div class=\"card\"><h2>Error</h2><p>Could not load your account. Please try again later.</p></div>",
                 true,
@@ -78,11 +78,11 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
         has_stripe_customer,
         user.api_key.as_deref(),
     );
-    Html(super::templates::page_shell("Dashboard", &html, true)).into_response()
+    Html(modelrelay_web::templates::page_shell("Dashboard", &html, true)).into_response()
 }
 
 /// POST /dashboard/billing-portal — create a Stripe billing portal session and redirect.
-pub async fn billing_portal(session: Session, State(state): State<Arc<AppState>>) -> Response {
+pub async fn billing_portal(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let Some(ref key) = state.stripe_key else {
         return Html(
             "<h1>Billing not configured</h1><p><a href=\"/dashboard\">&larr; Back</a></p>",
@@ -117,7 +117,7 @@ pub async fn billing_portal(session: Session, State(state): State<Arc<AppState>>
             .flatten();
 
     let Some(customer_id) = customer_id else {
-        return Html(super::templates::page_shell(
+        return Html(modelrelay_web::templates::page_shell(
             "Error",
             "<div class=\"card\"><h2>No billing account</h2>\
              <p>No Stripe customer found for your account.</p>\

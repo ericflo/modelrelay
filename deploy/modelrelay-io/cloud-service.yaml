@@ -1,11 +1,11 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: web
+  name: cloud
   namespace: modelrelay
 spec:
   selector:
-    app: web
+    app: cloud
   ports:
     - port: 8000
       targetPort: 8000

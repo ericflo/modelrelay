@@ -1,4 +1,4 @@
-/// Shared HTML page shell used by auth and dashboard routes.
+/// Shared HTML page shell used by the admin dashboard and commercial cloud routes.
 ///
 /// `logged_in` controls the nav links: when `true`, shows Dashboard + Pricing + Log out;
 /// when `false`, shows Dashboard + Pricing only (login/signup are reached via their own pages).

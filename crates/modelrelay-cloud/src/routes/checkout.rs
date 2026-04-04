@@ -5,14 +5,14 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use tower_sessions::Session;
 
-use crate::state::AppState;
+use crate::state::CloudState;
 
 static CANCEL_HTML: &str = include_str!("../../templates/checkout_cancel.html");
 
 /// POST /checkout — create a Stripe Checkout Session and redirect to Stripe.
 ///
 /// If the user is logged in, pre-fills their email in the checkout session.
-pub async fn create(session: Session, State(state): State<Arc<AppState>>) -> Response {
+pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let Some(ref key) = state.stripe_key else {
         return Html(
             "<h1>Billing not configured yet</h1>\
@@ -121,7 +121,7 @@ pub struct SuccessQuery {
 pub async fn success(
     session: Session,
     Query(query): Query<SuccessQuery>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<CloudState>>,
 ) -> Response {
     // Try to identify the user from the Stripe session and set a cookie session
     if let (Some(session_id), Some(key), Some(pool)) =

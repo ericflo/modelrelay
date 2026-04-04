@@ -8,7 +8,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use sqlx::PgPool;
 
-use crate::state::AppState;
+use crate::state::CloudState;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -17,7 +17,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// Verifies the `Stripe-Signature` header using HMAC-SHA256, then dispatches
 /// on the event type.
 pub async fn handle(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<CloudState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -78,10 +78,6 @@ pub async fn handle(
 }
 
 /// Verify the Stripe webhook signature (v1 scheme).
-///
-/// The `Stripe-Signature` header contains `t=<timestamp>,v1=<signature>,...`.
-/// We compute `HMAC-SHA256("{timestamp}.{payload}", secret)` and compare to the
-/// provided `v1` signature.
 fn verify_signature(sig_header: &str, payload: &[u8], secret: &str) -> Result<(), String> {
     let mut timestamp = None;
     let mut signatures = Vec::new();
@@ -125,8 +121,6 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// Call `POST {admin_url}/admin/keys` to provision a new API key.
-///
-/// Returns `(key_id, raw_key)` on success.
 async fn provision_api_key(
     admin_url: &str,
     admin_token: &str,
@@ -188,7 +182,7 @@ async fn revoke_api_key(admin_url: &str, admin_token: &str, key_id: &str) -> Res
 /// `checkout.session.completed` — create or find user by email, upsert subscription,
 /// and provision an API key via the admin API.
 async fn handle_checkout_completed(
-    state: &AppState,
+    state: &CloudState,
     pool: &PgPool,
     payload: &serde_json::Value,
 ) -> Result<(), String> {
@@ -232,7 +226,6 @@ async fn handle_checkout_completed(
         let key_name = format!("user-{email}");
         match provision_api_key(admin_url, admin_token, &key_name).await {
             Ok((key_id, raw_key)) => {
-                // Store key_id in subscriptions and raw key in users
                 sqlx::query(
                     "UPDATE subscriptions SET api_key_id = $1, updated_at = now() \
                      WHERE stripe_subscription_id = $2",
@@ -255,8 +248,6 @@ async fn handle_checkout_completed(
                 );
             }
             Err(e) => {
-                // Log but don't fail the webhook — subscription is still active,
-                // key can be provisioned on a retry or manually.
                 tracing::error!(
                     "failed to provision API key for user={email}: {e} — subscription is active but key is missing"
                 );
@@ -303,7 +294,7 @@ async fn handle_subscription_updated(
 
 /// `customer.subscription.deleted` — mark subscription as canceled and revoke API key.
 async fn handle_subscription_deleted(
-    state: &AppState,
+    state: &CloudState,
     pool: &PgPool,
     payload: &serde_json::Value,
 ) -> Result<(), String> {
@@ -312,7 +303,6 @@ async fn handle_subscription_deleted(
         .as_str()
         .ok_or("subscription.deleted: no subscription ID")?;
 
-    // Look up the api_key_id before we update the subscription
     let api_key_id: Option<String> = sqlx::query_scalar(
         "SELECT api_key_id FROM subscriptions WHERE stripe_subscription_id = $1",
     )
@@ -322,7 +312,6 @@ async fn handle_subscription_deleted(
     .map_err(|e| format!("subscription lookup error: {e}"))?
     .flatten();
 
-    // Revoke the API key via admin API
     if let Some(key_id) = &api_key_id {
         if let (Some(admin_url), Some(admin_token)) = (&state.admin_url, &state.admin_token) {
             match revoke_api_key(admin_url, admin_token, key_id).await {
@@ -340,7 +329,6 @@ async fn handle_subscription_deleted(
         }
     }
 
-    // Clear the api_key_id and the user's stored key
     let rows = sqlx::query(
         "UPDATE subscriptions SET status = 'canceled', api_key_id = NULL, updated_at = now() \
          WHERE stripe_subscription_id = $1",
@@ -351,7 +339,6 @@ async fn handle_subscription_deleted(
     .map_err(|e| format!("subscription delete error: {e}"))?
     .rows_affected();
 
-    // Also clear the stored raw API key from the user
     sqlx::query(
         "UPDATE users SET api_key = NULL WHERE id = (\
          SELECT user_id FROM subscriptions WHERE stripe_subscription_id = $1)",
