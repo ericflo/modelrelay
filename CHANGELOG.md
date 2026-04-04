@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-04-04
+
+### Added
+
+- Shell completion generation via `--completions <SHELL>` flag on both `modelrelay-server` and `modelrelay-worker` (bash, zsh, fish, PowerShell, elvish)
+- Windows Service setup scripts: `extras/install-windows-service.ps1` and `extras/install-windows-service-worker.ps1`
+- Timeout and queue-full wire traces in `docs/protocol-walkthrough.md`
+
+### Changed
+
+- README documents shell completion installation for all supported shells
+- README documents Windows Service installation with `sc.exe`
+
+### Fixed
+
+- Bumped docker/metadata-action, docker/build-push-action, actions/download-artifact to latest major versions (dependabot)
+
 ## [0.1.2] - 2026-04-04
 
 ### Added
@@ -65,7 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform release binaries (Linux x86_64/aarch64, macOS x86_64/aarch64) via GitHub Actions.
 - CI pipeline with formatting, linting, and test checks.
 
-[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/ericflo/modelrelay/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/ericflo/modelrelay/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ericflo/modelrelay/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ericflo/modelrelay/releases/tag/v0.1.0
