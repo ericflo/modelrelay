@@ -31,9 +31,12 @@ pub async fn create(State(state): State<Arc<AppState>>) -> Response {
     let client = reqwest::Client::new();
     let params = [
         ("mode", "subscription"),
-        ("success_url", "https://modelrelay.io/checkout/success?session_id={CHECKOUT_SESSION_ID}"),
+        (
+            "success_url",
+            "https://modelrelay.io/checkout/success?session_id={CHECKOUT_SESSION_ID}",
+        ),
         ("cancel_url", "https://modelrelay.io/checkout/cancel"),
-        ("line_items[0][price]", &price_id),
+        ("line_items[0][price]", &*price_id),
         ("line_items[0][quantity]", "1"),
     ];
 
@@ -45,22 +48,20 @@ pub async fn create(State(state): State<Arc<AppState>>) -> Response {
         .await;
 
     match resp {
-        Ok(r) if r.status().is_success() => {
-            match r.json::<serde_json::Value>().await {
-                Ok(body) => {
-                    if let Some(url) = body["url"].as_str() {
-                        Redirect::to(url).into_response()
-                    } else {
-                        Html("<h1>Error</h1><p>Stripe did not return a checkout URL.</p>")
-                            .into_response()
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("stripe response parse error: {e}");
-                    Html("<h1>Error</h1><p>Could not process Stripe response.</p>").into_response()
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(body) => {
+                if let Some(url) = body["url"].as_str() {
+                    Redirect::to(url).into_response()
+                } else {
+                    Html("<h1>Error</h1><p>Stripe did not return a checkout URL.</p>")
+                        .into_response()
                 }
             }
-        }
+            Err(e) => {
+                tracing::error!("stripe response parse error: {e}");
+                Html("<h1>Error</h1><p>Could not process Stripe response.</p>").into_response()
+            }
+        },
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
