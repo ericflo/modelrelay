@@ -29,8 +29,8 @@ To build release binaries:
 
 ```bash
 cargo build --release
-# target/release/proxy-server
-# target/release/worker-daemon
+# target/release/modelrelay-server
+# target/release/modelrelay-worker
 ```
 
 ## Rust toolchain
@@ -44,7 +44,7 @@ Use the `ce/` prefix for agent-generated branches. Human contributors can use an
 ## PR expectations
 
 - **One logical change per PR.** Large changes are harder to review and easier to revert; prefer small focused PRs.
-- **Tests required for new behavior.** Protocol semantics, routing logic, cancellation paths, and error surfaces should each have a test. See `crates/proxy-contract-tests/` for integration test examples.
+- **Tests required for new behavior.** Protocol semantics, routing logic, cancellation paths, and error surfaces should each have a test. See `crates/modelrelay-contract-tests/` for integration test examples.
 - **Formatting and lints must pass.** Run `cargo fmt` and `cargo clippy -- -D warnings` before pushing.
 - **Keep the description brief and honest.** Say what changed and why.
 
@@ -52,10 +52,10 @@ Use the `ce/` prefix for agent-generated branches. Human contributors can use an
 
 ```
 crates/
-  proxy-server/        Central HTTP server — request intake, queueing, routing
-  worker-daemon/       Worker side — connects to proxy, forwards to local backend
-  worker-protocol/     Shared WebSocket message types
-  proxy-contract-tests/  Integration tests for the full server+worker stack
+  modelrelay-server/           Central HTTP server — request intake, queueing, routing
+  modelrelay-worker/           Worker side — connects to proxy, forwards to local backend
+  modelrelay-protocol/         Shared WebSocket message types
+  modelrelay-contract-tests/   Integration tests for the full server+worker stack
 examples/              Shell scripts showing realistic startup sequences
 ```
 
@@ -64,13 +64,13 @@ examples/              Shell scripts showing realistic startup sequences
 The contract tests spin up a real proxy server and worker in-process:
 
 ```bash
-cargo +1.94.1 test --package proxy-contract-tests
+cargo +1.94.1 test --package modelrelay-contract-tests
 ```
 
 Individual tests can be filtered with `-- <pattern>`:
 
 ```bash
-cargo +1.94.1 test --package proxy-contract-tests -- streaming
+cargo +1.94.1 test --package modelrelay-contract-tests -- streaming
 ```
 
 ## License
