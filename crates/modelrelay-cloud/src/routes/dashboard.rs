@@ -317,6 +317,7 @@ fn dashboard_html(
        <h2>Usage</h2>\
        <p style=\"margin-top:8px;\"><span class=\"badge\">Coming Soon</span></p>\
        <p style=\"margin-top:12px;color:#8b949e;\">Request counts, connected workers, and usage statistics will be available here once the admin API is connected.</p>\
+       <p style=\"margin-top:12px;\"><a href=\"/admin/dashboard\">Open Admin Dashboard &rarr;</a></p>\
      </div>";
 
     format!("{sub_card}\n{api_key_card}\n{usage_card}")
