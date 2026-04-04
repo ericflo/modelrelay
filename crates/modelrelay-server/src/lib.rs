@@ -10,7 +10,7 @@ use modelrelay_protocol::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub use http::ProxyHttpApp;
+pub use http::{ApiKeyMetadata, ApiKeyStore, ProxyHttpApp};
 pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
 
 const MAX_REQUEUE_COUNT: usize = 3;
