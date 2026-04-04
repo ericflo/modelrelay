@@ -356,6 +356,30 @@ async fn handle_subscription_deleted(
     Ok(())
 }
 
+/// `invoice.payment_failed` — mark subscription as `past_due`.
+async fn handle_payment_failed(pool: &PgPool, payload: &serde_json::Value) -> Result<(), String> {
+    let obj = &payload["data"]["object"];
+    let sub_id = obj["subscription"]
+        .as_str()
+        .ok_or("invoice.payment_failed: no subscription ID")?;
+
+    let rows = sqlx::query(
+        "UPDATE subscriptions SET status = 'past_due', updated_at = now() WHERE stripe_subscription_id = $1",
+    )
+    .bind(sub_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("payment failed update error: {e}"))?
+    .rows_affected();
+
+    if rows == 0 {
+        tracing::warn!("invoice.payment_failed: no matching subscription for {sub_id}");
+    } else {
+        tracing::info!("payment failed: {sub_id} -> past_due");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,7 +433,6 @@ mod tests {
         let payload = b"{\"type\":\"checkout.session.completed\"}";
         let ts = "1700000000";
         let sig = compute_sig(secret, ts, payload);
-        // Stripe sometimes sends v0= along with v1=
         let header = format!("t={ts},v0=ignored,v1={sig}");
         assert!(verify_signature(&header, payload, secret).is_ok());
     }
@@ -432,28 +455,4 @@ mod tests {
         assert!(!constant_time_eq("", "a"));
         assert!(constant_time_eq("", ""));
     }
-}
-
-/// `invoice.payment_failed` — mark subscription as `past_due`.
-async fn handle_payment_failed(pool: &PgPool, payload: &serde_json::Value) -> Result<(), String> {
-    let obj = &payload["data"]["object"];
-    let sub_id = obj["subscription"]
-        .as_str()
-        .ok_or("invoice.payment_failed: no subscription ID")?;
-
-    let rows = sqlx::query(
-        "UPDATE subscriptions SET status = 'past_due', updated_at = now() WHERE stripe_subscription_id = $1",
-    )
-    .bind(sub_id)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("payment failed update error: {e}"))?
-    .rows_affected();
-
-    if rows == 0 {
-        tracing::warn!("invoice.payment_failed: no matching subscription for {sub_id}");
-    } else {
-        tracing::info!("payment failed: {sub_id} -> past_due");
-    }
-    Ok(())
 }

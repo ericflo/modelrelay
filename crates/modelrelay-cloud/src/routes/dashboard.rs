@@ -323,6 +323,15 @@ fn dashboard_html(
     format!("{sub_card}\n{api_key_card}\n{usage_card}")
 }
 
+/// Minimal HTML entity escaping for untrusted strings.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,13 +386,4 @@ mod tests {
         assert!(status_badge("canceled").contains("badge-cancel"));
         assert!(status_badge("unknown_status").contains("Unknown"));
     }
-}
-
-/// Minimal HTML entity escaping for untrusted strings.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
 }
