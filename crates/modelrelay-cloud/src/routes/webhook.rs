@@ -356,6 +356,88 @@ async fn handle_subscription_deleted(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a valid Stripe-style signature header for the given payload and secret.
+    fn make_sig_header(payload: &[u8], secret: &str, timestamp: &str) -> String {
+        let signed = format!("{timestamp}.{}", String::from_utf8_lossy(payload));
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key creation failed");
+        mac.update(signed.as_bytes());
+        let sig = hex::encode(mac.finalize().into_bytes());
+        format!("t={timestamp},v1={sig}")
+    }
+
+    #[test]
+    fn verify_signature_valid() {
+        let secret = "whsec_test_secret";
+        let payload = b"{\"type\":\"checkout.session.completed\"}";
+        let header = make_sig_header(payload, secret, "1234567890");
+        assert!(verify_signature(&header, payload, secret).is_ok());
+    }
+
+    #[test]
+    fn verify_signature_wrong_secret() {
+        let payload = b"{\"type\":\"test\"}";
+        let header = make_sig_header(payload, "correct_secret", "1234567890");
+        let result = verify_signature(&header, payload, "wrong_secret");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("signature mismatch"));
+    }
+
+    #[test]
+    fn verify_signature_wrong_payload() {
+        let secret = "whsec_test";
+        let payload = b"original payload";
+        let header = make_sig_header(payload, secret, "1234567890");
+        let result = verify_signature(&header, b"tampered payload", secret);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("signature mismatch"));
+    }
+
+    #[test]
+    fn verify_signature_missing_timestamp() {
+        let result = verify_signature("v1=abcdef1234567890", b"payload", "secret");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing timestamp"));
+    }
+
+    #[test]
+    fn verify_signature_missing_v1() {
+        let result = verify_signature("t=1234567890", b"payload", "secret");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no v1 signature"));
+    }
+
+    #[test]
+    fn verify_signature_multiple_v1_one_valid() {
+        let secret = "whsec_multi";
+        let payload = b"test body";
+        let header_valid = make_sig_header(payload, secret, "999");
+        // Extract the valid v1= value
+        let valid_sig = header_valid.split("v1=").nth(1).unwrap();
+        let header = format!("t=999,v1=0000000000000000000000000000000000000000000000000000000000000000,v1={valid_sig}");
+        assert!(verify_signature(&header, payload, secret).is_ok());
+    }
+
+    #[test]
+    fn constant_time_eq_same() {
+        assert!(constant_time_eq("abc", "abc"));
+    }
+
+    #[test]
+    fn constant_time_eq_different() {
+        assert!(!constant_time_eq("abc", "abd"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq("abc", "abcd"));
+    }
+}
+
 /// `invoice.payment_failed` — mark subscription as `past_due`.
 async fn handle_payment_failed(pool: &PgPool, payload: &serde_json::Value) -> Result<(), String> {
     let obj = &payload["data"]["object"];

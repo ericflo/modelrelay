@@ -252,6 +252,59 @@ fn signup_form_html(error: Option<&str>) -> String {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_and_verify_round_trip() {
+        let password = "secure_password_123!";
+        let hash = hash_password(password).expect("hash_password should succeed");
+        assert!(
+            verify_password(password, &hash),
+            "verify_password should accept the correct password"
+        );
+    }
+
+    #[test]
+    fn verify_wrong_password_rejected() {
+        let hash = hash_password("correct_horse_battery_staple").expect("hash should succeed");
+        assert!(
+            !verify_password("wrong_password", &hash),
+            "verify_password should reject the wrong password"
+        );
+    }
+
+    #[test]
+    fn hash_produces_different_hashes_for_same_password() {
+        let password = "same_password";
+        let hash1 = hash_password(password).expect("hash1 should succeed");
+        let hash2 = hash_password(password).expect("hash2 should succeed");
+        assert_ne!(
+            hash1, hash2,
+            "hashes should differ due to random salt"
+        );
+        // But both should verify
+        assert!(verify_password(password, &hash1));
+        assert!(verify_password(password, &hash2));
+    }
+
+    #[test]
+    fn verify_with_invalid_hash_returns_false() {
+        assert!(
+            !verify_password("anything", "not_a_valid_argon2_hash"),
+            "invalid hash format should return false, not panic"
+        );
+    }
+
+    #[test]
+    fn hash_empty_password() {
+        let hash = hash_password("").expect("hashing empty password should succeed");
+        assert!(verify_password("", &hash));
+        assert!(!verify_password("notempty", &hash));
+    }
+}
+
 fn login_form_html(error: Option<&str>) -> String {
     let error_html = error
         .map(|e| format!("<div class=\"error-msg\">{e}</div>"))

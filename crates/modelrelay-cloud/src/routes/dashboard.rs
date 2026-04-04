@@ -323,6 +323,67 @@ fn dashboard_html(
     format!("{sub_card}\n{api_key_card}\n{usage_card}")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_escape_ampersand() {
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn html_escape_less_than() {
+        assert_eq!(html_escape("<script>"), "&lt;script&gt;");
+    }
+
+    #[test]
+    fn html_escape_greater_than() {
+        assert_eq!(html_escape("a>b"), "a&gt;b");
+    }
+
+    #[test]
+    fn html_escape_double_quote() {
+        assert_eq!(html_escape("a\"b"), "a&quot;b");
+    }
+
+    #[test]
+    fn html_escape_single_quote() {
+        assert_eq!(html_escape("a'b"), "a&#x27;b");
+    }
+
+    #[test]
+    fn html_escape_all_special_chars() {
+        assert_eq!(
+            html_escape("<script>alert(\"xss\")&foo='bar'</script>"),
+            "&lt;script&gt;alert(&quot;xss&quot;)&amp;foo=&#x27;bar&#x27;&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn html_escape_no_special_chars() {
+        assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn html_escape_empty_string() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    fn status_badge_known_statuses() {
+        assert!(status_badge("active").contains("badge-active"));
+        assert!(status_badge("past_due").contains("badge-warn"));
+        assert!(status_badge("canceled").contains("badge-cancel"));
+        assert!(status_badge("incomplete").contains("badge"));
+    }
+
+    #[test]
+    fn status_badge_unknown() {
+        assert!(status_badge("something_else").contains("Unknown"));
+    }
+}
+
 /// Minimal HTML entity escaping for untrusted strings.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
