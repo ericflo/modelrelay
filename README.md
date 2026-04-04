@@ -45,14 +45,40 @@ You have GPU boxes running `llama-server` (or Ollama, or vLLM, or anything OpenA
 
 ## Quickstart
 
-### With Docker Compose (easiest)
+### Docker (recommended)
+
+Pre-built images are published to GitHub Container Registry on every release and main push.
+
+```bash
+# Pull the latest images
+docker pull ghcr.io/ericflo/llm-worker-proxy/proxy-server:latest
+docker pull ghcr.io/ericflo/llm-worker-proxy/worker-daemon:latest
+
+# Run the proxy
+docker run -p 8080:8080 \
+  -e WORKER_SECRET=mysecret \
+  -e LISTEN_ADDR=0.0.0.0:8080 \
+  ghcr.io/ericflo/llm-worker-proxy/proxy-server:latest
+
+# Run a worker (on a GPU box)
+docker run \
+  -e PROXY_URL=http://<proxy-host>:8080 \
+  -e WORKER_SECRET=mysecret \
+  -e BACKEND_URL=http://host.docker.internal:8000 \
+  -e MODELS=llama3.2:3b \
+  ghcr.io/ericflo/llm-worker-proxy/worker-daemon:latest
+```
+
+For pinned versions, replace `:latest` with a release tag (e.g. `:0.1.0`).
+
+### With Docker Compose (easiest for local dev)
 
 ```bash
 git clone https://github.com/ericflo/llm-worker-proxy.git
 cd llm-worker-proxy
 
 # Start the proxy + one worker (assumes llama-server on host port 8081)
-docker compose up --build
+docker compose up
 ```
 
 The proxy is now listening on `http://localhost:8080`. The worker connects to it automatically and forwards requests to your backend.

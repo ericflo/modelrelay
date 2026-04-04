@@ -9,8 +9,9 @@
 
 services:
   proxy:
-    build: .
-    command: ["proxy-server"]
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
     ports:
       - "8080:8080"
     environment:
@@ -21,8 +22,9 @@ services:
       RUST_LOG: "info"
 
   worker:
-    build: .
-    command: ["worker-daemon"]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
     depends_on:
       - proxy
     environment:
