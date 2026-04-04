@@ -234,10 +234,24 @@ sudo systemctl enable --now worker-daemon@gpu0
 
 See [`extras/`](extras/) for the full service files and annotated env examples.
 
+### TLS
+
+The proxy and workers communicate over plain HTTP/WebSocket by default. For production, terminate TLS at a reverse proxy like nginx. An annotated configuration is provided at [`examples/tls-nginx.conf`](examples/tls-nginx.conf) — it handles HTTPS for client requests and `wss://` WebSocket upgrades for workers, with streaming-friendly settings (buffering disabled, long timeouts).
+
+### Load Testing
+
+A ready-made load test script lives at [`extras/load-test.sh`](extras/load-test.sh). It uses `hey` if installed, falls back to `wrk`, and finally to parallel `curl` loops:
+
+```bash
+./extras/load-test.sh -n 200 -c 20 -m llama3-8b
+```
+
 ## Documents
 
 - [Behavior contract](docs/behavior-contract.md) — the full specification of proxy, queue, streaming, and cancellation semantics
 - [Architecture sketch](docs/architecture.md) — how the pieces fit together internally
+- [Protocol walkthrough](docs/protocol-walkthrough.md) — ASCII wire traces for every message flow
+- [Operational runbook](docs/runbook.md) — health checks, draining, scaling, troubleshooting
 
 ## Validation
 
