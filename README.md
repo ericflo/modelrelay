@@ -1,7 +1,7 @@
 [![CI](https://github.com/ericflo/modelrelay/actions/workflows/ci.yml/badge.svg)](https://github.com/ericflo/modelrelay/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/ericflo/modelrelay)](https://github.com/ericflo/modelrelay/releases/latest)
 [![Coverage](https://codecov.io/gh/ericflo/modelrelay/branch/main/graph/badge.svg)](https://codecov.io/gh/ericflo/modelrelay)
-[![crates.io](https://img.shields.io/badge/crates.io-coming%20soon-orange)](https://crates.io/crates/modelrelay-protocol)
+[![crates.io](https://img.shields.io/crates/v/modelrelay-protocol)](https://crates.io/crates/modelrelay-protocol)
 [![Minimum Rust Version](https://img.shields.io/badge/rustc-1.94+-orange.svg)](rust-toolchain.toml)
 [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://ericflo.github.io/modelrelay/)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
