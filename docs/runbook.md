@@ -10,17 +10,34 @@ more `modelrelay-worker` processes.
 
 ### Proxy Server
 
-The proxy server exposes standard HTTP endpoints.  A simple health
-probe:
+The proxy server exposes a dedicated `/health` endpoint:
 
 ```bash
-# Quick liveness check — any 2xx/4xx means the process is up.
-curl -sf http://proxy:8080/v1/models && echo "OK"
+# Primary health check — returns JSON with version, worker count, queue depth, and uptime.
+curl -sf http://proxy:8080/health | jq .
 ```
 
-`/v1/models` returns the list of models currently routable through
-connected workers.  An empty `data` array means the proxy is running but
+Example response:
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.6",
+  "workers_connected": 2,
+  "queue_depth": 0,
+  "uptime_secs": 3621.5
+}
+```
+
+Use `/health` for liveness probes, Kubernetes readiness checks, and
+monitoring.  A `workers_connected` of 0 means the proxy is running but
 no workers are registered.
+
+You can also list routable models directly:
+
+```bash
+curl -s http://proxy:8080/v1/models | jq '.data[].id'
+```
 
 ### Worker Daemon
 
@@ -337,9 +354,9 @@ The worker completes in-flight requests before exiting, identical to the
 
 For production deployments, monitor these signals:
 
-- [ ] **Proxy process is up** — HTTP health check on `/v1/models`
-- [ ] **At least one worker registered** — `/v1/models` returns non-empty `data`
-- [ ] **Queue depth** — watch for sustained queue growth (log `queue full` errors)
+- [ ] **Proxy process is up** — HTTP health check on `/health`
+- [ ] **At least one worker registered** — `/health` returns `workers_connected > 0`
+- [ ] **Queue depth** — `/health` returns `queue_depth`; watch for sustained growth
 - [ ] **Request latency** — track time from client request to first byte
 - [ ] **Worker reconnect rate** — frequent reconnects indicate network or auth issues
 - [ ] **Error rates** — 4xx (client errors) vs 5xx (backend/proxy errors)
