@@ -383,7 +383,8 @@ mod tests {
         let secret = "whsec_test_secret";
         let payload = b"{}";
         let ts = "1700000000";
-        let header = format!("t={ts},v1=badbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbad");
+        let header =
+            format!("t={ts},v1=badbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbad");
         let err = verify_signature(&header, payload, secret).unwrap_err();
         assert!(err.contains("signature mismatch"), "got: {err}");
     }
