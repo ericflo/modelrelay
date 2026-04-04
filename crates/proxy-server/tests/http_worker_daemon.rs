@@ -1458,3 +1458,45 @@ async fn worker_daemon_cancels_backend_request_when_http_client_disconnects() {
 
     daemon_handle.abort();
 }
+
+#[tokio::test]
+async fn worker_daemon_run_with_reconnect_exits_cleanly_after_proxy_graceful_shutdown() {
+    let (proxy_addr, core) = spawn_proxy_server("openai").await;
+
+    let (backend_addr, _backend_rx) = spawn_mock_backend().await;
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-reconnect-test".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    // run_with_reconnect loops over run_session. If run_session returns Ok(true)
+    // (proxy sent GracefulShutdown before closing), it exits rather than reconnecting.
+    let daemon_handle = tokio::spawn(async move { daemon.run_with_reconnect().await });
+
+    // Wait until the daemon has registered its model with the proxy.
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    // Trigger proxy-side graceful shutdown — the socket handler sends a GracefulShutdown
+    // message to the daemon on the next loop tick (≤25 ms) and then closes the socket
+    // once the daemon is idle.
+    {
+        let mut core = core.lock().await;
+        core.begin_graceful_shutdown(Some("test graceful shutdown"), Duration::from_secs(5));
+    }
+
+    // run_with_reconnect must exit cleanly (Ok(())) within a short timeout, not loop forever.
+    let join_result = timeout(Duration::from_secs(5), daemon_handle)
+        .await
+        .expect("daemon task did not exit within 5 s after proxy graceful shutdown")
+        .expect("daemon task should not panic");
+
+    assert!(
+        join_result.is_ok(),
+        "run_with_reconnect should return Ok(()) after graceful shutdown, got: {join_result:?}"
+    );
+}
