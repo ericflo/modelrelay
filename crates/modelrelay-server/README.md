@@ -1,6 +1,6 @@
 # proxy-server
 
-Central HTTP proxy server that routes LLM inference requests to remote workers over WebSocket. Part of the [llm-worker-proxy](https://github.com/ericflo/llm-worker-proxy) system.
+Central HTTP proxy server that routes LLM inference requests to remote workers over WebSocket. Part of the [ModelRelay](https://github.com/ericflo/modelrelay) system.
 
 ## Install
 
@@ -8,7 +8,7 @@ Central HTTP proxy server that routes LLM inference requests to remote workers o
 cargo install proxy-server
 ```
 
-Or download pre-built binaries from [GitHub Releases](https://github.com/ericflo/llm-worker-proxy/releases).
+Or download pre-built binaries from [GitHub Releases](https://github.com/ericflo/modelrelay/releases).
 
 ## Usage
 
@@ -18,7 +18,7 @@ proxy-server --listen 0.0.0.0:8080 --worker-secret mysecret
 
 The proxy accepts standard OpenAI and Anthropic API requests and routes them to connected workers.
 
-See the [main repository](https://github.com/ericflo/llm-worker-proxy) for full documentation, configuration options, and quickstart guides.
+See the [main repository](https://github.com/ericflo/modelrelay) for full documentation, configuration options, and quickstart guides.
 
 ## License
 

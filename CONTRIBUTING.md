@@ -1,4 +1,4 @@
-# Contributing to llm-worker-proxy
+# Contributing to ModelRelay
 
 Thanks for your interest in contributing. This guide covers what you need to get started.
 

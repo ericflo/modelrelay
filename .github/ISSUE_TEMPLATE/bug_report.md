@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a bug in llm-worker-proxy
+about: Report a bug in ModelRelay
 title: ""
 labels: bug
 assignees: ""

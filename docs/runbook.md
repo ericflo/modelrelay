@@ -1,6 +1,6 @@
 # Operational Runbook
 
-This guide covers day-to-day operations for running `llm-worker-proxy` in
+This guide covers day-to-day operations for running ModelRelay in
 production.  It assumes you have one `proxy-server` instance and one or
 more `worker-daemon` processes.
 

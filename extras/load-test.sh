@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# load-test.sh — Simple load test for llm-worker-proxy
+# load-test.sh — Simple load test for ModelRelay
 #
 # Sends concurrent /v1/chat/completions requests to the proxy and
 # reports throughput.  Uses `hey` if available, `wrk` as fallback,
@@ -52,7 +52,7 @@ BODY=$(cat <<EOF
 EOF
 )
 
-echo "=== llm-worker-proxy load test ==="
+echo "=== ModelRelay load test ==="
 echo "Target:      ${ENDPOINT}"
 echo "Model:       ${MODEL}"
 echo "Requests:    ${REQUESTS}"
