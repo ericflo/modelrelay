@@ -297,6 +297,15 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
+## Contributing
+
+Bug reports, feature requests, and PRs are welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for code style, test expectations,
+branch naming, and CI secrets.
+
+To report a security vulnerability, follow the process in
+[SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT
