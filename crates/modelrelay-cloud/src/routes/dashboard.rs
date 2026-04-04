@@ -331,3 +331,59 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#x27;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_ampersand() {
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn escapes_less_than() {
+        assert_eq!(html_escape("<script>"), "&lt;script&gt;");
+    }
+
+    #[test]
+    fn escapes_greater_than() {
+        assert_eq!(html_escape("a>b"), "a&gt;b");
+    }
+
+    #[test]
+    fn escapes_double_quote() {
+        assert_eq!(html_escape(r#"a"b"#), "a&quot;b");
+    }
+
+    #[test]
+    fn escapes_single_quote() {
+        assert_eq!(html_escape("a'b"), "a&#x27;b");
+    }
+
+    #[test]
+    fn escapes_all_at_once() {
+        assert_eq!(
+            html_escape(r#"<div class="x" data-val='a&b'>"#),
+            "&lt;div class=&quot;x&quot; data-val=&#x27;a&amp;b&#x27;&gt;"
+        );
+    }
+
+    #[test]
+    fn no_escape_needed() {
+        assert_eq!(html_escape("hello world 123"), "hello world 123");
+    }
+
+    #[test]
+    fn empty_string() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    fn status_badge_renders_correctly() {
+        assert!(status_badge("active").contains("badge-active"));
+        assert!(status_badge("past_due").contains("badge-warn"));
+        assert!(status_badge("canceled").contains("badge-cancel"));
+        assert!(status_badge("unknown_status").contains("Unknown"));
+    }
+}

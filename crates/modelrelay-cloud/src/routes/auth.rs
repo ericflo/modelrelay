@@ -276,3 +276,42 @@ fn login_form_html(error: Option<&str>) -> String {
 </div>"#
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_and_verify_roundtrip() {
+        let password = "correct-horse-battery-staple";
+        let hashed = hash_password(password).expect("hash should succeed");
+        assert!(verify_password(password, &hashed));
+    }
+
+    #[test]
+    fn wrong_password_rejected() {
+        let hashed = hash_password("real-password").expect("hash should succeed");
+        assert!(!verify_password("wrong-password", &hashed));
+    }
+
+    #[test]
+    fn different_hashes_for_same_password() {
+        let h1 = hash_password("same").expect("hash should succeed");
+        let h2 = hash_password("same").expect("hash should succeed");
+        assert_ne!(h1, h2);
+        assert!(verify_password("same", &h1));
+        assert!(verify_password("same", &h2));
+    }
+
+    #[test]
+    fn verify_returns_false_for_garbage_hash() {
+        assert!(!verify_password("anything", "not-a-valid-hash"));
+    }
+
+    #[test]
+    fn empty_password_hashes_and_verifies() {
+        let hashed = hash_password("").expect("hash should succeed");
+        assert!(verify_password("", &hashed));
+        assert!(!verify_password("notempty", &hashed));
+    }
+}

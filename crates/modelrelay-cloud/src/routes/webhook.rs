@@ -379,3 +379,80 @@ async fn handle_payment_failed(pool: &PgPool, payload: &serde_json::Value) -> Re
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: compute the real HMAC-SHA256 hex digest for `"{timestamp}.{payload}"`.
+    fn compute_sig(secret: &str, timestamp: &str, payload: &[u8]) -> String {
+        let signed = format!("{timestamp}.{}", String::from_utf8_lossy(payload));
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(signed.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    #[test]
+    fn valid_signature_accepted() {
+        let secret = "whsec_test_secret";
+        let payload = b"{}";
+        let ts = "1700000000";
+        let sig = compute_sig(secret, ts, payload);
+        let header = format!("t={ts},v1={sig}");
+        assert!(verify_signature(&header, payload, secret).is_ok());
+    }
+
+    #[test]
+    fn wrong_signature_rejected() {
+        let secret = "whsec_test_secret";
+        let payload = b"{}";
+        let ts = "1700000000";
+        let header =
+            format!("t={ts},v1=badbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbad");
+        let err = verify_signature(&header, payload, secret).unwrap_err();
+        assert!(err.contains("signature mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn missing_timestamp_rejected() {
+        let header = "v1=abc123";
+        let err = verify_signature(header, b"{}", "secret").unwrap_err();
+        assert!(err.contains("missing timestamp"), "got: {err}");
+    }
+
+    #[test]
+    fn missing_v1_rejected() {
+        let header = "t=1700000000";
+        let err = verify_signature(header, b"{}", "secret").unwrap_err();
+        assert!(err.contains("no v1 signature"), "got: {err}");
+    }
+
+    #[test]
+    fn valid_signature_with_extra_fields() {
+        let secret = "whsec_test_secret";
+        let payload = b"{\"type\":\"checkout.session.completed\"}";
+        let ts = "1700000000";
+        let sig = compute_sig(secret, ts, payload);
+        let header = format!("t={ts},v0=ignored,v1={sig}");
+        assert!(verify_signature(&header, payload, secret).is_ok());
+    }
+
+    #[test]
+    fn different_payload_different_sig() {
+        let secret = "whsec_test_secret";
+        let ts = "1700000000";
+        let sig = compute_sig(secret, ts, b"original");
+        let header = format!("t={ts},v1={sig}");
+        let err = verify_signature(&header, b"tampered", secret).unwrap_err();
+        assert!(err.contains("signature mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn constant_time_eq_works() {
+        assert!(constant_time_eq("abc", "abc"));
+        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "ab"));
+        assert!(!constant_time_eq("", "a"));
+        assert!(constant_time_eq("", ""));
+    }
+}
