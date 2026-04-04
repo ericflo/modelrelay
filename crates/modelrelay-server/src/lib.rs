@@ -754,6 +754,34 @@ impl ProxyServerCore {
     }
 
     #[must_use]
+    pub fn admin_workers_snapshot(&self) -> Vec<AdminWorkerInfo> {
+        self.worker_order
+            .iter()
+            .filter_map(|worker_id| {
+                let worker = self.workers.get(worker_id)?;
+                Some(AdminWorkerInfo {
+                    worker_id: worker_id.clone(),
+                    provider: worker.provider.clone(),
+                    worker_name: worker.worker_name.clone(),
+                    models: worker.models.clone(),
+                    max_concurrent: worker.max_concurrent,
+                    reported_load: worker.reported_load,
+                    in_flight_count: worker.in_flight_requests.len(),
+                    is_draining: worker.is_draining,
+                })
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn admin_queue_depth(&self) -> HashMap<String, usize> {
+        self.provider_queues
+            .iter()
+            .map(|(provider, queue)| (provider.clone(), queue.len()))
+            .collect()
+    }
+
+    #[must_use]
     pub fn provider_models(&self, provider: &str) -> Vec<String> {
         let mut seen = HashSet::new();
 
@@ -995,6 +1023,18 @@ impl ProxyServerCore {
 pub struct RegisteredWorker {
     pub worker_id: String,
     pub ack: RegisterAck,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AdminWorkerInfo {
+    pub worker_id: String,
+    pub provider: String,
+    pub worker_name: String,
+    pub models: Vec<String>,
+    pub max_concurrent: usize,
+    pub reported_load: usize,
+    pub in_flight_count: usize,
+    pub is_draining: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
