@@ -1,7 +1,12 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
-use proxy_server::{
+use modelrelay_protocol::{
+    CancelMessage, CancelReason as ProtocolCancelReason, GracefulShutdownMessage, HeaderMap,
+    ModelsUpdateMessage, PingMessage, PongMessage, RegisterMessage, ResponseChunkMessage,
+    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+};
+use modelrelay_server::{
     CancelReason as ProxyCancelReason, ProxyServerCore, RequestState, SubmissionOutcome,
     WorkerSocketApp, WorkerSocketProviderConfig,
 };
@@ -13,11 +18,6 @@ use tokio::{
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
-};
-use worker_protocol::{
-    CancelMessage, CancelReason as ProtocolCancelReason, GracefulShutdownMessage, HeaderMap,
-    ModelsUpdateMessage, PingMessage, PongMessage, RegisterMessage, ResponseChunkMessage,
-    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
 
 type TestSocket =
@@ -192,7 +192,7 @@ async fn submit_heartbeat_initial_request(core: &Arc<Mutex<ProxyServerCore>>, wo
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"heartbeat me"}]}"#,
             HeaderMap::new(),
         ),
-        SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+        SubmissionOutcome::Dispatched(modelrelay_server::DispatchAssignment {
             request_id: "request-1".to_string(),
             worker_id: worker_id.to_string(),
         })
@@ -210,7 +210,7 @@ async fn submit_heartbeat_follow_up_request(core: &Arc<Mutex<ProxyServerCore>>) 
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued until complete"}]}"#,
             HeaderMap::new(),
         ),
-        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+        SubmissionOutcome::Queued(modelrelay_server::QueuedAssignment {
             request_id: "request-2".to_string(),
             queue_len: 1,
         })
@@ -229,7 +229,7 @@ async fn assert_heartbeat_ping(socket: &mut TestSocket) {
     );
 }
 
-async fn register_test_worker(socket: &mut TestSocket) -> worker_protocol::RegisterAck {
+async fn register_test_worker(socket: &mut TestSocket) -> modelrelay_protocol::RegisterAck {
     register_test_worker_with(socket, vec!["llama-3.1-70b".to_string()], 1, Some(0)).await
 }
 
@@ -238,7 +238,7 @@ async fn register_test_worker_with(
     models: Vec<String>,
     max_concurrent: u32,
     current_load: Option<u32>,
-) -> worker_protocol::RegisterAck {
+) -> modelrelay_protocol::RegisterAck {
     let register = WorkerToServerMessage::Register(RegisterMessage {
         worker_name: "gpu-box-a".to_string(),
         models,
@@ -276,7 +276,7 @@ fn expected_request_message(
     body: &str,
     headers: HeaderMap,
 ) -> ServerToWorkerMessage {
-    ServerToWorkerMessage::Request(worker_protocol::RequestMessage {
+    ServerToWorkerMessage::Request(modelrelay_protocol::RequestMessage {
         request_id: request_id.to_string(),
         model: "llama-3.1-70b".to_string(),
         endpoint_path: "/v1/chat/completions".to_string(),
@@ -330,7 +330,7 @@ async fn queue_cancel_test_requests(
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"cancel me"}]}"#,
             HeaderMap::new(),
         ),
-        SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+        SubmissionOutcome::Dispatched(modelrelay_server::DispatchAssignment {
             request_id: "request-1".to_string(),
             worker_id: worker_id.to_string(),
         })
@@ -344,7 +344,7 @@ async fn queue_cancel_test_requests(
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after cancel"}]}"#,
             second_headers.clone(),
         ),
-        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+        SubmissionOutcome::Queued(modelrelay_server::QueuedAssignment {
             request_id: "request-2".to_string(),
             queue_len: 1,
         })
@@ -359,8 +359,8 @@ async fn cancel_in_flight_request(
     let mut core = core.lock().await;
     assert_eq!(
         core.cancel_request("request-1", reason),
-        Some(proxy_server::CancellationOutcome::WorkerCancelSent(
-            proxy_server::WorkerCancelSignal {
+        Some(modelrelay_server::CancellationOutcome::WorkerCancelSent(
+            modelrelay_server::WorkerCancelSignal {
                 worker_id: worker_id.to_string(),
                 request_id: "request-1".to_string(),
                 reason,
@@ -402,7 +402,7 @@ async fn submit_graceful_shutdown_test_requests(
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"finish before drain"}]}"#,
             HeaderMap::new(),
         ),
-        SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+        SubmissionOutcome::Dispatched(modelrelay_server::DispatchAssignment {
             request_id: "request-1".to_string(),
             worker_id: worker_id.to_string(),
         })
@@ -416,7 +416,7 @@ async fn submit_graceful_shutdown_test_requests(
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued during drain"}]}"#,
             HeaderMap::new(),
         ),
-        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+        SubmissionOutcome::Queued(modelrelay_server::QueuedAssignment {
             request_id: "request-2".to_string(),
             queue_len: 1,
         })
@@ -455,7 +455,7 @@ async fn authenticated_worker_can_register_and_receive_register_ack() {
         .expect("deserialize register ack");
     assert_eq!(
         ack,
-        ServerToWorkerMessage::RegisterAck(worker_protocol::RegisterAck {
+        ServerToWorkerMessage::RegisterAck(modelrelay_protocol::RegisterAck {
             worker_id: "worker-1".to_string(),
             models: vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()],
             warnings: Vec::new(),
@@ -620,7 +620,7 @@ async fn registered_worker_receives_request_and_response_complete_dispatches_nex
                 r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hi"}]}"#,
                 first_headers.clone(),
             ),
-            SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+            SubmissionOutcome::Dispatched(modelrelay_server::DispatchAssignment {
                 request_id: "request-1".to_string(),
                 worker_id: ack.worker_id.clone(),
             })
@@ -634,7 +634,7 @@ async fn registered_worker_receives_request_and_response_complete_dispatches_nex
                 r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"next"}]}"#,
                 second_headers.clone(),
             ),
-            SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            SubmissionOutcome::Queued(modelrelay_server::QueuedAssignment {
                 request_id: "request-2".to_string(),
                 queue_len: 1,
             })
@@ -711,7 +711,7 @@ async fn worker_models_update_dispatches_newly_compatible_queued_request_without
                 r#"{"model":"mistral-large","messages":[{"role":"user","content":"route after models_update"}]}"#,
                 HeaderMap::new(),
             ),
-            SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            SubmissionOutcome::Queued(modelrelay_server::QueuedAssignment {
                 request_id: "request-1".to_string(),
                 queue_len: 1,
             })
@@ -738,7 +738,7 @@ async fn worker_models_update_dispatches_newly_compatible_queued_request_without
 
     assert_eq!(
         next_server_message(&mut socket, "queued request after models_update").await,
-        ServerToWorkerMessage::Request(worker_protocol::RequestMessage {
+        ServerToWorkerMessage::Request(modelrelay_protocol::RequestMessage {
             request_id: "request-1".to_string(),
             model: "mistral-large".to_string(),
             endpoint_path: "/v1/chat/completions".to_string(),
@@ -789,7 +789,7 @@ async fn streaming_response_chunks_preserve_in_flight_request_until_response_com
                 r#"{"model":"llama-3.1-70b","stream":true,"messages":[{"role":"user","content":"stream"}]}"#,
                 HeaderMap::new(),
             ),
-            SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+            SubmissionOutcome::Dispatched(modelrelay_server::DispatchAssignment {
                 request_id: "request-1".to_string(),
                 worker_id: ack.worker_id.clone(),
             })
@@ -803,7 +803,7 @@ async fn streaming_response_chunks_preserve_in_flight_request_until_response_com
                 r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"after-stream"}]}"#,
                 second_headers.clone(),
             ),
-            SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+            SubmissionOutcome::Queued(modelrelay_server::QueuedAssignment {
                 request_id: "request-2".to_string(),
                 queue_len: 1,
             })
@@ -812,7 +812,7 @@ async fn streaming_response_chunks_preserve_in_flight_request_until_response_com
 
     assert_eq!(
         next_server_message(&mut socket, "streaming dispatched request").await,
-        ServerToWorkerMessage::Request(worker_protocol::RequestMessage {
+        ServerToWorkerMessage::Request(modelrelay_protocol::RequestMessage {
             request_id: "request-1".to_string(),
             model: "llama-3.1-70b".to_string(),
             endpoint_path: "/v1/chat/completions".to_string(),
@@ -1090,7 +1090,7 @@ async fn stale_heartbeat_worker_is_disconnected_and_removed_from_routing() {
             r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"still there?"}]}"#,
             HeaderMap::new(),
         ),
-        SubmissionOutcome::Queued(proxy_server::QueuedAssignment {
+        SubmissionOutcome::Queued(modelrelay_server::QueuedAssignment {
             request_id: "request-1".to_string(),
             queue_len: 1,
         })
@@ -1124,7 +1124,7 @@ async fn graceful_shutdown_drains_in_flight_request_and_disconnects_without_disp
                 Some("proxy server shutting down"),
                 std::time::Duration::from_millis(250),
             ),
-            vec![proxy_server::GracefulShutdownSignal {
+            vec![modelrelay_server::GracefulShutdownSignal {
                 worker_id: ack.worker_id.clone(),
                 reason: Some("proxy server shutting down".to_string()),
                 drain_timeout: std::time::Duration::from_millis(250),
@@ -1176,7 +1176,7 @@ async fn graceful_shutdown_timeout_disconnects_worker_and_removes_in_flight_requ
                 r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"timeout during drain"}]}"#,
                 HeaderMap::new(),
             ),
-            SubmissionOutcome::Dispatched(proxy_server::DispatchAssignment {
+            SubmissionOutcome::Dispatched(modelrelay_server::DispatchAssignment {
                 request_id: "request-1".to_string(),
                 worker_id: ack.worker_id.clone(),
             })
@@ -1186,7 +1186,7 @@ async fn graceful_shutdown_timeout_disconnects_worker_and_removes_in_flight_requ
                 Some("proxy server draining"),
                 std::time::Duration::from_millis(50),
             ),
-            vec![proxy_server::GracefulShutdownSignal {
+            vec![modelrelay_server::GracefulShutdownSignal {
                 worker_id: ack.worker_id.clone(),
                 reason: Some("proxy server draining".to_string()),
                 drain_timeout: std::time::Duration::from_millis(50),
@@ -1238,7 +1238,7 @@ async fn server_models_refresh_signal_is_forwarded_to_connected_worker() {
 
     assert_eq!(
         next_server_message(&mut socket, "models refresh signal").await,
-        ServerToWorkerMessage::ModelsRefresh(worker_protocol::ModelsRefreshMessage {
+        ServerToWorkerMessage::ModelsRefresh(modelrelay_protocol::ModelsRefreshMessage {
             reason: Some("test-refresh".to_string()),
         })
     );

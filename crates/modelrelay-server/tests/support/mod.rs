@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use proxy_server::{ProxyServerCore, RequestState};
+use modelrelay_protocol::{CancelMessage, CancelReason, ServerToWorkerMessage};
+use modelrelay_server::{ProxyServerCore, RequestState};
 use tokio::{io::AsyncReadExt, net::TcpStream, sync::Mutex, time::timeout};
 use tokio_tungstenite::tungstenite::Message;
-use worker_protocol::{CancelMessage, CancelReason, ServerToWorkerMessage};
 
 pub type TestSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -86,7 +86,7 @@ pub async fn begin_graceful_shutdown(core: &Arc<Mutex<ProxyServerCore>>) {
 pub async fn assert_graceful_shutdown_signal(socket: &mut TestSocket) {
     assert_eq!(
         next_server_message(socket, "graceful shutdown").await,
-        ServerToWorkerMessage::GracefulShutdown(worker_protocol::GracefulShutdownMessage {
+        ServerToWorkerMessage::GracefulShutdown(modelrelay_protocol::GracefulShutdownMessage {
             reason: Some("proxy server shutting down".to_string()),
             drain_timeout_secs: Some(1),
         })

@@ -57,21 +57,21 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Build proxy-server
+      - name: Build modelrelay-server
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p proxy-server
+            cross build --release --target ${{ matrix.target }} -p modelrelay-server
           else
-            cargo build --release --target ${{ matrix.target }} -p proxy-server
+            cargo build --release --target ${{ matrix.target }} -p modelrelay-server
           fi
         shell: bash
 
-      - name: Build worker-daemon
+      - name: Build modelrelay-worker
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p worker-daemon
+            cross build --release --target ${{ matrix.target }} -p modelrelay-worker
           else
-            cargo build --release --target ${{ matrix.target }} -p worker-daemon
+            cargo build --release --target ${{ matrix.target }} -p modelrelay-worker
           fi
         shell: bash
 
@@ -79,11 +79,11 @@ jobs:
         run: |
           mkdir -p dist
           if [[ "${{ matrix.target }}" == *windows* ]]; then
-            cp target/${{ matrix.target }}/release/proxy-server.exe dist/proxy-server-${{ matrix.artifact_suffix }}.exe
-            cp target/${{ matrix.target }}/release/worker-daemon.exe dist/worker-daemon-${{ matrix.artifact_suffix }}.exe
+            cp target/${{ matrix.target }}/release/modelrelay-server.exe dist/modelrelay-server-${{ matrix.artifact_suffix }}.exe
+            cp target/${{ matrix.target }}/release/modelrelay-worker.exe dist/modelrelay-worker-${{ matrix.artifact_suffix }}.exe
           else
-            cp target/${{ matrix.target }}/release/proxy-server dist/proxy-server-${{ matrix.artifact_suffix }}
-            cp target/${{ matrix.target }}/release/worker-daemon dist/worker-daemon-${{ matrix.artifact_suffix }}
+            cp target/${{ matrix.target }}/release/modelrelay-server dist/modelrelay-server-${{ matrix.artifact_suffix }}
+            cp target/${{ matrix.target }}/release/modelrelay-worker dist/modelrelay-worker-${{ matrix.artifact_suffix }}
           fi
         shell: bash
 
@@ -107,10 +107,10 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
-          cargo publish -p worker-protocol --no-verify
+          cargo publish -p modelrelay-protocol --no-verify
           sleep 30
-          cargo publish -p proxy-server --no-verify
-          cargo publish -p worker-daemon --no-verify
+          cargo publish -p modelrelay-server --no-verify
+          cargo publish -p modelrelay-worker --no-verify
 
   release:
     name: Create GitHub Release
@@ -153,18 +153,18 @@ jobs:
 
             | Binary | Platform |
             |--------|----------|
-            | `proxy-server-linux-amd64` | Linux x86_64 |
-            | `proxy-server-linux-arm64` | Linux arm64 |
-            | `proxy-server-darwin-amd64` | macOS Intel |
-            | `proxy-server-darwin-arm64` | macOS Apple Silicon |
-            | `proxy-server-windows-amd64.exe` | Windows x86_64 |
-            | `proxy-server-windows-arm64.exe` | Windows arm64 |
-            | `worker-daemon-linux-amd64` | Linux x86_64 |
-            | `worker-daemon-linux-arm64` | Linux arm64 |
-            | `worker-daemon-darwin-amd64` | macOS Intel |
-            | `worker-daemon-darwin-arm64` | macOS Apple Silicon |
-            | `worker-daemon-windows-amd64.exe` | Windows x86_64 |
-            | `worker-daemon-windows-arm64.exe` | Windows arm64 |
+            | `modelrelay-server-linux-amd64` | Linux x86_64 |
+            | `modelrelay-server-linux-arm64` | Linux arm64 |
+            | `modelrelay-server-darwin-amd64` | macOS Intel |
+            | `modelrelay-server-darwin-arm64` | macOS Apple Silicon |
+            | `modelrelay-server-windows-amd64.exe` | Windows x86_64 |
+            | `modelrelay-server-windows-arm64.exe` | Windows arm64 |
+            | `modelrelay-worker-linux-amd64` | Linux x86_64 |
+            | `modelrelay-worker-linux-arm64` | Linux arm64 |
+            | `modelrelay-worker-darwin-amd64` | macOS Intel |
+            | `modelrelay-worker-darwin-arm64` | macOS Apple Silicon |
+            | `modelrelay-worker-windows-amd64.exe` | Windows x86_64 |
+            | `modelrelay-worker-windows-arm64.exe` | Windows arm64 |
 
             ## Changes since previous release
 

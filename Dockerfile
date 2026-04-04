@@ -4,13 +4,13 @@
 FROM rust:1.94.1-slim AS builder
 WORKDIR /build
 COPY . .
-RUN cargo build --release --bin proxy-server --bin worker-daemon
+RUN cargo build --release --bin modelrelay-server --bin modelrelay-worker
 
 # Stage 2: Minimal runtime image
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /build/target/release/proxy-server /usr/local/bin/proxy-server
-COPY --from=builder /build/target/release/worker-daemon /usr/local/bin/worker-daemon
+COPY --from=builder /build/target/release/modelrelay-server /usr/local/bin/modelrelay-server
+COPY --from=builder /build/target/release/modelrelay-worker /usr/local/bin/modelrelay-worker
 EXPOSE 8080
-CMD ["proxy-server"]
+CMD ["modelrelay-server"]

@@ -1,31 +1,31 @@
-# llm-worker-proxy — proxy-server systemd unit
+# ModelRelay — modelrelay-server systemd unit
 #
 # Install:
-#   sudo cp proxy-server.service /etc/systemd/system/
-#   sudo cp proxy.env.example /etc/llm-worker-proxy/proxy.env  # edit values
+#   sudo cp modelrelay-server.service /etc/systemd/system/
+#   sudo cp proxy.env.example /etc/modelrelay/proxy.env  # edit values
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now proxy-server
+#   sudo systemctl enable --now modelrelay-server
 
 [Unit]
-Description=llm-worker-proxy central proxy server
-Documentation=https://github.com/ericflo/llm-worker-proxy
+Description=ModelRelay central proxy server
+Documentation=https://modelrelay.io
 After=network.target
 
 [Service]
 Type=simple
 
 # Run as a dedicated unprivileged user. Create it with:
-#   sudo useradd --system --no-create-home llm-worker-proxy
-User=llm-worker-proxy
-Group=llm-worker-proxy
+#   sudo useradd --system --no-create-home modelrelay
+User=modelrelay
+Group=modelrelay
 
-WorkingDirectory=/var/lib/llm-worker-proxy
+WorkingDirectory=/var/lib/modelrelay
 
 # Load environment from file. The leading "-" means the service still starts
 # if the file is missing (CLI defaults or env vars set elsewhere will apply).
-EnvironmentFile=-/etc/llm-worker-proxy/proxy.env
+EnvironmentFile=-/etc/modelrelay/proxy.env
 
-ExecStart=/usr/local/bin/proxy-server
+ExecStart=/usr/local/bin/modelrelay-server
 
 # Restart on crash but not on clean exit (e.g. SIGTERM during drain).
 Restart=on-failure

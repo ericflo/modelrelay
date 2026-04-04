@@ -20,9 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: proxy-server
+          - image: modelrelay-server
             dockerfile: Dockerfile.proxy
-          - image: worker-daemon
+          - image: modelrelay-worker
             dockerfile: Dockerfile.worker
     steps:
       - uses: actions/checkout@v6
@@ -39,7 +39,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          images: ${{ env.REGISTRY }}/ericflo/modelrelay/${{ matrix.image }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
