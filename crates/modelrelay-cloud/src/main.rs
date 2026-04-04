@@ -75,6 +75,9 @@ async fn main() {
 
     let mut app = Router::new()
         .merge(routes::router(state))
+        // Mount the OSS admin dashboard under /admin so self-hoster monitoring
+        // routes are available alongside the commercial routes.
+        .nest("/admin", modelrelay_web::router())
         .layer(TraceLayer::new_for_http());
 
     if let Some(layer) = session_layer {
