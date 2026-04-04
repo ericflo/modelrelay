@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Example: proxy-server + worker-daemon pointing at a local llama-server
+# Example: modelrelay-server + modelrelay-worker pointing at a local llama-server
 #
 # Assumes llama-server (from llama.cpp) is already running on port 8000:
 #   llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8000
@@ -15,14 +15,14 @@ MODELS="${MODELS:-llama3.2:3b}"
 WORKER_NAME="${WORKER_NAME:-local-gpu}"
 
 # Build if needed
-if [[ ! -f target/release/proxy-server || ! -f target/release/worker-daemon ]]; then
+if [[ ! -f target/release/modelrelay-server || ! -f target/release/modelrelay-worker ]]; then
     echo "Building release binaries..."
     cargo build --release
 fi
 
 # Start the proxy server in the background
-echo "Starting proxy-server on $PROXY_LISTEN ..."
-./target/release/proxy-server \
+echo "Starting modelrelay-server on $PROXY_LISTEN ..."
+./target/release/modelrelay-server \
     --listen "$PROXY_LISTEN" \
     --worker-secret "$WORKER_SECRET" &
 PROXY_PID=$!
@@ -31,8 +31,8 @@ PROXY_PID=$!
 sleep 1
 
 # Start a single worker pointing at the local llama-server
-echo "Starting worker-daemon for models: $MODELS ..."
-./target/release/worker-daemon \
+echo "Starting modelrelay-worker for models: $MODELS ..."
+./target/release/modelrelay-worker \
     --proxy-url "http://127.0.0.1:${PROXY_LISTEN##*:}" \
     --worker-secret "$WORKER_SECRET" \
     --backend-url "$BACKEND_URL" \

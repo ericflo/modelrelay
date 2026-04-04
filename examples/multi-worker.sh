@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Example: one proxy-server with multiple workers serving different models
+# Example: one modelrelay-server with multiple workers serving different models
 #
 # Each worker connects to its own local backend (llama-server or similar).
 # Workers can run on different machines — just point --proxy-url at the
@@ -20,14 +20,14 @@ WORKER_SECRET="${WORKER_SECRET:-changeme}"
 PROXY_PORT="${PROXY_LISTEN##*:}"
 
 # Build if needed
-if [[ ! -f target/release/proxy-server || ! -f target/release/worker-daemon ]]; then
+if [[ ! -f target/release/modelrelay-server || ! -f target/release/modelrelay-worker ]]; then
     echo "Building release binaries..."
     cargo build --release
 fi
 
 # Start the proxy server
-echo "Starting proxy-server on $PROXY_LISTEN ..."
-./target/release/proxy-server \
+echo "Starting modelrelay-server on $PROXY_LISTEN ..."
+./target/release/modelrelay-server \
     --listen "$PROXY_LISTEN" \
     --worker-secret "$WORKER_SECRET" \
     --max-queue-len 50 \
@@ -38,7 +38,7 @@ sleep 1
 
 # Worker A — llama3.2:3b on port 8001
 echo "Starting worker-a (llama3.2:3b, backend :8001) ..."
-./target/release/worker-daemon \
+./target/release/modelrelay-worker \
     --proxy-url "http://127.0.0.1:$PROXY_PORT" \
     --worker-secret "$WORKER_SECRET" \
     --backend-url "http://127.0.0.1:8001" \
@@ -49,7 +49,7 @@ WORKER_A_PID=$!
 
 # Worker B — llama3.2:1b on port 8002
 echo "Starting worker-b (llama3.2:1b, backend :8002) ..."
-./target/release/worker-daemon \
+./target/release/modelrelay-worker \
     --proxy-url "http://127.0.0.1:$PROXY_PORT" \
     --worker-secret "$WORKER_SECRET" \
     --backend-url "http://127.0.0.1:8002" \
@@ -60,7 +60,7 @@ WORKER_B_PID=$!
 
 # Worker C — second replica for llama3.2:3b (same model, different backend port)
 echo "Starting worker-c (llama3.2:3b replica, backend :8003) ..."
-./target/release/worker-daemon \
+./target/release/modelrelay-worker \
     --proxy-url "http://127.0.0.1:$PROXY_PORT" \
     --worker-secret "$WORKER_SECRET" \
     --backend-url "http://127.0.0.1:8003" \
