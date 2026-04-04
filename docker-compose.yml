@@ -1,39 +1,114 @@
-# Example docker-compose for llm-worker-proxy.
+# Production-ready docker-compose for llm-worker-proxy.
 #
-# Start the proxy and one worker:
-#   docker compose up --build
+# Runs one proxy-server and two worker-daemon instances.  Adapt for your
+# own setup by adding/removing worker services and adjusting MODELS and
+# BACKEND_URL for each GPU box.
 #
-# The proxy listens on http://localhost:8080 and the worker connects
-# back to it over WebSocket, forwarding requests to your local
-# llama-server (or any OpenAI-compatible backend).
+# Quick start:
+#   cp .env.example .env   # edit secrets and backend URLs
+#   docker compose up -d
+#
+# The proxy listens on http://localhost:8080 by default.
 
 services:
+  # ── Proxy server ──────────────────────────────────────────────────
   proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile.proxy
+    image: ghcr.io/ericflo/llm-worker-proxy/proxy-server:latest
+    # Or build from source:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.proxy
     ports:
-      - "8080:8080"
+      - "${LISTEN_PORT:-8080}:8080"
     environment:
-      # Shared secret workers must present to register.
-      WORKER_SECRET: "${WORKER_SECRET:-changeme}"
-      # Bind address (default 0.0.0.0:8080 inside the container).
       LISTEN_ADDR: "0.0.0.0:8080"
-      RUST_LOG: "info"
+      WORKER_SECRET: "${WORKER_SECRET:?Set WORKER_SECRET in .env}"
+      MAX_QUEUE_LEN: "${MAX_QUEUE_LEN:-100}"
+      QUEUE_TIMEOUT_SECS: "${QUEUE_TIMEOUT_SECS:-30}"
+      REQUEST_TIMEOUT_SECS: "${REQUEST_TIMEOUT_SECS:-300}"
+      RUST_LOG: "${PROXY_LOG_LEVEL:-info}"
+    healthcheck:
+      # /v1/models returns 200 even with no workers connected.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/v1/models"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - llm-proxy
 
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
+  # ── Worker 1 ──────────────────────────────────────────────────────
+  # Each worker connects *out* to the proxy and forwards requests to
+  # its local model backend.  Duplicate this block for more workers.
+  worker1:
+    image: ghcr.io/ericflo/llm-worker-proxy/worker-daemon:latest
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.worker
     depends_on:
-      - proxy
+      proxy:
+        condition: service_healthy
     environment:
-      # Base URL of the proxy server.
       PROXY_URL: "http://proxy:8080"
-      # Must match the proxy's WORKER_SECRET.
-      WORKER_SECRET: "${WORKER_SECRET:-changeme}"
-      # Comma-separated list of models this worker serves.
-      MODELS: "${MODELS:-default}"
-      # Backend LLM server (e.g. llama-server running on the host).
-      BACKEND_URL: "${BACKEND_URL:-http://host.docker.internal:8081}"
-      RUST_LOG: "info"
+      WORKER_SECRET: "${WORKER_SECRET:?Set WORKER_SECRET in .env}"
+      BACKEND_URL: "${WORKER1_BACKEND_URL:-http://host.docker.internal:8000}"
+      MODELS: "${WORKER1_MODELS:-llama3.2:3b}"
+      WORKER_NAME: "worker1"
+      MAX_CONCURRENCY: "${WORKER1_MAX_CONCURRENCY:-1}"
+      RUST_LOG: "${WORKER_LOG_LEVEL:-info}"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - llm-proxy
+
+  # ── Worker 2 ──────────────────────────────────────────────────────
+  worker2:
+    image: ghcr.io/ericflo/llm-worker-proxy/worker-daemon:latest
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.worker
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      PROXY_URL: "http://proxy:8080"
+      WORKER_SECRET: "${WORKER_SECRET:?Set WORKER_SECRET in .env}"
+      BACKEND_URL: "${WORKER2_BACKEND_URL:-http://host.docker.internal:8001}"
+      MODELS: "${WORKER2_MODELS:-codellama:7b}"
+      WORKER_NAME: "worker2"
+      MAX_CONCURRENCY: "${WORKER2_MAX_CONCURRENCY:-1}"
+      RUST_LOG: "${WORKER_LOG_LEVEL:-info}"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - llm-proxy
+
+networks:
+  llm-proxy:
+    driver: bridge

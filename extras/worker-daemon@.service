@@ -1,0 +1,49 @@
+# llm-worker-proxy — worker-daemon systemd template unit
+#
+# This is an instantiated (template) unit. The instance name (%i) is used as
+# the worker name, so you can run multiple workers on the same host:
+#
+#   sudo systemctl enable --now worker-daemon@gpu0
+#   sudo systemctl enable --now worker-daemon@gpu1
+#
+# Each instance loads its own env file at /etc/llm-worker-proxy/worker-%i.env
+# (e.g. worker-gpu0.env, worker-gpu1.env), falling back to the shared
+# worker.env if the per-instance file doesn't exist.
+#
+# Install:
+#   sudo cp worker-daemon@.service /etc/systemd/system/
+#   sudo cp worker.env.example /etc/llm-worker-proxy/worker-gpu0.env  # edit values
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now worker-daemon@gpu0
+
+[Unit]
+Description=llm-worker-proxy worker daemon (%i)
+Documentation=https://github.com/ericflo/llm-worker-proxy
+After=network.target
+
+[Service]
+Type=simple
+
+User=llm-worker-proxy
+Group=llm-worker-proxy
+
+WorkingDirectory=/var/lib/llm-worker-proxy
+
+# Per-instance env file takes precedence; shared file is the fallback.
+EnvironmentFile=-/etc/llm-worker-proxy/worker.env
+EnvironmentFile=-/etc/llm-worker-proxy/worker-%i.env
+
+# The %i instance name (e.g. "gpu0") becomes the worker name.
+ExecStart=/usr/local/bin/worker-daemon --worker-name %i
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
