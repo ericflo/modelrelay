@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-04-04
+
+### Added
+
+- TLS setup guide (`docs/tls.md`) explaining nginx termination for HTTPS clients and WSS workers
+- Unit tests for `WorkerDaemonConfig` URL helper methods in modelrelay-worker
+
 ## [0.1.5] - 2026-04-04
 
 ### Changed
