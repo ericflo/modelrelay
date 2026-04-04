@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-contract-tests"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "clap",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-worker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "clap",
