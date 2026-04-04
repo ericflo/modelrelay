@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pricing — ModelRelay</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0d1117; color: #e6edf3; line-height: 1.6;
+    }
+    a { color: #7c3aed; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+
+    nav { padding: 20px 0; border-bottom: 1px solid #21262d; }
+    nav .container { display: flex; justify-content: space-between; align-items: center; }
+    .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; }
+    .logo span { color: #7c3aed; }
+    nav a.gh { color: #8b949e; font-size: 0.9rem; }
+    nav a.gh:hover { color: #e6edf3; }
+
+    .pricing { padding: 100px 0; text-align: center; }
+    .pricing h1 { font-size: 2.5rem; font-weight: 800; margin-bottom: 16px; }
+    .pricing .subtitle { color: #8b949e; margin-bottom: 48px; font-size: 1.15rem; }
+
+    .price-card {
+      display: inline-block; background: #161b22; border: 2px solid #7c3aed;
+      border-radius: 16px; padding: 48px; max-width: 480px; text-align: center;
+    }
+    .price-card h2 { font-size: 1.3rem; color: #8b949e; margin-bottom: 12px; font-weight: 500; }
+    .price-card .amount { font-size: 3.5rem; font-weight: 800; color: #e6edf3; }
+    .price-card .period { font-size: 1.1rem; color: #8b949e; margin-bottom: 24px; }
+    .price-card ul { list-style: none; margin: 24px 0 32px; text-align: left; color: #8b949e; }
+    .price-card li { padding: 6px 0; }
+    .price-card li::before { content: "\2713 "; color: #7c3aed; font-weight: 700; }
+
+    .btn {
+      display: inline-block; padding: 14px 36px; background: #7c3aed; color: #fff;
+      border: none; border-radius: 8px; font-size: 1.1rem; font-weight: 600;
+      cursor: pointer; transition: background 0.2s;
+    }
+    .btn:hover { background: #6d28d9; text-decoration: none; }
+
+    .back { display: block; margin-top: 32px; color: #8b949e; font-size: 0.9rem; }
+
+    footer { padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }
+    footer a { color: #8b949e; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container">
+      <a href="/" class="logo">Model<span>Relay</span></a>
+      <a class="gh" href="https://github.com/ericflo/modelrelay">GitHub</a>
+    </div>
+  </nav>
+
+  <section class="pricing">
+    <div class="container">
+      <h1>Simple, Transparent Pricing</h1>
+      <p class="subtitle">One plan. Everything included. No per-request fees.</p>
+      <div class="price-card">
+        <h2>Managed Relay</h2>
+        <div class="amount">$20</div>
+        <div class="period">per month</div>
+        <ul>
+          <li>One managed relay instance</li>
+          <li>Unlimited workers</li>
+          <li>Unlimited requests</li>
+          <li>WebSocket streaming</li>
+          <li>Request queueing &amp; cancellation</li>
+          <li>TLS &amp; authentication included</li>
+          <li>Priority support</li>
+        </ul>
+        <form action="/checkout" method="post">
+          <button type="submit" class="btn">Subscribe Now &rarr;</button>
+        </form>
+      </div>
+      <a class="back" href="/">&larr; Back to home</a>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+    </div>
+  </footer>
+</body>
+</html>
