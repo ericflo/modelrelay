@@ -1,4 +1,5 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::{generate, Shell};
 use modelrelay_worker::{WorkerDaemon, WorkerDaemonConfig};
 use tracing_subscriber::EnvFilter;
 
@@ -41,11 +42,20 @@ struct Args {
     /// `modelrelay_worker=debug`). Overridden by `RUST_LOG` if set.
     #[arg(long, env = "LOG_LEVEL", default_value = "info")]
     log_level: String,
+
+    /// Generate shell completion script for the given shell and exit
+    #[arg(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+
+    if let Some(shell) = args.completions {
+        generate(shell, &mut Args::command(), "modelrelay-worker", &mut std::io::stdout());
+        return;
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
