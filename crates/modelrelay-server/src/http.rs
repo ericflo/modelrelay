@@ -194,10 +194,7 @@ struct AdminWorkersResponse {
     workers: Vec<AdminWorkerInfo>,
 }
 
-async fn admin_workers_handler(
-    State(state): State<HttpState>,
-    headers: AxumHeaderMap,
-) -> Response {
+async fn admin_workers_handler(State(state): State<HttpState>, headers: AxumHeaderMap) -> Response {
     if let Err(status) = check_admin_auth(&state, &headers) {
         return status.into_response();
     }
@@ -212,10 +209,7 @@ struct AdminStatsResponse {
     active_workers: usize,
 }
 
-async fn admin_stats_handler(
-    State(state): State<HttpState>,
-    headers: AxumHeaderMap,
-) -> Response {
+async fn admin_stats_handler(State(state): State<HttpState>, headers: AxumHeaderMap) -> Response {
     if let Err(status) = check_admin_auth(&state, &headers) {
         return status.into_response();
     }
@@ -235,10 +229,7 @@ struct AdminKeysResponse {
     keys: Vec<()>,
 }
 
-async fn admin_keys_handler(
-    State(state): State<HttpState>,
-    headers: AxumHeaderMap,
-) -> Response {
+async fn admin_keys_handler(State(state): State<HttpState>, headers: AxumHeaderMap) -> Response {
     if let Err(status) = check_admin_auth(&state, &headers) {
         return status.into_response();
     }

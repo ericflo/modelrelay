@@ -200,6 +200,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19c9f1dde76b736e3681f28cec9d5a61299cbaae0fce80a68e43724ad56031eb"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -756,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-contract-tests"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -764,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-protocol"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -772,10 +781,11 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-server"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "axum",
  "clap",
+ "clap_complete",
  "futures-util",
  "http",
  "modelrelay-protocol",
@@ -791,10 +801,11 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-worker"
-version = "0.1.1"
+version = "0.1.6"
 dependencies = [
  "axum",
  "clap",
+ "clap_complete",
  "futures-util",
  "modelrelay-protocol",
  "modelrelay-server",
