@@ -1,0 +1,37 @@
+# Example docker-compose for llm-worker-proxy.
+#
+# Start the proxy and one worker:
+#   docker compose up --build
+#
+# The proxy listens on http://localhost:8080 and the worker connects
+# back to it over WebSocket, forwarding requests to your local
+# llama-server (or any OpenAI-compatible backend).
+
+services:
+  proxy:
+    build: .
+    command: ["proxy-server"]
+    ports:
+      - "8080:8080"
+    environment:
+      # Shared secret workers must present to register.
+      WORKER_SECRET: "${WORKER_SECRET:-changeme}"
+      # Bind address (default 0.0.0.0:8080 inside the container).
+      LISTEN_ADDR: "0.0.0.0:8080"
+      RUST_LOG: "info"
+
+  worker:
+    build: .
+    command: ["worker-daemon"]
+    depends_on:
+      - proxy
+    environment:
+      # Base URL of the proxy server.
+      PROXY_URL: "http://proxy:8080"
+      # Must match the proxy's WORKER_SECRET.
+      WORKER_SECRET: "${WORKER_SECRET:-changeme}"
+      # Comma-separated list of models this worker serves.
+      MODELS: "${MODELS:-default}"
+      # Backend LLM server (e.g. llama-server running on the host).
+      BACKEND_URL: "${BACKEND_URL:-http://host.docker.internal:8081}"
+      RUST_LOG: "info"
