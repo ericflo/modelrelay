@@ -4,10 +4,10 @@ This document describes the internal architecture of ModelRelay: how the compone
 
 ## Workspace Shape
 
-- `crates/proxy-contract-tests`
+- `crates/modelrelay-contract-tests`
   Black-box behavior tests and focused harnesses for registration, queueing, response streaming, cancellation, requeue, heartbeat, and graceful shutdown semantics.
 
-- `crates/worker-protocol`
+- `crates/modelrelay-protocol`
   Shared Rust protocol types for the WebSocket bridge: registration, dispatch, streaming chunks, cancellation, heartbeats, and operational control messages.
 
 - `crates/modelrelay-server`

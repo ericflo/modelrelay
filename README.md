@@ -1,6 +1,6 @@
 [![CI](https://github.com/ericflo/modelrelay/actions/workflows/ci.yml/badge.svg)](https://github.com/ericflo/modelrelay/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/ericflo/modelrelay/branch/main/graph/badge.svg)](https://codecov.io/gh/ericflo/modelrelay)
-[![crates.io](https://img.shields.io/crates/v/modelrelay-protocol.svg)](https://crates.io/crates/modelrelay-protocol)
+[![crates.io](https://img.shields.io/badge/crates.io-coming%20soon-orange)](https://crates.io/crates/modelrelay-protocol)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 # ModelRelay
