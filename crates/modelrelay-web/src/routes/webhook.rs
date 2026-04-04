@@ -56,9 +56,11 @@ pub async fn handle(
     };
 
     let result = match event_type {
-        "checkout.session.completed" => handle_checkout_completed(pool, &payload).await,
+        "checkout.session.completed" => handle_checkout_completed(&state, pool, &payload).await,
         "customer.subscription.updated" => handle_subscription_updated(pool, &payload).await,
-        "customer.subscription.deleted" => handle_subscription_deleted(pool, &payload).await,
+        "customer.subscription.deleted" => {
+            handle_subscription_deleted(&state, pool, &payload).await
+        }
         "invoice.payment_failed" => handle_payment_failed(pool, &payload).await,
         _ => {
             tracing::debug!("ignoring unhandled webhook event: {event_type}");
@@ -122,8 +124,71 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
-/// `checkout.session.completed` — create or find user by email, upsert subscription.
+/// Call `POST {admin_url}/admin/keys` to provision a new API key.
+///
+/// Returns `(key_id, raw_key)` on success.
+async fn provision_api_key(
+    admin_url: &str,
+    admin_token: &str,
+    name: &str,
+) -> Result<(String, String), String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/admin/keys", admin_url.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .bearer_auth(admin_token)
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .map_err(|e| format!("admin API request error: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("admin API returned {status}: {body}"));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("admin API response parse error: {e}"))?;
+
+    let key_id = body["id"]
+        .as_str()
+        .ok_or("admin API response missing 'id'")?
+        .to_string();
+    let raw_key = body["key"]
+        .as_str()
+        .ok_or("admin API response missing 'key'")?
+        .to_string();
+
+    Ok((key_id, raw_key))
+}
+
+/// Call `DELETE {admin_url}/admin/keys/{key_id}` to revoke an API key.
+async fn revoke_api_key(admin_url: &str, admin_token: &str, key_id: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/admin/keys/{}", admin_url.trim_end_matches('/'), key_id);
+    let resp = client
+        .delete(&url)
+        .bearer_auth(admin_token)
+        .send()
+        .await
+        .map_err(|e| format!("admin API revoke request error: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("admin API revoke returned {status}: {body}"));
+    }
+
+    Ok(())
+}
+
+/// `checkout.session.completed` — create or find user by email, upsert subscription,
+/// and provision an API key via the admin API.
 async fn handle_checkout_completed(
+    state: &AppState,
     pool: &PgPool,
     payload: &serde_json::Value,
 ) -> Result<(), String> {
@@ -162,6 +227,45 @@ async fn handle_checkout_completed(
     .await
     .map_err(|e| format!("subscription upsert error: {e}"))?;
 
+    // Provision API key via admin API
+    if let (Some(admin_url), Some(admin_token)) = (&state.admin_url, &state.admin_token) {
+        let key_name = format!("user-{email}");
+        match provision_api_key(admin_url, admin_token, &key_name).await {
+            Ok((key_id, raw_key)) => {
+                // Store key_id in subscriptions and raw key in users
+                sqlx::query(
+                    "UPDATE subscriptions SET api_key_id = $1, updated_at = now() \
+                     WHERE stripe_subscription_id = $2",
+                )
+                .bind(&key_id)
+                .bind(stripe_subscription_id)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("failed to store api_key_id: {e}"))?;
+
+                sqlx::query("UPDATE users SET api_key = $1 WHERE id = $2")
+                    .bind(&raw_key)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| format!("failed to store api_key: {e}"))?;
+
+                tracing::info!(
+                    "provisioned API key {key_id} for user={email} subscription={stripe_subscription_id}"
+                );
+            }
+            Err(e) => {
+                // Log but don't fail the webhook — subscription is still active,
+                // key can be provisioned on a retry or manually.
+                tracing::error!(
+                    "failed to provision API key for user={email}: {e} — subscription is active but key is missing"
+                );
+            }
+        }
+    } else {
+        tracing::warn!("admin API not configured — skipping API key provisioning for user={email}");
+    }
+
     tracing::info!(
         "checkout completed: user={email} subscription={stripe_subscription_id} status=active"
     );
@@ -197,8 +301,9 @@ async fn handle_subscription_updated(
     Ok(())
 }
 
-/// `customer.subscription.deleted` — mark subscription as canceled.
+/// `customer.subscription.deleted` — mark subscription as canceled and revoke API key.
 async fn handle_subscription_deleted(
+    state: &AppState,
     pool: &PgPool,
     payload: &serde_json::Value,
 ) -> Result<(), String> {
@@ -207,14 +312,54 @@ async fn handle_subscription_deleted(
         .as_str()
         .ok_or("subscription.deleted: no subscription ID")?;
 
+    // Look up the api_key_id before we update the subscription
+    let api_key_id: Option<String> = sqlx::query_scalar(
+        "SELECT api_key_id FROM subscriptions WHERE stripe_subscription_id = $1",
+    )
+    .bind(sub_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("subscription lookup error: {e}"))?
+    .flatten();
+
+    // Revoke the API key via admin API
+    if let Some(key_id) = &api_key_id {
+        if let (Some(admin_url), Some(admin_token)) = (&state.admin_url, &state.admin_token) {
+            match revoke_api_key(admin_url, admin_token, key_id).await {
+                Ok(()) => {
+                    tracing::info!("revoked API key {key_id} for subscription {sub_id}");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "failed to revoke API key {key_id} for subscription {sub_id}: {e}"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!("admin API not configured — cannot revoke API key {key_id}");
+        }
+    }
+
+    // Clear the api_key_id and the user's stored key
     let rows = sqlx::query(
-        "UPDATE subscriptions SET status = 'canceled', updated_at = now() WHERE stripe_subscription_id = $1",
+        "UPDATE subscriptions SET status = 'canceled', api_key_id = NULL, updated_at = now() \
+         WHERE stripe_subscription_id = $1",
     )
     .bind(sub_id)
     .execute(pool)
     .await
     .map_err(|e| format!("subscription delete error: {e}"))?
     .rows_affected();
+
+    // Also clear the stored raw API key from the user
+    sqlx::query(
+        "UPDATE users SET api_key = NULL WHERE id = (\
+         SELECT user_id FROM subscriptions WHERE stripe_subscription_id = $1)",
+    )
+    .bind(sub_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("user api_key clear error: {e}"))?;
 
     if rows == 0 {
         tracing::warn!("subscription.deleted: no matching subscription for {sub_id}");
