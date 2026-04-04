@@ -11,6 +11,7 @@ use crate::state::AppState;
 mod checkout;
 mod dashboard;
 mod pricing;
+mod webhook;
 
 static LANDING_HTML: &str = include_str!("../../templates/index.html");
 
@@ -23,6 +24,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/checkout/success", get(checkout::success))
         .route("/checkout/cancel", get(checkout::cancel))
         .route("/dashboard", get(dashboard::page))
+        .route("/webhook/stripe", post(webhook::handle))
         .with_state(state)
 }
 
