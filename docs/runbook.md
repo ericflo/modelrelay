@@ -174,7 +174,7 @@ LOG_LEVEL=debug modelrelay-worker
 3. Firewall / network: the worker makes an *outbound* connection to the
    proxy — no inbound ports needed on the worker machine.
 4. If using TLS (nginx/reverse proxy in front), ensure WebSocket upgrade
-   headers are forwarded.  See `examples/tls-nginx.conf`.
+   headers are forwarded.  See the [TLS Setup guide](tls.md).
 
 ### Worker registers but requests fail
 
