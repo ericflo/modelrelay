@@ -1,21 +1,70 @@
+[![CI](https://github.com/ericflo/llm-worker-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/ericflo/llm-worker-proxy/actions/workflows/ci.yml)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 # llm-worker-proxy
 
-`llm-worker-proxy` is a central HTTP LLM proxy with authenticated remote workers over WebSockets.
+**Stop configuring clients for every GPU box. Workers connect out; requests route in.**
 
-One stable endpoint for clients. Any number of GPU boxes running `worker-daemon`, each pointing at a local model server (e.g. `llama-server`). Workers connect in over WebSocket, register their models and capacity, and the proxy routes queued requests to them — handling streaming, cancellation, requeue on worker disconnect, and graceful drain in one place.
+You have GPU boxes running `llama-server` (or Ollama, or vLLM, or anything OpenAI-compatible). Today you either expose each one directly — port forwarding, DNS, firewall rules — or you stick a load balancer in front that doesn't understand LLM streaming or cancellation.
 
-This is operationally simple: you don't need to expose GPU boxes to the internet, update client configs when workers change, or run a service mesh. Workers reach out to the proxy; clients never know they exist.
+`llm-worker-proxy` flips the model: a central proxy receives standard inference requests while worker daemons on your GPU boxes connect *out* to it over WebSocket. The proxy handles queueing, routing, streaming pass-through, and cancellation propagation. Clients see one stable endpoint and never need to know about your hardware.
+
+```
+  Clients (curl, Claude Code, LiteLLM, Open WebUI, ...)
+         │
+         │  POST /v1/chat/completions
+         │  POST /v1/messages
+         ▼
+  ┌──────────────────┐
+  │   proxy-server   │◄─── workers connect out (WebSocket)
+  │   (one stable    │     no inbound ports needed on GPU boxes
+  │    endpoint)     │
+  └──────────────────┘
+         │  routes request to best available worker
+         ▼
+  ┌────────┐  ┌────────┐  ┌────────┐
+  │worker-1│  │worker-2│  │worker-3│
+  │ llama  │  │ ollama │  │ vllm   │  ← your GPU boxes,
+  │ server │  │        │  │        │    anywhere on any network
+  └────────┘  └────────┘  └────────┘
+```
+
+## Who is this for?
+
+- **Home GPU users** running local models who want a single API endpoint across multiple machines
+- **Teams with on-prem hardware** that need to pool GPU capacity without a service mesh
+- **Researchers** juggling models across heterogeneous boxes who are tired of updating client configs
+
+## Why this instead of...
+
+| Alternative | What's missing |
+|---|---|
+| **Pointing clients directly at llama-server** | No HA, no queue, clients must know about every box, no cancellation |
+| **nginx / HAProxy** | Doesn't understand LLM streaming semantics, no queueing, no worker auth, no cancellation propagation |
+| **LiteLLM / OpenRouter** | Cloud-first routing — not designed for your own private hardware calling home |
 
 ## Quickstart
 
-### Build
+### With Docker Compose (easiest)
+
+```bash
+git clone https://github.com/ericflo/llm-worker-proxy.git
+cd llm-worker-proxy
+
+# Start the proxy + one worker (assumes llama-server on host port 8081)
+docker compose up --build
+```
+
+The proxy is now listening on `http://localhost:8080`. The worker connects to it automatically and forwards requests to your backend.
+
+### Build from source
 
 ```bash
 cargo build --release
 # Binaries: target/release/proxy-server  target/release/worker-daemon
 ```
 
-### Start the proxy server
+**Start the proxy:**
 
 ```bash
 ./target/release/proxy-server \
@@ -23,11 +72,7 @@ cargo build --release
   --worker-secret mysecret
 ```
 
-The proxy accepts OpenAI-compatible and Anthropic-compatible requests on `--listen` and waits for workers to connect.
-
-### Start a worker daemon
-
-On a GPU box with `llama-server` (or any OpenAI-compatible backend) already running:
+**Start a worker** (on a GPU box with `llama-server` or any OpenAI-compatible backend running):
 
 ```bash
 ./target/release/worker-daemon \
@@ -37,21 +82,40 @@ On a GPU box with `llama-server` (or any OpenAI-compatible backend) already runn
   --models llama3.2:3b,llama3.2:1b
 ```
 
-The daemon connects to the proxy over WebSocket, registers the listed models, and begins accepting forwarded requests.
-
-### Send a test request
+### Try it
 
 ```bash
-curl http://<proxy-host>:8080/v1/chat/completions \
+# Non-streaming
+curl http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "llama3.2:3b",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": false
   }'
+
+# Streaming (SSE chunks pass through from the backend)
+curl http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "llama3.2:3b",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
 ```
 
-Streaming works too — set `"stream": true` and the proxy passes through SSE chunks from the backend.
+## Features
+
+- **OpenAI + Anthropic compatible** — `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, `GET /v1/models`
+- **No inbound ports on GPU boxes** — workers connect out to the proxy over WebSocket
+- **Request queueing** — configurable depth and timeout when all workers are busy
+- **Streaming pass-through** — SSE chunks forwarded with preserved ordering and termination
+- **End-to-end cancellation** — client disconnect propagates through the proxy to the worker to the backend
+- **Automatic requeue** — if a worker dies mid-request, the request is requeued to another worker
+- **Heartbeat and load tracking** — stale workers are cleaned up; workers report current load
+- **Graceful drain** — workers can shut down while replacement workers pick up queued work
+- **Model catalog refresh** — workers can update their model list without reconnecting
+- **Auth cooldown recovery** — workers recover gracefully from authentication failures
 
 ## Configuration
 
@@ -82,31 +146,21 @@ Streaming works too — set `"stream": true` and the proxy passes through SSE ch
 
 All flags can be passed as CLI arguments or set via the corresponding environment variable.
 
-## Features
-
-- OpenAI-compatible endpoints: `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses`
-- Anthropic-compatible endpoint: `POST /v1/messages`
-- Authenticated worker registration over WebSocket
-- Request queueing with configurable depth and timeout
-- Streaming pass-through (SSE)
-- Cancellation propagation to backends
-- Automatic requeue on worker disconnect
-- Heartbeat and load tracking
-- Model catalog refresh without worker reconnect
-- Auth cooldown recovery
-- Graceful worker drain while replacement workers pick up queued work
-
 ## Documents
 
-- [Behavior contract](docs/behavior-contract.md)
-- [Architecture sketch](docs/architecture.md)
+- [Behavior contract](docs/behavior-contract.md) — the full specification of proxy, queue, streaming, and cancellation semantics
+- [Architecture sketch](docs/architecture.md) — how the pieces fit together internally
 
 ## Validation
 
-The current behavior matrix is exercised at three layers: black-box contract harnesses in `proxy-contract-tests`, live HTTP integration tests in `proxy-server`, and end-to-end live backend tests in `worker-daemon`.
+The behavior matrix is exercised at three layers: black-box contract harnesses in `proxy-contract-tests`, live HTTP integration tests in `proxy-server`, and end-to-end live backend tests in `worker-daemon`.
 
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
+
+## License
+
+MIT
