@@ -1218,3 +1218,28 @@ async fn graceful_shutdown_timeout_disconnects_worker_and_removes_in_flight_requ
     assert!(!core.has_worker(&ack.worker_id));
     assert_eq!(core.request_state("request-1"), None);
 }
+
+#[tokio::test]
+async fn server_models_refresh_signal_is_forwarded_to_connected_worker() {
+    let (addr, core) = spawn_server().await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    let ack = register_test_worker(&mut socket).await;
+
+    {
+        let mut core = core.lock().await;
+        let signal = core.request_worker_models_refresh(&ack.worker_id, Some("test-refresh"));
+        assert!(
+            signal.is_some(),
+            "expected signal to be queued for connected worker"
+        );
+    }
+
+    assert_eq!(
+        next_server_message(&mut socket, "models refresh signal").await,
+        ServerToWorkerMessage::ModelsRefresh(worker_protocol::ModelsRefreshMessage {
+            reason: Some("test-refresh".to_string()),
+        })
+    );
+}
