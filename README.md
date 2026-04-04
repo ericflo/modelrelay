@@ -1,5 +1,6 @@
 [![CI](https://github.com/ericflo/llm-worker-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/ericflo/llm-worker-proxy/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/ericflo/llm-worker-proxy/branch/main/graph/badge.svg)](https://codecov.io/gh/ericflo/llm-worker-proxy)
+[![crates.io](https://img.shields.io/crates/v/worker-protocol.svg)](https://crates.io/crates/worker-protocol)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 # llm-worker-proxy
@@ -96,6 +97,12 @@ Download the latest release for your platform from the [Releases page](https://g
 | macOS Apple Silicon | `proxy-server-darwin-arm64` | `worker-daemon-darwin-arm64` |
 | Windows x86_64 | `proxy-server-windows-amd64.exe` | `worker-daemon-windows-amd64.exe` |
 | Windows arm64 | `proxy-server-windows-arm64.exe` | `worker-daemon-windows-arm64.exe` |
+
+### From crates.io
+
+```bash
+cargo install proxy-server worker-daemon
+```
 
 ### Build from source
 
