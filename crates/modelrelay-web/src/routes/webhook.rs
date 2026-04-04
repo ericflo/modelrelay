@@ -58,7 +58,9 @@ pub async fn handle(
     let result = match event_type {
         "checkout.session.completed" => handle_checkout_completed(&state, pool, &payload).await,
         "customer.subscription.updated" => handle_subscription_updated(pool, &payload).await,
-        "customer.subscription.deleted" => handle_subscription_deleted(&state, pool, &payload).await,
+        "customer.subscription.deleted" => {
+            handle_subscription_deleted(&state, pool, &payload).await
+        }
         "invoice.payment_failed" => handle_payment_failed(pool, &payload).await,
         _ => {
             tracing::debug!("ignoring unhandled webhook event: {event_type}");
@@ -164,11 +166,7 @@ async fn provision_api_key(
 }
 
 /// Call `DELETE {admin_url}/admin/keys/{key_id}` to revoke an API key.
-async fn revoke_api_key(
-    admin_url: &str,
-    admin_token: &str,
-    key_id: &str,
-) -> Result<(), String> {
+async fn revoke_api_key(admin_url: &str, admin_token: &str, key_id: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
     let url = format!("{}/admin/keys/{}", admin_url.trim_end_matches('/'), key_id);
     let resp = client
@@ -265,9 +263,7 @@ async fn handle_checkout_completed(
             }
         }
     } else {
-        tracing::warn!(
-            "admin API not configured — skipping API key provisioning for user={email}"
-        );
+        tracing::warn!("admin API not configured — skipping API key provisioning for user={email}");
     }
 
     tracing::info!(
@@ -328,8 +324,7 @@ async fn handle_subscription_deleted(
 
     // Revoke the API key via admin API
     if let Some(ref key_id) = api_key_id {
-        if let (Some(ref admin_url), Some(ref admin_token)) =
-            (&state.admin_url, &state.admin_token)
+        if let (Some(ref admin_url), Some(ref admin_token)) = (&state.admin_url, &state.admin_token)
         {
             match revoke_api_key(admin_url, admin_token, key_id).await {
                 Ok(()) => {

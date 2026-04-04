@@ -62,7 +62,12 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
     };
 
     let has_stripe_customer = user.stripe_customer_id.is_some();
-    let html = dashboard_html(&user.email, sub.as_ref(), has_stripe_customer, user.api_key.as_deref());
+    let html = dashboard_html(
+        &user.email,
+        sub.as_ref(),
+        has_stripe_customer,
+        user.api_key.as_deref(),
+    );
     Html(page_shell("Dashboard", &html)).into_response()
 }
 
@@ -196,7 +201,12 @@ fn no_db_html() -> String {
         .to_string()
 }
 
-fn dashboard_html(email: &str, sub: Option<&SubscriptionRow>, has_stripe_customer: bool, api_key: Option<&str>) -> String {
+fn dashboard_html(
+    email: &str,
+    sub: Option<&SubscriptionRow>,
+    has_stripe_customer: bool,
+    api_key: Option<&str>,
+) -> String {
     let email_escaped = html_escape(email);
 
     let sub_card = if let Some(s) = sub {

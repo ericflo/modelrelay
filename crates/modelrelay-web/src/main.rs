@@ -42,7 +42,9 @@ async fn main() {
     let admin_url = std::env::var("MODELRELAY_ADMIN_URL").ok();
     let admin_token = std::env::var("MODELRELAY_ADMIN_TOKEN").ok();
     if admin_url.is_none() || admin_token.is_none() {
-        tracing::warn!("MODELRELAY_ADMIN_URL or MODELRELAY_ADMIN_TOKEN not set — API key provisioning disabled");
+        tracing::warn!(
+            "MODELRELAY_ADMIN_URL or MODELRELAY_ADMIN_TOKEN not set — API key provisioning disabled"
+        );
     }
 
     // Set up session layer if we have a DB
