@@ -281,6 +281,26 @@ A ready-made load test script lives at [`extras/load-test.sh`](extras/load-test.
 ./extras/load-test.sh -n 200 -c 20 -m llama3-8b
 ```
 
+### Shell Completions
+
+Both `modelrelay-server` and `modelrelay-worker` can generate shell completion scripts via the hidden `--completions` flag:
+
+```bash
+# Bash
+modelrelay-server --completions bash > ~/.local/share/bash-completion/completions/modelrelay-server
+modelrelay-worker --completions bash > ~/.local/share/bash-completion/completions/modelrelay-worker
+
+# Zsh (add the target directory to $fpath)
+modelrelay-server --completions zsh > ~/.zfunc/_modelrelay-server
+modelrelay-worker --completions zsh > ~/.zfunc/_modelrelay-worker
+
+# Fish
+modelrelay-server --completions fish > ~/.config/fish/completions/modelrelay-server.fish
+modelrelay-worker --completions fish > ~/.config/fish/completions/modelrelay-worker.fish
+```
+
+Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
+
 ## Documents
 
 - [Behavior contract](docs/behavior-contract.md) — the full specification of proxy, queue, streaming, and cancellation semantics
