@@ -1,6 +1,6 @@
-//! ModelRelay Web — open-source admin dashboard and monitoring UI.
+//! `ModelRelay` Web — open-source admin dashboard and monitoring UI.
 //!
-//! This crate provides the self-hostable admin interface for ModelRelay.
+//! This crate provides the self-hostable admin interface for `ModelRelay`.
 //! It includes shared HTML templates, a health endpoint, and a monitoring
 //! dashboard. The commercial `modelrelay-cloud` crate depends on this and
 //! adds Stripe billing, user accounts, and subscription management on top.
