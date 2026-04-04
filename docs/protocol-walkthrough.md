@@ -2,7 +2,7 @@
 
 This document shows the actual message flow between components for each
 major scenario.  Message types reference the structs in the
-`worker-protocol` crate (`ServerToWorkerMessage` / `WorkerToServerMessage`).
+`modelrelay-protocol` crate (`ServerToWorkerMessage` / `WorkerToServerMessage`).
 
 ---
 
