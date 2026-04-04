@@ -1500,3 +1500,272 @@ async fn worker_daemon_run_with_reconnect_exits_cleanly_after_proxy_graceful_shu
         "run_with_reconnect should return Ok(()) after graceful shutdown, got: {join_result:?}"
     );
 }
+
+// ---- Responses API (OpenAI /v1/responses) live daemon tests ----
+
+async fn mock_responses_handler(
+    State(state): State<BackendState>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    let is_streaming = body.contains(r#""stream":true"#);
+
+    if let Some(observed_request_tx) = state.observed_request_tx.lock().await.take() {
+        let _ = observed_request_tx.send(ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: header_value(&headers, "authorization"),
+            openai_organization: header_value(&headers, "openai-organization"),
+            x_api_key: header_value(&headers, "x-api-key"),
+            anthropic_version: header_value(&headers, "anthropic-version"),
+            anthropic_beta: header_value(&headers, "anthropic-beta"),
+            content_type: header_value(&headers, "content-type"),
+            body,
+        });
+    }
+
+    if is_streaming {
+        let chunks = [
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+            "data: [DONE]\n\n",
+        ];
+        let stream = stream::unfold(0_usize, move |index| async move {
+            let chunk = chunks.get(index)?;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Some((
+                Ok::<Bytes, Infallible>(Bytes::from_static(chunk.as_bytes())),
+                index + 1,
+            ))
+        });
+
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            "content-type",
+            "text/event-stream".parse().expect("parse content-type"),
+        );
+        response.headers_mut().insert(
+            "openai-beta",
+            "responses=v1".parse().expect("parse openai-beta header"),
+        );
+        return response;
+    }
+
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/json"),
+            ("openai-beta", "responses=v1"),
+            ("x-backend-trace", "mock-responses-backend"),
+        ],
+        r#"{"id":"resp_456","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","content":[{"type":"output_text","text":"proxy success"}]}]}"#,
+    )
+        .into_response()
+}
+
+async fn spawn_mock_responses_backend() -> (SocketAddr, oneshot::Receiver<ObservedBackendRequest>) {
+    let (observed_request_tx, observed_request_rx) = oneshot::channel();
+    let state = BackendState {
+        observed_request_tx: Arc::new(Mutex::new(Some(observed_request_tx))),
+    };
+    let app = Router::new()
+        .route("/v1/responses", post(mock_responses_handler))
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind responses backend listener");
+    let addr = listener
+        .local_addr()
+        .expect("responses backend listener local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve responses backend app");
+    });
+
+    (addr, observed_request_rx)
+}
+
+async fn post_responses(addr: SocketAddr, body: &str, headers: &[(&str, &str)]) -> String {
+    let mut stream = open_responses_request(addr, body, headers).await;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read responses response");
+    String::from_utf8(response).expect("proxy response is utf-8")
+}
+
+async fn open_responses_request(
+    addr: SocketAddr,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> TcpStream {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .expect("connect to proxy server");
+    let mut request = format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        write!(request, "{name}: {value}\r\n").expect("append request header");
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write responses request");
+
+    stream
+}
+
+#[tokio::test]
+async fn worker_daemon_forwards_non_streaming_openai_responses_request_through_live_proxy() {
+    let (proxy_addr, _core) = spawn_proxy_server("openai").await;
+    let (backend_addr, observed_request_rx) = spawn_mock_responses_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let request_body = r#"{"model":"gpt-4.1-mini","input":"hello from responses proxy"}"#;
+    let response = post_responses(
+        proxy_addr,
+        request_body,
+        &[
+            ("Authorization", "Bearer client-token"),
+            ("OpenAI-Beta", "responses=v1"),
+        ],
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: Some("Bearer client-token".to_string()),
+            openai_organization: None,
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: request_body.to_string(),
+        }
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
+    assert!(response.contains("\r\nx-backend-trace: mock-responses-backend\r\n"));
+    assert!(response.ends_with(
+        r#"{"id":"resp_456","object":"response","model":"gpt-4.1-mini","output":[{"type":"message","content":[{"type":"output_text","text":"proxy success"}]}]}"#
+    ));
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_forwards_streaming_openai_responses_request_through_live_proxy() {
+    let (proxy_addr, _core) = spawn_proxy_server("openai").await;
+    let (backend_addr, observed_request_rx) = spawn_mock_responses_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-box-a".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let request_body =
+        r#"{"model":"gpt-4.1-mini","stream":true,"input":"hello streaming from responses proxy"}"#;
+    let mut response_stream = open_responses_request(
+        proxy_addr,
+        request_body,
+        &[
+            ("Authorization", "Bearer client-token"),
+            ("OpenAI-Beta", "responses=v1"),
+        ],
+    )
+    .await;
+
+    let first_fragment = read_until_contains(
+        &mut response_stream,
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+    )
+    .await;
+
+    let observed_request = timeout(Duration::from_secs(2), observed_request_rx)
+        .await
+        .expect("backend observed request before timeout")
+        .expect("backend observed request");
+
+    assert_eq!(
+        observed_request,
+        ObservedBackendRequest {
+            path: "/v1/responses".to_string(),
+            authorization: Some("Bearer client-token".to_string()),
+            openai_organization: None,
+            x_api_key: None,
+            anthropic_version: None,
+            anthropic_beta: None,
+            content_type: Some("application/json".to_string()),
+            body: request_body.to_string(),
+        }
+    );
+    assert!(first_fragment.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(first_fragment.contains("\r\ncontent-type: text/event-stream\r\n"));
+    assert!(
+        first_fragment
+            .contains("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n")
+    );
+    assert!(!first_fragment.contains("data: [DONE]\n\n"));
+
+    let mut rest = Vec::new();
+    response_stream
+        .read_to_end(&mut rest)
+        .await
+        .expect("read streaming responses response");
+    let full_response = first_fragment + &String::from_utf8(rest).expect("proxy response is utf-8");
+
+    let hel_index = full_response
+        .find("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n")
+        .expect("find first streamed chunk");
+    let lo_index = full_response
+        .find("data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n")
+        .expect("find second streamed chunk");
+    let done_index = full_response
+        .find("data: [DONE]\n\n")
+        .expect("find done marker");
+
+    assert!(hel_index < lo_index);
+    assert!(lo_index < done_index);
+    assert!(full_response.ends_with("0\r\n\r\n"));
+
+    daemon_handle.abort();
+}
