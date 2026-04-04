@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ModelRelay — Managed LLM Relay for Your AI Workers</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0d1117; color: #e6edf3; line-height: 1.6;
+    }
+    a { color: #7c3aed; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+
+    /* Nav */
+    nav { padding: 20px 0; border-bottom: 1px solid #21262d; }
+    nav .container { display: flex; justify-content: space-between; align-items: center; }
+    .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; }
+    .logo span { color: #7c3aed; }
+    nav a.gh { color: #8b949e; font-size: 0.9rem; }
+    nav a.gh:hover { color: #e6edf3; }
+
+    /* Hero */
+    .hero { text-align: center; padding: 100px 0 80px; }
+    .hero h1 { font-size: 3rem; font-weight: 800; margin-bottom: 20px; line-height: 1.15; }
+    .hero h1 span { color: #7c3aed; }
+    .hero p { font-size: 1.25rem; color: #8b949e; max-width: 640px; margin: 0 auto 40px; }
+    .btn {
+      display: inline-block; padding: 14px 36px; background: #7c3aed; color: #fff;
+      border-radius: 8px; font-size: 1.1rem; font-weight: 600; transition: background 0.2s;
+    }
+    .btn:hover { background: #6d28d9; text-decoration: none; }
+
+    /* Features */
+    .features { padding: 80px 0; border-top: 1px solid #21262d; }
+    .features h2 { text-align: center; font-size: 2rem; margin-bottom: 48px; }
+    .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; }
+    .feature-card {
+      background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 32px;
+    }
+    .feature-card h3 { font-size: 1.2rem; margin-bottom: 12px; color: #e6edf3; }
+    .feature-card p { color: #8b949e; font-size: 0.95rem; }
+
+    /* Pricing */
+    .pricing { padding: 80px 0; border-top: 1px solid #21262d; text-align: center; }
+    .pricing h2 { font-size: 2rem; margin-bottom: 16px; }
+    .pricing .subtitle { color: #8b949e; margin-bottom: 40px; font-size: 1.1rem; }
+    .price-card {
+      display: inline-block; background: #161b22; border: 2px solid #7c3aed;
+      border-radius: 16px; padding: 48px; max-width: 440px; text-align: center;
+    }
+    .price-card .amount { font-size: 3.5rem; font-weight: 800; color: #e6edf3; }
+    .price-card .period { font-size: 1.1rem; color: #8b949e; }
+    .price-card ul {
+      list-style: none; margin: 24px 0 32px; text-align: left; color: #8b949e;
+    }
+    .price-card li { padding: 6px 0; }
+    .price-card li::before { content: "✓ "; color: #7c3aed; font-weight: 700; }
+
+    /* Footer */
+    footer { padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }
+    footer a { color: #8b949e; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container">
+      <div class="logo">Model<span>Relay</span></div>
+      <a class="gh" href="https://github.com/ericflo/modelrelay">GitHub</a>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="container">
+      <h1>Managed LLM Relay for<br>Your <span>AI Workers</span></h1>
+      <p>Route inference requests to your GPU workers through a secure, authenticated relay. Always-on queueing, streaming, and cancellation.</p>
+      <a class="btn" href="/signup">Get Started &rarr;</a>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="container">
+      <h2>Why ModelRelay?</h2>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <h3>Secure WebSocket Relay</h3>
+          <p>Workers connect via authenticated WebSocket from anywhere &mdash; behind NAT, in the cloud, or on bare metal. No inbound ports required.</p>
+        </div>
+        <div class="feature-card">
+          <h3>OpenAI-Compatible API</h3>
+          <p>Drop-in replacement for any OpenAI client. Point your SDK at ModelRelay and your requests are routed to your own workers.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Managed Infrastructure</h3>
+          <p>Hosted on reliable Kubernetes infrastructure. No ops burden &mdash; we handle uptime, TLS, scaling, and monitoring so you can focus on models.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="pricing">
+    <div class="container">
+      <h2>Simple Pricing</h2>
+      <p class="subtitle">One plan. Everything included.</p>
+      <div class="price-card">
+        <div class="amount">$20</div>
+        <div class="period">per month</div>
+        <ul>
+          <li>One managed relay instance</li>
+          <li>Unlimited workers</li>
+          <li>Unlimited requests</li>
+          <li>WebSocket streaming</li>
+          <li>Request queueing &amp; cancellation</li>
+          <li>TLS &amp; authentication included</li>
+        </ul>
+        <a class="btn" href="/signup">Get Started &rarr;</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+    </div>
+  </footer>
+</body>
+</html>
