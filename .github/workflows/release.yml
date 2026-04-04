@@ -92,6 +92,26 @@ jobs:
           name: binaries-${{ matrix.artifact_suffix }}
           path: dist/
 
+  publish:
+    name: Publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          cargo publish -p worker-protocol --no-verify
+          sleep 30
+          cargo publish -p proxy-server --no-verify
+          cargo publish -p worker-daemon --no-verify
+
   release:
     name: Create GitHub Release
     needs: build
