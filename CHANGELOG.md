@@ -7,9 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-04-04
+
 ### Added
 
-- CODE_OF_CONDUCT.md
+- CODE_OF_CONDUCT.md (Contributor Covenant)
+- MSRV badge (rustc 1.94+) in README
+- Rustdoc coverage on `modelrelay-protocol` public API
+- Expanded architecture.md with component diagrams and state machines
+- Wire trace examples, TLS nginx config, load test script, and operational runbook
+- Documentation of required CI secrets for crates.io publishing
+
+### Changed
+
+- Cleaned up `docs/behavior-contract.md` to remove private provenance references; renamed "First Characterization Tests To Write Next" section to "Extension Points"
+- Pointed homepage to GitHub until modelrelay.io is live
+
+### Fixed
+
+- Migrated cargo audit CI step from deprecated `rustsec/audit-check` to direct `cargo audit`
+- Fixed Node.js 20 deprecation warnings in release workflow; added graceful crates.io skip
+- Corrected crates.io badge format in README
+- Fixed stale binary names (`proxy-server`/`worker-daemon`) in docs, examples, and CONTRIBUTING.md
+- Removed internal agent branch prefix from CONTRIBUTING.md
+- Used compare URL for CHANGELOG v0.1.1 link
 
 ## [0.1.1] - 2026-04-04
 
@@ -43,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform release binaries (Linux x86_64/aarch64, macOS x86_64/aarch64) via GitHub Actions.
 - CI pipeline with formatting, linting, and test checks.
 
-[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/ericflo/modelrelay/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ericflo/modelrelay/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ericflo/modelrelay/releases/tag/v0.1.0
