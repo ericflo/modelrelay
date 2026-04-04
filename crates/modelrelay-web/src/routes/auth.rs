@@ -29,7 +29,7 @@ pub async fn signup_page(session: Session) -> Response {
     if let Ok(Some(_)) = session.get::<String>("user_id").await {
         return Redirect::to("/dashboard").into_response();
     }
-    Html(page_shell("Sign Up", &signup_form_html(None))).into_response()
+    Html(super::templates::page_shell("Sign Up", &signup_form_html(None), false)).into_response()
 }
 
 /// POST /signup — create a new user account.
@@ -39,9 +39,10 @@ pub async fn signup_submit(
     Form(form): Form<SignupForm>,
 ) -> Response {
     let Some(ref pool) = state.db else {
-        return Html(page_shell(
+        return Html(super::templates::page_shell(
             "Sign Up",
             "<div class=\"card\"><h2>Error</h2><p>Database not available.</p></div>",
+            false,
         ))
         .into_response();
     };
@@ -51,16 +52,18 @@ pub async fn signup_submit(
 
     // Basic validation
     if email.is_empty() || !email.contains('@') {
-        return Html(page_shell(
+        return Html(super::templates::page_shell(
             "Sign Up",
             &signup_form_html(Some("Please enter a valid email address.")),
+            false,
         ))
         .into_response();
     }
     if password.len() < 8 {
-        return Html(page_shell(
+        return Html(super::templates::page_shell(
             "Sign Up",
             &signup_form_html(Some("Password must be at least 8 characters.")),
+            false,
         ))
         .into_response();
     }
@@ -74,11 +77,12 @@ pub async fn signup_submit(
             .unwrap_or(None);
 
     if let Some((_, Some(_))) = existing {
-        return Html(page_shell(
+        return Html(super::templates::page_shell(
             "Sign Up",
             &signup_form_html(Some(
                 "An account with this email already exists. <a href=\"/login\">Log in instead</a>.",
             )),
+            false,
         ))
         .into_response();
     }
@@ -88,9 +92,10 @@ pub async fn signup_submit(
         Ok(h) => h,
         Err(e) => {
             tracing::error!("password hash error: {e}");
-            return Html(page_shell(
+            return Html(super::templates::page_shell(
                 "Sign Up",
                 &signup_form_html(Some("Internal error. Please try again.")),
+                false,
             ))
             .into_response();
         }
@@ -112,9 +117,10 @@ pub async fn signup_submit(
         Ok(id) => id,
         Err(e) => {
             tracing::error!("user insert error: {e}");
-            return Html(page_shell(
+            return Html(super::templates::page_shell(
                 "Sign Up",
                 &signup_form_html(Some("Could not create account. Please try again.")),
+                false,
             ))
             .into_response();
         }
@@ -133,7 +139,7 @@ pub async fn login_page(session: Session) -> Response {
     if let Ok(Some(_)) = session.get::<String>("user_id").await {
         return Redirect::to("/dashboard").into_response();
     }
-    Html(page_shell("Log In", &login_form_html(None))).into_response()
+    Html(super::templates::page_shell("Log In", &login_form_html(None), false)).into_response()
 }
 
 /// POST /login — verify credentials and set session.
@@ -143,9 +149,10 @@ pub async fn login_submit(
     Form(form): Form<LoginForm>,
 ) -> Response {
     let Some(ref pool) = state.db else {
-        return Html(page_shell(
+        return Html(super::templates::page_shell(
             "Log In",
             "<div class=\"card\"><h2>Error</h2><p>Database not available.</p></div>",
+            false,
         ))
         .into_response();
     };
@@ -160,17 +167,19 @@ pub async fn login_submit(
             .unwrap_or(None);
 
     let Some((user_id, Some(stored_hash))) = row else {
-        return Html(page_shell(
+        return Html(super::templates::page_shell(
             "Log In",
             &login_form_html(Some("Invalid email or password.")),
+            false,
         ))
         .into_response();
     };
 
     if !verify_password(&form.password, &stored_hash) {
-        return Html(page_shell(
+        return Html(super::templates::page_shell(
             "Log In",
             &login_form_html(Some("Invalid email or password.")),
+            false,
         ))
         .into_response();
     }
@@ -255,93 +264,5 @@ fn login_form_html(error: Option<&str>) -> String {
   </form>
   <p class="auth-switch">Don't have an account? <a href="/signup">Sign up</a></p>
 </div>"#
-    )
-}
-
-fn page_shell(title: &str, body_content: &str) -> String {
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title} — ModelRelay</title>
-  <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #0d1117; color: #e6edf3; line-height: 1.6;
-    }}
-    a {{ color: #7c3aed; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .container {{ max-width: 900px; margin: 0 auto; padding: 0 24px; }}
-
-    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; }}
-    nav .container {{ display: flex; justify-content: space-between; align-items: center; }}
-    .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
-    .logo span {{ color: #7c3aed; }}
-    .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
-    .nav-links a:hover {{ color: #e6edf3; }}
-
-    .content {{ padding: 60px 0; }}
-    .content h1 {{ font-size: 2rem; margin-bottom: 24px; }}
-
-    .card {{
-      background: #161b22; border: 1px solid #21262d; border-radius: 12px;
-      padding: 32px; margin-bottom: 24px; max-width: 480px; margin-left: auto; margin-right: auto;
-    }}
-    .card h2 {{ font-size: 1.2rem; margin-bottom: 16px; color: #e6edf3; }}
-
-    .auth-form .form-group {{ margin-bottom: 16px; }}
-    .auth-form label {{ display: block; font-size: 0.9rem; color: #8b949e; margin-bottom: 4px; }}
-    .auth-form input {{
-      width: 100%; padding: 10px 12px; background: #0d1117; border: 1px solid #30363d;
-      border-radius: 8px; color: #e6edf3; font-size: 0.95rem;
-    }}
-    .auth-form input:focus {{ outline: none; border-color: #7c3aed; }}
-
-    .btn {{
-      display: inline-block; padding: 10px 20px; background: #7c3aed; color: #fff;
-      border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
-      cursor: pointer; text-decoration: none; width: 100%;
-    }}
-    .btn:hover {{ background: #6d28d9; text-decoration: none; }}
-
-    .auth-switch {{ margin-top: 16px; text-align: center; color: #8b949e; font-size: 0.9rem; }}
-
-    .error-msg {{
-      background: #3b1219; border: 1px solid #7f1d1d; border-radius: 8px;
-      padding: 10px 14px; margin-bottom: 16px; color: #f87171; font-size: 0.9rem;
-    }}
-
-    footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
-    footer a {{ color: #8b949e; }}
-  </style>
-</head>
-<body>
-  <nav>
-    <div class="container">
-      <a href="/" class="logo">Model<span>Relay</span></a>
-      <div class="nav-links">
-        <a href="/dashboard">Dashboard</a>
-        <a href="/pricing">Pricing</a>
-      </div>
-    </div>
-  </nav>
-
-  <section class="content">
-    <div class="container">
-      <h1>{title}</h1>
-      {body_content}
-    </div>
-  </section>
-
-  <footer>
-    <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
-    </div>
-  </footer>
-</body>
-</html>"#
     )
 }

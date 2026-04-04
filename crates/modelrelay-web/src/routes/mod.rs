@@ -12,6 +12,7 @@ mod auth;
 mod checkout;
 mod dashboard;
 mod pricing;
+pub(crate) mod templates;
 mod webhook;
 
 static LANDING_HTML: &str = include_str!("../../templates/index.html");

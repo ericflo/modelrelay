@@ -13,7 +13,7 @@ use crate::state::AppState;
 /// If user found: shows subscription status, API key, and billing portal link.
 pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Response {
     let Some(ref pool) = state.db else {
-        return Html(page_shell("Dashboard", &no_db_html())).into_response();
+        return Html(super::templates::page_shell("Dashboard", &no_db_html(), true)).into_response();
     };
 
     let user_id: Option<String> = session.get("user_id").await.unwrap_or(None);
@@ -40,7 +40,7 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
         Ok(None) => return Redirect::to("/login").into_response(),
         Err(e) => {
             tracing::error!("dashboard user query error: {e}");
-            return Html(page_shell("Dashboard", "<div class=\"card\"><h2>Error</h2><p>Could not load your account. Please try again later.</p></div>")).into_response();
+            return Html(super::templates::page_shell("Dashboard", "<div class=\"card\"><h2>Error</h2><p>Could not load your account. Please try again later.</p></div>", true)).into_response();
         }
     };
 
@@ -68,7 +68,7 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
         has_stripe_customer,
         user.api_key.as_deref(),
     );
-    Html(page_shell("Dashboard", &html)).into_response()
+    Html(super::templates::page_shell("Dashboard", &html, true)).into_response()
 }
 
 /// POST /dashboard/billing-portal — create a Stripe billing portal session and redirect.
@@ -107,11 +107,12 @@ pub async fn billing_portal(session: Session, State(state): State<Arc<AppState>>
             .flatten();
 
     let Some(customer_id) = customer_id else {
-        return Html(page_shell(
+        return Html(super::templates::page_shell(
             "Error",
             "<div class=\"card\"><h2>No billing account</h2>\
              <p>No Stripe customer found for your account.</p>\
              <p><a href=\"/dashboard\">&larr; Back to dashboard</a></p></div>",
+            true,
         ))
         .into_response();
     };
@@ -315,98 +316,3 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
-fn page_shell(title: &str, body_content: &str) -> String {
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title} — ModelRelay</title>
-  <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #0d1117; color: #e6edf3; line-height: 1.6;
-    }}
-    a {{ color: #7c3aed; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .container {{ max-width: 900px; margin: 0 auto; padding: 0 24px; }}
-
-    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; }}
-    nav .container {{ display: flex; justify-content: space-between; align-items: center; }}
-    .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
-    .logo span {{ color: #7c3aed; }}
-    .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
-    .nav-links a:hover {{ color: #e6edf3; }}
-    .nav-links form {{ display: inline; }}
-    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
-    .nav-links button:hover {{ color: #e6edf3; }}
-
-    .content {{ padding: 60px 0; }}
-    .content h1 {{ font-size: 2rem; margin-bottom: 24px; }}
-
-    .card {{
-      background: #161b22; border: 1px solid #21262d; border-radius: 12px;
-      padding: 32px; margin-bottom: 24px;
-    }}
-    .card h2 {{ font-size: 1.2rem; margin-bottom: 12px; color: #e6edf3; }}
-    .card p {{ color: #8b949e; }}
-
-    .badge {{
-      display: inline-block; padding: 4px 12px; border-radius: 20px;
-      font-size: 0.8rem; font-weight: 600; background: #1f2937; color: #8b949e;
-    }}
-    .badge-active {{ background: #064e3b; color: #34d399; }}
-    .badge-warn {{ background: #78350f; color: #fbbf24; }}
-    .badge-cancel {{ background: #7f1d1d; color: #f87171; }}
-
-    .info-table {{ margin-top: 16px; width: 100%; border-collapse: collapse; }}
-    .info-table td {{ padding: 8px 0; border-bottom: 1px solid #21262d; color: #8b949e; }}
-    .info-table td:first-child {{ font-weight: 600; color: #e6edf3; width: 140px; }}
-
-    .key-display {{
-      margin-top: 12px; padding: 12px 16px; background: #0d1117;
-      border: 1px solid #21262d; border-radius: 8px; font-family: monospace;
-      color: #7c3aed; word-break: break-all;
-    }}
-
-    .btn {{
-      display: inline-block; padding: 10px 20px; background: #7c3aed; color: #fff;
-      border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
-      cursor: pointer; text-decoration: none;
-    }}
-    .btn:hover {{ background: #6d28d9; text-decoration: none; }}
-
-    footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
-    footer a {{ color: #8b949e; }}
-  </style>
-</head>
-<body>
-  <nav>
-    <div class="container">
-      <a href="/" class="logo">Model<span>Relay</span></a>
-      <div class="nav-links">
-        <a href="/dashboard">Dashboard</a>
-        <a href="/pricing">Pricing</a>
-        <form method="POST" action="/logout"><button type="submit">Log out</button></form>
-      </div>
-    </div>
-  </nav>
-
-  <section class="content">
-    <div class="container">
-      <h1>{title}</h1>
-      {body_content}
-    </div>
-  </section>
-
-  <footer>
-    <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
-    </div>
-  </footer>
-</body>
-</html>"#
-    )
-}
