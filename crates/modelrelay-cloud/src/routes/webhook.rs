@@ -418,7 +418,9 @@ mod tests {
         let header_valid = make_sig_header(payload, secret, "999");
         // Extract the valid v1= value
         let valid_sig = header_valid.split("v1=").nth(1).unwrap();
-        let header = format!("t=999,v1=0000000000000000000000000000000000000000000000000000000000000000,v1={valid_sig}");
+        let header = format!(
+            "t=999,v1=0000000000000000000000000000000000000000000000000000000000000000,v1={valid_sig}"
+        );
         assert!(verify_signature(&header, payload, secret).is_ok());
     }
 

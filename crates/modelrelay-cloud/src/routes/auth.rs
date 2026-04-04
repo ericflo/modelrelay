@@ -280,10 +280,7 @@ mod tests {
         let password = "same_password";
         let hash1 = hash_password(password).expect("hash1 should succeed");
         let hash2 = hash_password(password).expect("hash2 should succeed");
-        assert_ne!(
-            hash1, hash2,
-            "hashes should differ due to random salt"
-        );
+        assert_ne!(hash1, hash2, "hashes should differ due to random salt");
         // But both should verify
         assert!(verify_password(password, &hash1));
         assert!(verify_password(password, &hash2));
