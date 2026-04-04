@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::{
-    CancelReason, HttpResponseEvent, PendingHttpResponse, PendingStreamingHttpResponse,
-    ProxyServerCore, RequestFailureReason, WorkerSocketApp,
+    AdminWorkerInfo, CancelReason, HttpResponseEvent, PendingHttpResponse,
+    PendingStreamingHttpResponse, ProxyServerCore, RequestFailureReason, WorkerSocketApp,
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
@@ -32,6 +32,7 @@ pub struct ProxyHttpApp {
     models_provider: String,
     provider_enabled: bool,
     worker_socket_app: Option<WorkerSocketApp>,
+    admin_token: Option<String>,
 }
 
 impl ProxyHttpApp {
@@ -42,7 +43,14 @@ impl ProxyHttpApp {
             models_provider: OPENAI_MODELS_PROVIDER.to_string(),
             provider_enabled: true,
             worker_socket_app: None,
+            admin_token: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_admin_token(mut self, token: Option<String>) -> Self {
+        self.admin_token = token;
+        self
     }
 
     #[must_use]
@@ -70,11 +78,15 @@ impl ProxyHttpApp {
             .route("/v1/chat/completions", post(chat_completions_handler))
             .route("/v1/messages", post(messages_handler))
             .route("/v1/responses", post(responses_handler))
+            .route("/admin/workers", get(admin_workers_handler))
+            .route("/admin/stats", get(admin_stats_handler))
+            .route("/admin/keys", get(admin_keys_handler))
             .with_state(HttpState {
                 core: self.core,
                 models_provider: self.models_provider,
                 provider_enabled: self.provider_enabled,
                 started_at: Instant::now(),
+                admin_token: self.admin_token,
             });
 
         match self.worker_socket_app {
@@ -90,6 +102,7 @@ struct HttpState {
     models_provider: String,
     provider_enabled: bool,
     started_at: Instant,
+    admin_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -153,6 +166,84 @@ async fn models_handler(State(state): State<HttpState>) -> Json<ModelsResponse> 
             })
             .collect(),
     })
+}
+
+fn check_admin_auth(state: &HttpState, headers: &AxumHeaderMap) -> Result<(), StatusCode> {
+    let Some(expected) = &state.admin_token else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    let Some(auth_header) = headers.get("authorization") else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    let Ok(auth_str) = auth_header.to_str() else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
+    if subtle::ConstantTimeEq::ct_eq(token.as_bytes(), expected.as_bytes()).into() {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+#[derive(Serialize)]
+struct AdminWorkersResponse {
+    workers: Vec<AdminWorkerInfo>,
+}
+
+async fn admin_workers_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+) -> Response {
+    if let Err(status) = check_admin_auth(&state, &headers) {
+        return status.into_response();
+    }
+
+    let workers = state.core.lock().await.admin_workers_snapshot();
+    Json(AdminWorkersResponse { workers }).into_response()
+}
+
+#[derive(Serialize)]
+struct AdminStatsResponse {
+    queue_depth: std::collections::HashMap<String, usize>,
+    active_workers: usize,
+}
+
+async fn admin_stats_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+) -> Response {
+    if let Err(status) = check_admin_auth(&state, &headers) {
+        return status.into_response();
+    }
+
+    let core = state.core.lock().await;
+    let queue_depth = core.admin_queue_depth();
+    let active_workers = core.connected_worker_count();
+    Json(AdminStatsResponse {
+        queue_depth,
+        active_workers,
+    })
+    .into_response()
+}
+
+#[derive(Serialize)]
+struct AdminKeysResponse {
+    keys: Vec<()>,
+}
+
+async fn admin_keys_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+) -> Response {
+    if let Err(status) = check_admin_auth(&state, &headers) {
+        return status.into_response();
+    }
+
+    Json(AdminKeysResponse { keys: vec![] }).into_response()
 }
 
 async fn chat_completions_handler(

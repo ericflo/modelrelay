@@ -46,6 +46,10 @@ struct Args {
     #[arg(long, env = "LOG_LEVEL", default_value = "info")]
     log_level: String,
 
+    /// Admin API token for /admin/* endpoints (if unset, admin endpoints return 403)
+    #[arg(long, env = "MODELRELAY_ADMIN_TOKEN")]
+    admin_token: Option<String>,
+
     /// Generate shell completion script for the given shell and exit
     #[arg(long, value_name = "SHELL", hide = true)]
     completions: Option<Shell>,
@@ -103,7 +107,8 @@ async fn main() {
 
     let http_app = ProxyHttpApp::new(Arc::clone(&core))
         .with_models_provider(&args.provider)
-        .with_worker_socket_app(worker_socket_app);
+        .with_worker_socket_app(worker_socket_app)
+        .with_admin_token(args.admin_token);
 
     let mut router = http_app.router();
 
