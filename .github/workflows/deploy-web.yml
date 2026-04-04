@@ -1,0 +1,56 @@
+name: Deploy Web
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          push: true
+          tags: |
+            ghcr.io/ericflo/modelrelay/modelrelay-web:latest
+            ghcr.io/ericflo/modelrelay/modelrelay-web:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup kubectl
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f deploy/modelrelay-io/namespace.yaml
+          kubectl apply -f deploy/modelrelay-io/postgres-pvc.yaml
+          kubectl apply -f deploy/modelrelay-io/postgres-deployment.yaml
+          kubectl apply -f deploy/modelrelay-io/postgres-service.yaml
+          kubectl apply -f deploy/modelrelay-io/web-deployment.yaml
+          kubectl apply -f deploy/modelrelay-io/web-service.yaml
+          kubectl apply -f deploy/modelrelay-io/web-ingress.yaml
+
+      - name: Restart and wait
+        run: |
+          kubectl rollout restart deployment/web -n modelrelay
+          kubectl rollout status deployment/web -n modelrelay --timeout=300s

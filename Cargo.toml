@@ -1,9 +1,10 @@
 [workspace]
 members = [
     "crates/modelrelay-contract-tests",
-    "crates/modelrelay-server",
-    "crates/modelrelay-worker",
     "crates/modelrelay-protocol",
+    "crates/modelrelay-server",
+    "crates/modelrelay-web",
+    "crates/modelrelay-worker",
 ]
 resolver = "3"
 
