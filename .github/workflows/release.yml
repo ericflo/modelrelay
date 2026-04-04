@@ -32,6 +32,14 @@ jobs:
             os: macos-latest
             artifact_suffix: darwin-arm64
             cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_suffix: windows-amd64
+            cross: false
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            artifact_suffix: windows-arm64
+            cross: false
 
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +64,7 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }} -p proxy-server
           fi
+        shell: bash
 
       - name: Build worker-daemon
         run: |
@@ -64,12 +73,19 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }} -p worker-daemon
           fi
+        shell: bash
 
       - name: Stage binaries
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/proxy-server dist/proxy-server-${{ matrix.artifact_suffix }}
-          cp target/${{ matrix.target }}/release/worker-daemon dist/worker-daemon-${{ matrix.artifact_suffix }}
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp target/${{ matrix.target }}/release/proxy-server.exe dist/proxy-server-${{ matrix.artifact_suffix }}.exe
+            cp target/${{ matrix.target }}/release/worker-daemon.exe dist/worker-daemon-${{ matrix.artifact_suffix }}.exe
+          else
+            cp target/${{ matrix.target }}/release/proxy-server dist/proxy-server-${{ matrix.artifact_suffix }}
+            cp target/${{ matrix.target }}/release/worker-daemon dist/worker-daemon-${{ matrix.artifact_suffix }}
+          fi
+        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
@@ -121,10 +137,14 @@ jobs:
             | `proxy-server-linux-arm64` | Linux arm64 |
             | `proxy-server-darwin-amd64` | macOS Intel |
             | `proxy-server-darwin-arm64` | macOS Apple Silicon |
+            | `proxy-server-windows-amd64.exe` | Windows x86_64 |
+            | `proxy-server-windows-arm64.exe` | Windows arm64 |
             | `worker-daemon-linux-amd64` | Linux x86_64 |
             | `worker-daemon-linux-arm64` | Linux arm64 |
             | `worker-daemon-darwin-amd64` | macOS Intel |
             | `worker-daemon-darwin-arm64` | macOS Apple Silicon |
+            | `worker-daemon-windows-amd64.exe` | Windows x86_64 |
+            | `worker-daemon-windows-arm64.exe` | Windows arm64 |
 
             ## Changes since previous release
 

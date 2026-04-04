@@ -84,6 +84,19 @@ docker compose up
 
 The proxy is now listening on `http://localhost:8080`. The worker connects to it automatically and forwards requests to your backend.
 
+### Pre-built binaries
+
+Download the latest release for your platform from the [Releases page](https://github.com/ericflo/llm-worker-proxy/releases):
+
+| Platform | proxy-server | worker-daemon |
+|----------|-------------|---------------|
+| Linux x86_64 | `proxy-server-linux-amd64` | `worker-daemon-linux-amd64` |
+| Linux arm64 | `proxy-server-linux-arm64` | `worker-daemon-linux-arm64` |
+| macOS Intel | `proxy-server-darwin-amd64` | `worker-daemon-darwin-amd64` |
+| macOS Apple Silicon | `proxy-server-darwin-arm64` | `worker-daemon-darwin-arm64` |
+| Windows x86_64 | `proxy-server-windows-amd64.exe` | `worker-daemon-windows-amd64.exe` |
+| Windows arm64 | `proxy-server-windows-arm64.exe` | `worker-daemon-windows-arm64.exe` |
+
 ### Build from source
 
 ```bash
@@ -133,6 +146,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## Features
 
+- **Cross-platform** — pre-built binaries for Linux, macOS, and Windows (x86_64 + arm64)
 - **OpenAI + Anthropic compatible** — `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, `GET /v1/models`
 - **No inbound ports on GPU boxes** — workers connect out to the proxy over WebSocket
 - **Request queueing** — configurable depth and timeout when all workers are busy
