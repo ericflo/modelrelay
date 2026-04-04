@@ -173,6 +173,46 @@ curl http://localhost:8080/v1/chat/completions \
 
 All flags can be passed as CLI arguments or set via the corresponding environment variable.
 
+## Production deployment
+
+### Docker Compose (multi-worker)
+
+The included [`docker-compose.yml`](docker-compose.yml) runs the proxy with two workers, health checks, restart policies, memory limits, and log rotation:
+
+```bash
+cp .env.example .env   # edit WORKER_SECRET and backend URLs
+docker compose up -d
+```
+
+Add more workers by duplicating a worker service block and adjusting `MODELS`, `BACKEND_URL`, and `WORKER_NAME`.
+
+### Systemd (bare metal / VM)
+
+Service files live in [`extras/`](extras/):
+
+```bash
+# Install binaries (from a release archive or cargo build --release)
+sudo install -m 755 proxy-server worker-daemon /usr/local/bin/
+
+# Create a service user
+sudo useradd --system --no-create-home llm-worker-proxy
+sudo mkdir -p /var/lib/llm-worker-proxy /etc/llm-worker-proxy
+
+# Proxy
+sudo cp extras/proxy-server.service /etc/systemd/system/
+sudo cp extras/proxy.env.example /etc/llm-worker-proxy/proxy.env
+sudo vim /etc/llm-worker-proxy/proxy.env   # set WORKER_SECRET
+sudo systemctl enable --now proxy-server
+
+# Workers — the template unit lets you run multiple instances:
+sudo cp extras/worker-daemon@.service /etc/systemd/system/
+sudo cp extras/worker.env.example /etc/llm-worker-proxy/worker-gpu0.env
+sudo vim /etc/llm-worker-proxy/worker-gpu0.env   # set PROXY_URL, BACKEND_URL, MODELS
+sudo systemctl enable --now worker-daemon@gpu0
+```
+
+See [`extras/`](extras/) for the full service files and annotated env examples.
+
 ## Documents
 
 - [Behavior contract](docs/behavior-contract.md) — the full specification of proxy, queue, streaming, and cancellation semantics

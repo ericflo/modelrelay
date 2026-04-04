@@ -1,0 +1,41 @@
+# llm-worker-proxy — proxy-server systemd unit
+#
+# Install:
+#   sudo cp proxy-server.service /etc/systemd/system/
+#   sudo cp proxy.env.example /etc/llm-worker-proxy/proxy.env  # edit values
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now proxy-server
+
+[Unit]
+Description=llm-worker-proxy central proxy server
+Documentation=https://github.com/ericflo/llm-worker-proxy
+After=network.target
+
+[Service]
+Type=simple
+
+# Run as a dedicated unprivileged user. Create it with:
+#   sudo useradd --system --no-create-home llm-worker-proxy
+User=llm-worker-proxy
+Group=llm-worker-proxy
+
+WorkingDirectory=/var/lib/llm-worker-proxy
+
+# Load environment from file. The leading "-" means the service still starts
+# if the file is missing (CLI defaults or env vars set elsewhere will apply).
+EnvironmentFile=-/etc/llm-worker-proxy/proxy.env
+
+ExecStart=/usr/local/bin/proxy-server
+
+# Restart on crash but not on clean exit (e.g. SIGTERM during drain).
+Restart=on-failure
+RestartSec=5
+
+# Hardening — drop capabilities the proxy doesn't need.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
