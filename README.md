@@ -269,6 +269,30 @@ sudo systemctl enable --now modelrelay-worker@gpu0
 
 See [`extras/`](extras/) for the full service files and annotated env examples.
 
+### Windows Service
+
+ModelRelay ships Windows binaries that can run as native Windows Services using `sc.exe`. No third-party service wrappers required.
+
+```powershell
+# Install the server as a service (run as Administrator)
+sc.exe create ModelRelayServer binPath= "C:\ModelRelay\modelrelay-server.exe" start= auto
+
+# Set environment variables for the service (system-wide, persists across reboots)
+[Environment]::SetEnvironmentVariable("WORKER_SECRET", "your-secret-here", "Machine")
+[Environment]::SetEnvironmentVariable("LISTEN_ADDR", "0.0.0.0:8080", "Machine")
+
+# Start the service
+Start-Service ModelRelayServer
+
+# Install a worker service
+sc.exe create ModelRelayWorker binPath= '"C:\ModelRelay\modelrelay-worker.exe" --models llama3-8b' start= auto
+[Environment]::SetEnvironmentVariable("PROXY_URL", "http://your-proxy:8080", "Machine")
+[Environment]::SetEnvironmentVariable("BACKEND_URL", "http://localhost:8000", "Machine")
+Start-Service ModelRelayWorker
+```
+
+For fully annotated install scripts with error handling and uninstall support, see [`extras/install-windows-service.ps1`](extras/install-windows-service.ps1) and [`extras/install-windows-service-worker.ps1`](extras/install-windows-service-worker.ps1). The service runs as `LocalSystem` by default; to use a dedicated account, set the service log-on via `services.msc` or pass `obj=` and `password=` to `sc.exe create`.
+
 ### TLS
 
 The proxy and workers communicate over plain HTTP/WebSocket by default. For production, terminate TLS at a reverse proxy like nginx. An annotated configuration is provided at [`examples/tls-nginx.conf`](examples/tls-nginx.conf) — it handles HTTPS for client requests and `wss://` WebSocket upgrades for workers, with streaming-friendly settings (buffering disabled, long timeouts).

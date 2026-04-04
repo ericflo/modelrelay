@@ -267,6 +267,72 @@ proxy.
 
 ---
 
+## Windows Service
+
+### Checking Service Status
+
+```powershell
+Get-Service ModelRelayServer
+Get-Service ModelRelayWorker
+```
+
+### Starting and Stopping
+
+```powershell
+Start-Service ModelRelayServer
+Stop-Service ModelRelayServer
+
+Start-Service ModelRelayWorker
+Stop-Service ModelRelayWorker
+```
+
+`Stop-Service` sends a stop control signal and waits for the process to
+exit.  ModelRelay handles this as a graceful shutdown — in-flight
+requests finish before the process terminates.  To set an explicit
+timeout:
+
+```powershell
+# Stop with a 60-second timeout (kills the process if it doesn't exit in time)
+Stop-Service ModelRelayServer -NoWait
+Start-Sleep -Seconds 60
+(Get-Service ModelRelayServer).WaitForStatus("Stopped", "00:00:05")
+```
+
+### Logs
+
+Windows Services don't write to stdout by default.  Two options:
+
+1. **Windows Event Log** — ModelRelay writes to the Application log.
+   View with:
+   ```powershell
+   Get-EventLog -LogName Application -Source ModelRelayServer -Newest 50
+   ```
+
+2. **File logging via `RUST_LOG`** — set `RUST_LOG` as a system
+   environment variable and redirect output to a file by wrapping the
+   binary in a small script, or use the `RUST_LOG_FILE` convention if
+   supported.  The simplest approach:
+   ```powershell
+   [Environment]::SetEnvironmentVariable("RUST_LOG", "info", "Machine")
+   ```
+
+### Draining a Worker
+
+To drain a worker gracefully before maintenance:
+
+```powershell
+# Stop the service — this triggers graceful shutdown.
+Stop-Service ModelRelayWorker
+
+# Verify it has stopped.
+Get-Service ModelRelayWorker
+```
+
+The worker completes in-flight requests before exiting, identical to the
+`systemctl stop` behavior on Linux.
+
+---
+
 ## Monitoring Checklist
 
 For production deployments, monitor these signals:
