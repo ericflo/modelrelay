@@ -9,7 +9,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use tower_sessions::Session;
 
-use crate::state::AppState;
+use crate::state::CloudState;
 
 #[derive(Deserialize)]
 pub struct SignupForm {
@@ -29,7 +29,7 @@ pub async fn signup_page(session: Session) -> Response {
     if let Ok(Some(_)) = session.get::<String>("user_id").await {
         return Redirect::to("/dashboard").into_response();
     }
-    Html(super::templates::page_shell(
+    Html(modelrelay_web::templates::page_shell(
         "Sign Up",
         &signup_form_html(None),
         false,
@@ -40,11 +40,11 @@ pub async fn signup_page(session: Session) -> Response {
 /// POST /signup — create a new user account.
 pub async fn signup_submit(
     session: Session,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<CloudState>>,
     Form(form): Form<SignupForm>,
 ) -> Response {
     let Some(ref pool) = state.db else {
-        return Html(super::templates::page_shell(
+        return Html(modelrelay_web::templates::page_shell(
             "Sign Up",
             "<div class=\"card\"><h2>Error</h2><p>Database not available.</p></div>",
             false,
@@ -57,7 +57,7 @@ pub async fn signup_submit(
 
     // Basic validation
     if email.is_empty() || !email.contains('@') {
-        return Html(super::templates::page_shell(
+        return Html(modelrelay_web::templates::page_shell(
             "Sign Up",
             &signup_form_html(Some("Please enter a valid email address.")),
             false,
@@ -65,7 +65,7 @@ pub async fn signup_submit(
         .into_response();
     }
     if password.len() < 8 {
-        return Html(super::templates::page_shell(
+        return Html(modelrelay_web::templates::page_shell(
             "Sign Up",
             &signup_form_html(Some("Password must be at least 8 characters.")),
             false,
@@ -82,7 +82,7 @@ pub async fn signup_submit(
             .unwrap_or(None);
 
     if let Some((_, Some(_))) = existing {
-        return Html(super::templates::page_shell(
+        return Html(modelrelay_web::templates::page_shell(
             "Sign Up",
             &signup_form_html(Some(
                 "An account with this email already exists. <a href=\"/login\">Log in instead</a>.",
@@ -97,7 +97,7 @@ pub async fn signup_submit(
         Ok(h) => h,
         Err(e) => {
             tracing::error!("password hash error: {e}");
-            return Html(super::templates::page_shell(
+            return Html(modelrelay_web::templates::page_shell(
                 "Sign Up",
                 &signup_form_html(Some("Internal error. Please try again.")),
                 false,
@@ -122,7 +122,7 @@ pub async fn signup_submit(
         Ok(id) => id,
         Err(e) => {
             tracing::error!("user insert error: {e}");
-            return Html(super::templates::page_shell(
+            return Html(modelrelay_web::templates::page_shell(
                 "Sign Up",
                 &signup_form_html(Some("Could not create account. Please try again.")),
                 false,
@@ -144,7 +144,7 @@ pub async fn login_page(session: Session) -> Response {
     if let Ok(Some(_)) = session.get::<String>("user_id").await {
         return Redirect::to("/dashboard").into_response();
     }
-    Html(super::templates::page_shell(
+    Html(modelrelay_web::templates::page_shell(
         "Log In",
         &login_form_html(None),
         false,
@@ -155,11 +155,11 @@ pub async fn login_page(session: Session) -> Response {
 /// POST /login — verify credentials and set session.
 pub async fn login_submit(
     session: Session,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<CloudState>>,
     Form(form): Form<LoginForm>,
 ) -> Response {
     let Some(ref pool) = state.db else {
-        return Html(super::templates::page_shell(
+        return Html(modelrelay_web::templates::page_shell(
             "Log In",
             "<div class=\"card\"><h2>Error</h2><p>Database not available.</p></div>",
             false,
@@ -177,7 +177,7 @@ pub async fn login_submit(
             .unwrap_or(None);
 
     let Some((user_id, Some(stored_hash))) = row else {
-        return Html(super::templates::page_shell(
+        return Html(modelrelay_web::templates::page_shell(
             "Log In",
             &login_form_html(Some("Invalid email or password.")),
             false,
@@ -186,7 +186,7 @@ pub async fn login_submit(
     };
 
     if !verify_password(&form.password, &stored_hash) {
-        return Html(super::templates::page_shell(
+        return Html(modelrelay_web::templates::page_shell(
             "Log In",
             &login_form_html(Some("Invalid email or password.")),
             false,

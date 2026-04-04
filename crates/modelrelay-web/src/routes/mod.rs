@@ -1,56 +1,47 @@
-use std::sync::Arc;
-
-use axum::extract::State;
 use axum::response::Html;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use crate::state::AppState;
-
-mod auth;
-mod checkout;
-mod dashboard;
-mod pricing;
-pub(crate) mod templates;
-mod webhook;
-
-static LANDING_HTML: &str = include_str!("../../templates/index.html");
-
-pub fn router(state: Arc<AppState>) -> Router {
+/// Build the OSS admin dashboard router.
+///
+/// This provides health checks and the admin monitoring dashboard for
+/// self-hosted deployments. The commercial `modelrelay-cloud` crate adds
+/// Stripe billing, user accounts, and its own routes on top.
+pub fn router() -> Router {
     Router::new()
         .route("/", get(landing))
         .route("/health", get(health))
-        .route("/pricing", get(pricing::page))
-        .route("/signup", get(auth::signup_page).post(auth::signup_submit))
-        .route("/login", get(auth::login_page).post(auth::login_submit))
-        .route("/logout", post(auth::logout))
-        .route("/checkout", post(checkout::create))
-        .route("/checkout/success", get(checkout::success))
-        .route("/checkout/cancel", get(checkout::cancel))
-        .route("/dashboard", get(dashboard::page))
-        .route("/dashboard/billing-portal", post(dashboard::billing_portal))
-        .route("/webhook/stripe", post(webhook::handle))
-        .with_state(state)
+        .route("/dashboard", get(dashboard))
 }
 
-async fn landing() -> Html<&'static str> {
-    Html(LANDING_HTML)
+async fn landing() -> Html<String> {
+    Html(crate::templates::page_shell(
+        "ModelRelay Admin",
+        "<div class=\"card\">\
+           <h2>Welcome to ModelRelay</h2>\
+           <p>This is the open-source admin dashboard for your ModelRelay deployment.</p>\
+           <p style=\"margin-top:12px;\"><a href=\"/dashboard\" class=\"btn\">Go to Dashboard &rarr;</a></p>\
+         </div>",
+        false,
+    ))
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let db_ok = if let Some(ref pool) = state.db {
-        sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(pool)
-            .await
-            .is_ok()
-    } else {
-        false
-    };
-
+async fn health() -> Json<Value> {
     Json(json!({
         "status": "ok",
-        "db_connected": db_ok,
-        "stripe_configured": state.stripe_key.is_some(),
     }))
+}
+
+async fn dashboard() -> Html<String> {
+    Html(crate::templates::page_shell(
+        "Dashboard",
+        "<div class=\"card\">\
+           <h2>Monitoring</h2>\
+           <p style=\"margin-top:8px;\"><span class=\"badge\">Coming Soon</span></p>\
+           <p style=\"margin-top:12px;color:#8b949e;\">Worker status, request statistics, and queue depth \
+              will be displayed here once connected to the modelrelay-server admin API.</p>\
+         </div>",
+        false,
+    ))
 }

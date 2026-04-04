@@ -1,4 +1,4 @@
-name: Deploy Web
+name: Deploy Cloud
 
 on:
   push:
@@ -22,11 +22,11 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.web
+          file: Dockerfile.cloud
           push: true
           tags: |
-            ghcr.io/ericflo/modelrelay/modelrelay-web:latest
-            ghcr.io/ericflo/modelrelay/modelrelay-web:${{ github.sha }}
+            ghcr.io/ericflo/modelrelay/modelrelay-cloud:latest
+            ghcr.io/ericflo/modelrelay/modelrelay-cloud:${{ github.sha }}
 
   deploy:
     needs: build-and-push
@@ -46,11 +46,11 @@ jobs:
           kubectl apply -f deploy/modelrelay-io/postgres-pvc.yaml
           kubectl apply -f deploy/modelrelay-io/postgres-deployment.yaml
           kubectl apply -f deploy/modelrelay-io/postgres-service.yaml
-          kubectl apply -f deploy/modelrelay-io/web-deployment.yaml
-          kubectl apply -f deploy/modelrelay-io/web-service.yaml
-          kubectl apply -f deploy/modelrelay-io/web-ingress.yaml
+          kubectl apply -f deploy/modelrelay-io/cloud-deployment.yaml
+          kubectl apply -f deploy/modelrelay-io/cloud-service.yaml
+          kubectl apply -f deploy/modelrelay-io/cloud-ingress.yaml
 
       - name: Restart and wait
         run: |
-          kubectl rollout restart deployment/web -n modelrelay
-          kubectl rollout status deployment/web -n modelrelay --timeout=300s
+          kubectl rollout restart deployment/cloud -n modelrelay
+          kubectl rollout status deployment/cloud -n modelrelay --timeout=300s
