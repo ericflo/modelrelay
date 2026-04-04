@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bumped crate versions to 0.1.2 to match release tag
 - Migrated cargo audit CI step from deprecated `rustsec/audit-check` to direct `cargo audit`
 - Fixed Node.js 20 deprecation warnings in release workflow; added graceful crates.io skip
 - Corrected crates.io badge format in README
