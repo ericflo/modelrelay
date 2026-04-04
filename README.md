@@ -3,6 +3,7 @@
 [![Coverage](https://codecov.io/gh/ericflo/modelrelay/branch/main/graph/badge.svg)](https://codecov.io/gh/ericflo/modelrelay)
 [![crates.io](https://img.shields.io/badge/crates.io-coming%20soon-orange)](https://crates.io/crates/modelrelay-protocol)
 [![Minimum Rust Version](https://img.shields.io/badge/rustc-1.94+-orange.svg)](rust-toolchain.toml)
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://ericflo.github.io/modelrelay/)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 # ModelRelay
@@ -326,6 +327,8 @@ modelrelay-worker --completions fish > ~/.config/fish/completions/modelrelay-wor
 Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 
 ## Documents
+
+> **Full documentation:** [ericflo.github.io/modelrelay](https://ericflo.github.io/modelrelay/)
 
 - [Behavior contract](docs/behavior-contract.md) — the full specification of proxy, queue, streaming, and cancellation semantics
 - [Architecture sketch](docs/architecture.md) — how the pieces fit together internally
