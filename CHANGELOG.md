@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-04-04
+
+### Added
+
+- Windows x86_64 and arm64 release binaries
+- crates.io publish step in release workflow
+- Social preview image in extras/
+
+### Changed
+
+- Binary names now use `modelrelay-server` and `modelrelay-worker` prefix (previously `proxy-server` and `worker-daemon`)
+- Repo renamed from llm-worker-proxy to modelrelay on GitHub
+
 ## [0.1.0] - 2026-04-04
 
 ### Added
@@ -24,4 +37,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform release binaries (Linux x86_64/aarch64, macOS x86_64/aarch64) via GitHub Actions.
 - CI pipeline with formatting, linting, and test checks.
 
+[0.1.1]: https://github.com/ericflo/modelrelay/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ericflo/modelrelay/releases/tag/v0.1.0
