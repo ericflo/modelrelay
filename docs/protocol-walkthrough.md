@@ -354,6 +354,83 @@ Cancel reasons (from `CancelReason` enum):
 
 ---
 
+## 10. Queue Timeout
+
+```
+  Client                 Proxy Server
+    │                        │
+    │  POST /v1/chat/completions
+    │  {"model": "llama3-8b"}│
+    │───────────────────────►│
+    │                        │
+    │                        │  Provider exists but all
+    │                        │  workers are busy (at
+    │                        │  max_concurrent).
+    │                        │  Request enters queue.
+    │                        │
+    │                        │  ┌── QUEUE_TIMEOUT_SECS (30) ──┐
+    │                        │  │  waiting for a worker to     │
+    │                        │  │  become available...         │
+    │                        │  │                              │
+    │                        │  │  no worker picks up          │
+    │                        │  └──────────── timeout fires ───┘
+    │                        │
+    │                        │  Cancel with reason: "timeout"
+    │                        │
+    │◄───────────────────────│  504 Gateway Timeout
+    │  {"error":             │
+    │   "queue timeout:      │
+    │    no worker available  │
+    │    within deadline"}   │
+```
+
+The request never reaches a worker.  The proxy removes it from the queue
+and returns 504 to the client.  No `Cancel` message is sent over WebSocket
+because no worker was ever assigned.
+
+---
+
+## 11. Request Timeout (In-Flight)
+
+```
+  Client                 Proxy Server                Worker              Backend
+    │                        │                         │                    │
+    │  POST /v1/chat/completions                       │                    │
+    │───────────────────────►│                         │                    │
+    │                        │  → dispatched to worker  │                    │
+    │                        │────────────────────────►│                    │
+    │                        │                         │───────────────────►│
+    │                        │                         │                    │
+    │                        │  ┌── REQUEST_TIMEOUT_SECS (300) ──┐         │
+    │                        │  │  waiting for ResponseComplete   │        │
+    │                        │  │  or streaming chunks...         │        │
+    │                        │  │                                 │        │
+    │                        │  │  backend is still processing    │        │
+    │                        │  └──────────── timeout fires ──────┘        │
+    │                        │                         │                    │
+    │                        │  ServerToWorkerMessage::Cancel               │
+    │                        │  { "type": "cancel",     │                   │
+    │                        │    "request_id": "r-003",│                   │
+    │                        │    "reason": "timeout"   │                   │
+    │                        │  }                       │                   │
+    │                        │────────────────────────►│                    │
+    │                        │                         │                    │
+    │                        │                         │  Worker aborts      │
+    │                        │                         │  backend request    │
+    │                        │                         │───── abort ────────►│
+    │                        │                         │                    │
+    │◄───────────────────────│  504 Gateway Timeout     │                    │
+    │  {"error":             │                         │                    │
+    │   "request timeout"}   │                         │                    │
+```
+
+Unlike queue timeout, the request was dispatched to a worker, so the proxy
+sends a `Cancel` message with reason `"timeout"` over the WebSocket.  The
+worker receives the cancellation and aborts the in-flight backend request.
+The proxy returns 504 to the client.
+
+---
+
 ## Message Type Summary
 
 ### Server → Worker (`ServerToWorkerMessage`)
