@@ -8,7 +8,7 @@
 
 [Unit]
 Description=ModelRelay central proxy server
-Documentation=https://modelrelay.io
+Documentation=https://github.com/ericflo/modelrelay
 After=network.target
 
 [Service]
