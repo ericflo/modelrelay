@@ -1337,10 +1337,7 @@ async fn spawn_slow_streaming_backend() -> (
         backend_abort_tx: Arc::new(Mutex::new(Some(backend_abort_tx))),
     };
     let app = Router::new()
-        .route(
-            "/v1/chat/completions",
-            post(slow_streaming_chat_handler),
-        )
+        .route("/v1/chat/completions", post(slow_streaming_chat_handler))
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -1382,19 +1379,15 @@ async fn slow_streaming_chat_handler(
     // oneshot channel — the test-side receiver observes Err(RecvError).
     let sentinel = state.backend_abort_tx.lock().await.take();
 
-    let stream = stream::unfold(
-        (0_usize, sentinel),
-        |(idx, sentinel)| async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let chunk = format!(
-                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"chunk-{idx}\"}}}}]}}\n\n"
-            );
-            Some((
-                Ok::<Bytes, Infallible>(Bytes::from(chunk)),
-                (idx + 1, sentinel),
-            ))
-        },
-    );
+    let stream = stream::unfold((0_usize, sentinel), |(idx, sentinel)| async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let chunk =
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"chunk-{idx}\"}}}}]}}\n\n");
+        Some((
+            Ok::<Bytes, Infallible>(Bytes::from(chunk)),
+            (idx + 1, sentinel),
+        ))
+    });
 
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = StatusCode::OK;
