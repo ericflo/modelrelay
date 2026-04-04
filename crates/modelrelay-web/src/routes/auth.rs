@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
+use argon2::password_hash::rand_core::OsRng;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use axum::Form;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::Form;
 use serde::Deserialize;
 use tower_sessions::Session;
 
@@ -39,7 +39,11 @@ pub async fn signup_submit(
     Form(form): Form<SignupForm>,
 ) -> Response {
     let Some(ref pool) = state.db else {
-        return Html(page_shell("Sign Up", "<div class=\"card\"><h2>Error</h2><p>Database not available.</p></div>")).into_response();
+        return Html(page_shell(
+            "Sign Up",
+            "<div class=\"card\"><h2>Error</h2><p>Database not available.</p></div>",
+        ))
+        .into_response();
     };
 
     let email = form.email.trim().to_lowercase();
@@ -62,13 +66,12 @@ pub async fn signup_submit(
     }
 
     // Check if user already exists with a password
-    let existing: Option<(uuid::Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT id, password_hash FROM users WHERE email = $1",
-    )
-    .bind(&email)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
+    let existing: Option<(uuid::Uuid, Option<String>)> =
+        sqlx::query_as("SELECT id, password_hash FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
 
     if let Some((_, Some(_))) = existing {
         return Html(page_shell(
@@ -140,18 +143,21 @@ pub async fn login_submit(
     Form(form): Form<LoginForm>,
 ) -> Response {
     let Some(ref pool) = state.db else {
-        return Html(page_shell("Log In", "<div class=\"card\"><h2>Error</h2><p>Database not available.</p></div>")).into_response();
+        return Html(page_shell(
+            "Log In",
+            "<div class=\"card\"><h2>Error</h2><p>Database not available.</p></div>",
+        ))
+        .into_response();
     };
 
     let email = form.email.trim().to_lowercase();
 
-    let row: Option<(uuid::Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT id, password_hash FROM users WHERE email = $1",
-    )
-    .bind(&email)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
+    let row: Option<(uuid::Uuid, Option<String>)> =
+        sqlx::query_as("SELECT id, password_hash FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
 
     let Some((user_id, Some(stored_hash))) = row else {
         return Html(page_shell(

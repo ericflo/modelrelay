@@ -34,7 +34,7 @@ pub async fn create(session: Session, State(state): State<Arc<AppState>>) -> Res
 
     // Look up authenticated user's email to pre-fill checkout
     let user_email = if let Ok(Some(uid)) = session.get::<String>("user_id").await {
-        if let (Ok(uid), Some(ref pool)) = (uid.parse::<uuid::Uuid>(), &state.db) {
+        if let (Ok(uid), Some(pool)) = (uid.parse::<uuid::Uuid>(), &state.db) {
             sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id = $1")
                 .bind(uid)
                 .fetch_optional(pool)
@@ -55,7 +55,10 @@ pub async fn create(session: Session, State(state): State<Arc<AppState>>) -> Res
             "success_url".to_string(),
             "https://modelrelay.io/checkout/success?session_id={CHECKOUT_SESSION_ID}".to_string(),
         ),
-        ("cancel_url".to_string(), "https://modelrelay.io/checkout/cancel".to_string()),
+        (
+            "cancel_url".to_string(),
+            "https://modelrelay.io/checkout/cancel".to_string(),
+        ),
         ("line_items[0][price]".to_string(), price_id),
         ("line_items[0][quantity]".to_string(), "1".to_string()),
     ];
