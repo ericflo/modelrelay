@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser};
-use clap_complete::{generate, Shell};
+use clap_complete::{Shell, generate};
 use modelrelay_worker::{WorkerDaemon, WorkerDaemonConfig};
 use tracing_subscriber::EnvFilter;
 
@@ -53,7 +53,12 @@ async fn main() {
     let args = Args::parse();
 
     if let Some(shell) = args.completions {
-        generate(shell, &mut Args::command(), "modelrelay-worker", &mut std::io::stdout());
+        generate(
+            shell,
+            &mut Args::command(),
+            "modelrelay-worker",
+            &mut std::io::stdout(),
+        );
         return;
     }
 

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::{middleware, response::IntoResponse};
 use clap::{CommandFactory, Parser};
-use clap_complete::{generate, Shell};
+use clap_complete::{Shell, generate};
 use modelrelay_server::{
     ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig,
 };
@@ -56,7 +56,12 @@ async fn main() {
     let args = Args::parse();
 
     if let Some(shell) = args.completions {
-        generate(shell, &mut Args::command(), "modelrelay-server", &mut std::io::stdout());
+        generate(
+            shell,
+            &mut Args::command(),
+            "modelrelay-server",
+            &mut std::io::stdout(),
+        );
         return;
     }
 
