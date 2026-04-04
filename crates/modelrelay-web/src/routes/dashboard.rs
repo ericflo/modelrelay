@@ -19,12 +19,12 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
     let user_id: Option<String> = session.get("user_id").await.unwrap_or(None);
 
     let Some(user_id) = user_id else {
-        return Html(page_shell("Dashboard", &not_logged_in_html())).into_response();
+        return Redirect::to("/login").into_response();
     };
 
     let user_id: uuid::Uuid = match user_id.parse() {
         Ok(id) => id,
-        Err(_) => return Html(page_shell("Dashboard", &not_logged_in_html())).into_response(),
+        Err(_) => return Redirect::to("/login").into_response(),
     };
 
     // Query user info
@@ -37,7 +37,7 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
 
     let user = match user {
         Ok(Some(u)) => u,
-        Ok(None) => return Html(page_shell("Dashboard", &not_logged_in_html())).into_response(),
+        Ok(None) => return Redirect::to("/login").into_response(),
         Err(e) => {
             tracing::error!("dashboard user query error: {e}");
             return Html(page_shell("Dashboard", "<div class=\"card\"><h2>Error</h2><p>Could not load your account. Please try again later.</p></div>")).into_response();
@@ -195,15 +195,6 @@ fn no_db_html() -> String {
         .to_string()
 }
 
-fn not_logged_in_html() -> String {
-    "<div class=\"card\">\
-       <h2>Welcome to ModelRelay</h2>\
-       <p style=\"margin-top:12px;\">Subscribe to access your dashboard, API key, and usage statistics.</p>\
-       <p style=\"margin-top:16px;\"><a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a></p>\
-     </div>"
-        .to_string()
-}
-
 fn dashboard_html(email: &str, sub: Option<&SubscriptionRow>, has_stripe_customer: bool) -> String {
     let email_escaped = html_escape(email);
 
@@ -329,6 +320,9 @@ fn page_shell(title: &str, body_content: &str) -> String {
     .logo span {{ color: #7c3aed; }}
     .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
     .nav-links a:hover {{ color: #e6edf3; }}
+    .nav-links form {{ display: inline; }}
+    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
+    .nav-links button:hover {{ color: #e6edf3; }}
 
     .content {{ padding: 60px 0; }}
     .content h1 {{ font-size: 2rem; margin-bottom: 24px; }}
@@ -376,6 +370,7 @@ fn page_shell(title: &str, body_content: &str) -> String {
       <div class="nav-links">
         <a href="/dashboard">Dashboard</a>
         <a href="/pricing">Pricing</a>
+        <form method="POST" action="/logout"><button type="submit">Log out</button></form>
       </div>
     </div>
   </nav>
