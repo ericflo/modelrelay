@@ -224,7 +224,7 @@ async fn handle_subscription_deleted(
     Ok(())
 }
 
-/// `invoice.payment_failed` — mark subscription as past_due.
+/// `invoice.payment_failed` — mark subscription as `past_due`.
 async fn handle_payment_failed(pool: &PgPool, payload: &serde_json::Value) -> Result<(), String> {
     let obj = &payload["data"]["object"];
     let sub_id = obj["subscription"]
