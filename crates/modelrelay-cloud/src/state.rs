@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-/// Shared application state for the commercial ModelRelay cloud service.
+/// Shared application state for the commercial `ModelRelay` cloud service.
 #[derive(Clone)]
 pub struct CloudState {
     /// `PostgreSQL` pool — `None` when `DATABASE_URL` is not set.
