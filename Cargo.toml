@@ -10,7 +10,7 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-homepage = "https://modelrelay.io"
+homepage = "https://github.com/ericflo/modelrelay"
 repository = "https://github.com/ericflo/modelrelay"
 rust-version = "1.94"
 

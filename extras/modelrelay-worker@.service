@@ -18,7 +18,7 @@
 
 [Unit]
 Description=ModelRelay worker daemon (%i)
-Documentation=https://modelrelay.io
+Documentation=https://github.com/ericflo/modelrelay
 After=network.target
 
 [Service]
