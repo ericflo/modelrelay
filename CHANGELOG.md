@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `GET /health` endpoint returning JSON with version, status, connected worker count, queue depth, and uptime
+
 ## [0.1.6] - 2026-04-04
 
 ### Added

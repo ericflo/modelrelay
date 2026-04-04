@@ -744,6 +744,16 @@ impl ProxyServerCore {
     }
 
     #[must_use]
+    pub fn connected_worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    #[must_use]
+    pub fn total_queue_depth(&self) -> usize {
+        self.provider_queues.values().map(VecDeque::len).sum()
+    }
+
+    #[must_use]
     pub fn provider_models(&self, provider: &str) -> Vec<String> {
         let mut seen = HashSet::new();
 

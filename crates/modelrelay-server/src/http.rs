@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     Json, Router,
@@ -64,6 +65,7 @@ impl ProxyHttpApp {
 
     pub fn router(self) -> Router {
         let router = Router::new()
+            .route("/health", get(health_handler))
             .route("/v1/models", get(models_handler))
             .route("/v1/chat/completions", post(chat_completions_handler))
             .route("/v1/messages", post(messages_handler))
@@ -72,6 +74,7 @@ impl ProxyHttpApp {
                 core: self.core,
                 models_provider: self.models_provider,
                 provider_enabled: self.provider_enabled,
+                started_at: Instant::now(),
             });
 
         match self.worker_socket_app {
@@ -86,6 +89,16 @@ struct HttpState {
     core: Arc<Mutex<ProxyServerCore>>,
     models_provider: String,
     provider_enabled: bool,
+    started_at: Instant,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct HealthResponse {
+    status: &'static str,
+    version: &'static str,
+    workers_connected: usize,
+    queue_depth: usize,
+    uptime_secs: f64,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -106,6 +119,21 @@ struct ChatCompletionsRequest {
     model: String,
     #[serde(default)]
     stream: bool,
+}
+
+async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> {
+    let (workers_connected, queue_depth) = {
+        let core = state.core.lock().await;
+        (core.connected_worker_count(), core.total_queue_depth())
+    };
+
+    Json(HealthResponse {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+        workers_connected,
+        queue_depth,
+        uptime_secs: state.started_at.elapsed().as_secs_f64(),
+    })
 }
 
 async fn models_handler(State(state): State<HttpState>) -> Json<ModelsResponse> {

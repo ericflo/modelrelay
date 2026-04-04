@@ -28,8 +28,8 @@ services:
       REQUEST_TIMEOUT_SECS: "${REQUEST_TIMEOUT_SECS:-300}"
       RUST_LOG: "${PROXY_LOG_LEVEL:-info}"
     healthcheck:
-      # /v1/models returns 200 even with no workers connected.
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/v1/models"]
+      # /health returns JSON with version, worker count, queue depth, and uptime.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 3
