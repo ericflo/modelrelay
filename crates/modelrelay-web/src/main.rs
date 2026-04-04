@@ -32,6 +32,12 @@ async fn main() {
         tracing::warn!("STRIPE_SECRET_KEY not set — checkout disabled");
     }
 
+    // Stripe webhook secret (optional — webhooks return 500 without it)
+    let webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").ok();
+    if webhook_secret.is_none() {
+        tracing::warn!("STRIPE_WEBHOOK_SECRET not set — webhook verification disabled");
+    }
+
     // Set up session layer if we have a DB
     let session_layer = if let Some(ref p) = pool {
         let session_store = tower_sessions_sqlx_store::PostgresStore::new(p.clone());
@@ -53,6 +59,7 @@ async fn main() {
     let state = Arc::new(AppState {
         db: pool,
         stripe_key,
+        webhook_secret,
     });
 
     let mut app = Router::new()
