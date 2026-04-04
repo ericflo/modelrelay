@@ -78,12 +78,7 @@ pub async fn page(session: Session, State(state): State<Arc<AppState>>) -> Respo
         has_stripe_customer,
         user.api_key.as_deref(),
     );
-    Html(super::templates::page_shell(
-        "Dashboard",
-        &html,
-        true,
-    ))
-    .into_response()
+    Html(super::templates::page_shell("Dashboard", &html, true)).into_response()
 }
 
 /// POST /dashboard/billing-portal — create a Stripe billing portal session and redirect.
