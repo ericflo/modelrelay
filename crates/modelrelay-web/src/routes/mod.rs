@@ -24,6 +24,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/checkout/success", get(checkout::success))
         .route("/checkout/cancel", get(checkout::cancel))
         .route("/dashboard", get(dashboard::page))
+        .route("/dashboard/billing-portal", post(dashboard::billing_portal))
         .route("/webhook/stripe", post(webhook::handle))
         .with_state(state)
 }
