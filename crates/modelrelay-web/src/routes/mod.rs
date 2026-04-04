@@ -34,14 +34,5 @@ async fn health() -> Json<Value> {
 }
 
 async fn dashboard() -> Html<String> {
-    Html(crate::templates::page_shell(
-        "Dashboard",
-        "<div class=\"card\">\
-           <h2>Monitoring</h2>\
-           <p style=\"margin-top:8px;\"><span class=\"badge\">Coming Soon</span></p>\
-           <p style=\"margin-top:12px;color:#8b949e;\">Worker status, request statistics, and queue depth \
-              will be displayed here once connected to the modelrelay-server admin API.</p>\
-         </div>",
-        false,
-    ))
+    Html(crate::templates::dashboard_page())
 }
