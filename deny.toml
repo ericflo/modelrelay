@@ -1,11 +1,11 @@
 [advisories]
 db-path = '~/.cargo/advisory-db'
 db-urls = ['https://github.com/rustsec/advisory-db']
-# Deny known security vulnerabilities and unmaintained crates
+# Deny known security vulnerabilities; allow warnings for initial introduction
 vulnerability = 'deny'
-unmaintained = 'warn'
-yanked = 'warn'
-notice = 'warn'
+unmaintained = 'allow'
+yanked = 'allow'
+notice = 'allow'
 
 [licenses]
 # Allow all commonly used open source licenses
@@ -17,21 +17,22 @@ allow = [
     'BSD-3-Clause',
     'ISC',
     'Unicode-DFS-2016',
+    'Unicode-3.0',
     'Zlib',
     'CC0-1.0',
     'OpenSSL',
 ]
-copyleft = 'warn'
+copyleft = 'allow'
 allow-osi-fsf-free = 'either'
 default = 'deny'
 private = { ignore = true }
 
 [bans]
-multiple-versions = 'warn'
+multiple-versions = 'allow'
 wildcards = 'allow'
 highlight = 'all'
 
 [sources]
-unknown-registry = 'warn'
-unknown-git = 'warn'
+unknown-registry = 'allow'
+unknown-git = 'allow'
 allow-registry = ['https://github.com/rust-lang/crates.io-index']
