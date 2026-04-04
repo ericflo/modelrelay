@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- CODE_OF_CONDUCT.md
+
 ## [0.1.1] - 2026-04-04
 
 ### Added
@@ -37,5 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform release binaries (Linux x86_64/aarch64, macOS x86_64/aarch64) via GitHub Actions.
 - CI pipeline with formatting, linting, and test checks.
 
+[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/ericflo/modelrelay/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ericflo/modelrelay/releases/tag/v0.1.0
