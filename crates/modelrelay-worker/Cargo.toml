@@ -1,10 +1,10 @@
 [package]
-name = "worker-daemon"
+name = "modelrelay-worker"
 version = "0.1.0"
 description = "Worker daemon that connects to the proxy server and forwards requests to a local LLM backend"
 keywords = ["llm", "worker", "websocket", "inference", "llama"]
 categories = ["network-programming", "web-programming::http-client"]
-homepage = "https://github.com/ericflo/llm-worker-proxy"
+homepage.workspace = true
 readme = "README.md"
 edition.workspace = true
 license.workspace = true
@@ -20,11 +20,11 @@ tokio = { workspace = true, features = ["signal"] }
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-worker-protocol.workspace = true
+modelrelay-protocol.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
-proxy-server = { path = "../proxy-server" }
+modelrelay-server = { path = "../modelrelay-server" }
 serde_json.workspace = true
 
 [lints]

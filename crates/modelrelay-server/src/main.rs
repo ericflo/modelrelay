@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::{middleware, response::IntoResponse};
 use clap::Parser;
-use proxy_server::{
+use modelrelay_server::{
     ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig,
 };
 use tokio::sync::Mutex;
@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 /// Accepts provider-compatible inference requests and routes them to remote
 /// workers over WebSocket, where those workers speak to local model servers.
 #[derive(Parser, Debug)]
-#[command(name = "proxy-server", version)]
+#[command(name = "modelrelay-server", version)]
 struct Args {
     /// Address to listen on
     #[arg(long, env = "LISTEN_ADDR", default_value = "127.0.0.1:8080")]
@@ -41,7 +41,7 @@ struct Args {
     request_timeout: u64,
 
     /// Log level filter (e.g. info, debug, warn, error, or a directive like
-    /// `proxy_server=debug`). Overridden by `RUST_LOG` if set.
+    /// `modelrelay_server=debug`). Overridden by `RUST_LOG` if set.
     #[arg(long, env = "LOG_LEVEL", default_value = "info")]
     log_level: String,
 }
@@ -129,7 +129,7 @@ async fn main() {
         queue_timeout = %queue_timeout_display,
         request_timeout = %request_timeout_display,
         max_queue_len = %max_queue_display,
-        "proxy-server starting"
+        "modelrelay-server starting"
     );
 
     axum::serve(listener, router)

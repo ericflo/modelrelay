@@ -14,7 +14,7 @@ use axum::{
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use worker_protocol::{HeaderMap, ResponseCompleteMessage};
+use modelrelay_protocol::{HeaderMap, ResponseCompleteMessage};
 
 use crate::{
     CancelReason, HttpResponseEvent, PendingHttpResponse, PendingStreamingHttpResponse,

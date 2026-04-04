@@ -16,7 +16,7 @@ use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
-use worker_protocol::{
+use modelrelay_protocol::{
     CancelMessage, CancelReason, GracefulShutdownMessage, ModelsUpdateMessage, PingMessage,
     PongMessage, ResponseChunkMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
@@ -583,7 +583,7 @@ fn graceful_shutdown_message(shutdown: GracefulShutdownSignal) -> ServerToWorker
 }
 
 fn models_refresh_message(refresh: WorkerModelsRefreshSignal) -> ServerToWorkerMessage {
-    ServerToWorkerMessage::ModelsRefresh(worker_protocol::ModelsRefreshMessage {
+    ServerToWorkerMessage::ModelsRefresh(modelrelay_protocol::ModelsRefreshMessage {
         reason: refresh.reason,
     })
 }

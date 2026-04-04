@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
-use worker_protocol::{
+use modelrelay_protocol::{
     HeaderMap, ModelsUpdateMessage, PongMessage, RegisterAck, RegisterMessage, RequestMessage,
     ResponseCompleteMessage,
 };
@@ -1238,7 +1238,7 @@ mod tests {
         SubmissionOutcome, WorkerCancelSignal, WorkerDisconnectOutcome,
     };
     use std::time::Duration;
-    use worker_protocol::{ModelsUpdateMessage, RegisterMessage};
+    use modelrelay_protocol::{ModelsUpdateMessage, RegisterMessage};
 
     fn register_message(
         worker_name: &str,

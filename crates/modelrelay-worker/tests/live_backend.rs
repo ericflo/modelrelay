@@ -9,7 +9,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::stream;
-use proxy_server::{
+use modelrelay_server::{
     ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp,
     WorkerSocketProviderConfig,
 };
@@ -24,7 +24,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
-use worker_daemon::{WorkerDaemon, WorkerDaemonConfig};
+use modelrelay_worker::{WorkerDaemon, WorkerDaemonConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObservedBackendRequest {

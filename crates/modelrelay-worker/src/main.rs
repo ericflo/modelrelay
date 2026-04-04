@@ -1,13 +1,13 @@
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use worker_daemon::{WorkerDaemon, WorkerDaemonConfig};
+use modelrelay_worker::{WorkerDaemon, WorkerDaemonConfig};
 
 /// Remote LLM worker daemon.
 ///
 /// Connects to a central proxy server over WebSocket and forwards inference
 /// requests to a local model backend (e.g. llama-server).
 #[derive(Parser, Debug)]
-#[command(name = "worker-daemon", version)]
+#[command(name = "modelrelay-worker", version)]
 struct Args {
     /// Base URL of the proxy server (e.g. `http://127.0.0.1:8080`)
     #[arg(long, env = "PROXY_URL", default_value = "http://127.0.0.1:8080")]
@@ -38,7 +38,7 @@ struct Args {
     backend_url: String,
 
     /// Log level filter (e.g. info, debug, warn, error, or a directive like
-    /// `worker_daemon=debug`). Overridden by `RUST_LOG` if set.
+    /// `modelrelay_worker=debug`). Overridden by `RUST_LOG` if set.
     #[arg(long, env = "LOG_LEVEL", default_value = "info")]
     log_level: String,
 }
@@ -77,7 +77,7 @@ async fn main() {
         models = %models.join(","),
         concurrency = args.max_concurrency,
         backend = %args.backend_url,
-        "worker-daemon starting"
+        "modelrelay-worker starting"
     );
 
     let daemon = WorkerDaemon::new(config);
@@ -85,12 +85,12 @@ async fn main() {
     tokio::select! {
         result = daemon.run_with_reconnect() => {
             if let Err(e) = result {
-                tracing::error!(error = %e, "worker-daemon error");
+                tracing::error!(error = %e, "modelrelay-worker error");
                 std::process::exit(1);
             }
         }
         () = shutdown_signal() => {
-            tracing::info!("worker-daemon shutting down gracefully");
+            tracing::info!("modelrelay-worker shutting down gracefully");
         }
     }
 }

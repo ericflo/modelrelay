@@ -1,15 +1,15 @@
-[![CI](https://github.com/ericflo/llm-worker-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/ericflo/llm-worker-proxy/actions/workflows/ci.yml)
-[![Coverage](https://codecov.io/gh/ericflo/llm-worker-proxy/branch/main/graph/badge.svg)](https://codecov.io/gh/ericflo/llm-worker-proxy)
-[![crates.io](https://img.shields.io/crates/v/worker-protocol.svg)](https://crates.io/crates/worker-protocol)
+[![CI](https://github.com/ericflo/modelrelay/actions/workflows/ci.yml/badge.svg)](https://github.com/ericflo/modelrelay/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/ericflo/modelrelay/branch/main/graph/badge.svg)](https://codecov.io/gh/ericflo/modelrelay)
+[![crates.io](https://img.shields.io/crates/v/modelrelay-protocol.svg)](https://crates.io/crates/modelrelay-protocol)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-# llm-worker-proxy
+# ModelRelay
 
 **Stop configuring clients for every GPU box. Workers connect out; requests route in.**
 
 You have GPU boxes running `llama-server` (or Ollama, or vLLM, or anything OpenAI-compatible). Today you either expose each one directly — port forwarding, DNS, firewall rules — or you stick a load balancer in front that doesn't understand LLM streaming or cancellation.
 
-`llm-worker-proxy` flips the model: a central proxy receives standard inference requests while worker daemons on your GPU boxes connect *out* to it over WebSocket. The proxy handles queueing, routing, streaming pass-through, and cancellation propagation. Clients see one stable endpoint and never need to know about your hardware.
+ModelRelay flips the model: a central proxy receives standard inference requests while worker daemons on your GPU boxes connect *out* to it over WebSocket. The proxy handles queueing, routing, streaming pass-through, and cancellation propagation. Clients see one stable endpoint and never need to know about your hardware.
 
 ```
   Clients (curl, Claude Code, LiteLLM, Open WebUI, ...)
@@ -17,11 +17,11 @@ You have GPU boxes running `llama-server` (or Ollama, or vLLM, or anything OpenA
          │  POST /v1/chat/completions
          │  POST /v1/messages
          ▼
-  ┌──────────────────┐
-  │   proxy-server   │◄─── workers connect out (WebSocket)
-  │   (one stable    │     no inbound ports needed on GPU boxes
-  │    endpoint)     │
-  └──────────────────┘
+  ┌──────────────────────┐
+  │   modelrelay-server  │◄─── workers connect out (WebSocket)
+  │   (one stable        │     no inbound ports needed on GPU boxes
+  │    endpoint)         │
+  └──────────────────────┘
          │  routes request to best available worker
          ▼
   ┌────────┐  ┌────────┐  ┌────────┐
@@ -53,14 +53,14 @@ Pre-built images are published to GitHub Container Registry on every release and
 
 ```bash
 # Pull the latest images
-docker pull ghcr.io/ericflo/llm-worker-proxy/proxy-server:latest
-docker pull ghcr.io/ericflo/llm-worker-proxy/worker-daemon:latest
+docker pull ghcr.io/ericflo/modelrelay/modelrelay-server:latest
+docker pull ghcr.io/ericflo/modelrelay/modelrelay-worker:latest
 
 # Run the proxy
 docker run -p 8080:8080 \
   -e WORKER_SECRET=mysecret \
   -e LISTEN_ADDR=0.0.0.0:8080 \
-  ghcr.io/ericflo/llm-worker-proxy/proxy-server:latest
+  ghcr.io/ericflo/modelrelay/modelrelay-server:latest
 
 # Run a worker (on a GPU box)
 docker run \
@@ -68,7 +68,7 @@ docker run \
   -e WORKER_SECRET=mysecret \
   -e BACKEND_URL=http://host.docker.internal:8000 \
   -e MODELS=llama3.2:3b \
-  ghcr.io/ericflo/llm-worker-proxy/worker-daemon:latest
+  ghcr.io/ericflo/modelrelay/modelrelay-worker:latest
 ```
 
 For pinned versions, replace `:latest` with a release tag (e.g. `:0.1.0`).
@@ -76,8 +76,8 @@ For pinned versions, replace `:latest` with a release tag (e.g. `:0.1.0`).
 ### With Docker Compose (easiest for local dev)
 
 ```bash
-git clone https://github.com/ericflo/llm-worker-proxy.git
-cd llm-worker-proxy
+git clone https://github.com/ericflo/modelrelay.git
+cd modelrelay
 
 # Start the proxy + one worker (assumes llama-server on host port 8081)
 docker compose up
@@ -87,34 +87,34 @@ The proxy is now listening on `http://localhost:8080`. The worker connects to it
 
 ### Pre-built binaries
 
-Download the latest release for your platform from the [Releases page](https://github.com/ericflo/llm-worker-proxy/releases):
+Download the latest release for your platform from the [Releases page](https://github.com/ericflo/modelrelay/releases):
 
-| Platform | proxy-server | worker-daemon |
-|----------|-------------|---------------|
-| Linux x86_64 | `proxy-server-linux-amd64` | `worker-daemon-linux-amd64` |
-| Linux arm64 | `proxy-server-linux-arm64` | `worker-daemon-linux-arm64` |
-| macOS Intel | `proxy-server-darwin-amd64` | `worker-daemon-darwin-amd64` |
-| macOS Apple Silicon | `proxy-server-darwin-arm64` | `worker-daemon-darwin-arm64` |
-| Windows x86_64 | `proxy-server-windows-amd64.exe` | `worker-daemon-windows-amd64.exe` |
-| Windows arm64 | `proxy-server-windows-arm64.exe` | `worker-daemon-windows-arm64.exe` |
+| Platform | modelrelay-server | modelrelay-worker |
+|----------|-------------------|-------------------|
+| Linux x86_64 | `modelrelay-server-linux-amd64` | `modelrelay-worker-linux-amd64` |
+| Linux arm64 | `modelrelay-server-linux-arm64` | `modelrelay-worker-linux-arm64` |
+| macOS Intel | `modelrelay-server-darwin-amd64` | `modelrelay-worker-darwin-amd64` |
+| macOS Apple Silicon | `modelrelay-server-darwin-arm64` | `modelrelay-worker-darwin-arm64` |
+| Windows x86_64 | `modelrelay-server-windows-amd64.exe` | `modelrelay-worker-windows-amd64.exe` |
+| Windows arm64 | `modelrelay-server-windows-arm64.exe` | `modelrelay-worker-windows-arm64.exe` |
 
 ### From crates.io
 
 ```bash
-cargo install proxy-server worker-daemon
+cargo install modelrelay-server modelrelay-worker
 ```
 
 ### Build from source
 
 ```bash
 cargo build --release
-# Binaries: target/release/proxy-server  target/release/worker-daemon
+# Binaries: target/release/modelrelay-server  target/release/modelrelay-worker
 ```
 
 **Start the proxy:**
 
 ```bash
-./target/release/proxy-server \
+./target/release/modelrelay-server \
   --listen 0.0.0.0:8080 \
   --worker-secret mysecret
 ```
@@ -122,7 +122,7 @@ cargo build --release
 **Start a worker** (on a GPU box with `llama-server` or any OpenAI-compatible backend running):
 
 ```bash
-./target/release/worker-daemon \
+./target/release/modelrelay-worker \
   --proxy-url http://<proxy-host>:8080 \
   --worker-secret mysecret \
   --backend-url http://127.0.0.1:8000 \
@@ -167,7 +167,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## Configuration
 
-### proxy-server
+### modelrelay-server
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
@@ -177,9 +177,9 @@ curl http://localhost:8080/v1/chat/completions \
 | `--max-queue-len` | `MAX_QUEUE_LEN` | `100` | Maximum number of queued requests (0 = unlimited) |
 | `--queue-timeout` | `QUEUE_TIMEOUT_SECS` | `30` | Seconds before a queued request times out (0 = no timeout) |
 | `--request-timeout` | `REQUEST_TIMEOUT_SECS` | `300` | Seconds before an in-flight HTTP request times out (0 = no timeout) |
-| `--log-level` | `LOG_LEVEL` | `info` | Log level filter (e.g. `info`, `debug`, or `proxy_server=debug`). Overridden by `RUST_LOG` if set. |
+| `--log-level` | `LOG_LEVEL` | `info` | Log level filter (e.g. `info`, `debug`, or `modelrelay_server=debug`). Overridden by `RUST_LOG` if set. |
 
-### worker-daemon
+### modelrelay-worker
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
@@ -190,7 +190,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `--provider` | `PROVIDER_NAME` | `local` | Provider name to register with on the proxy |
 | `--worker-name` | `WORKER_NAME` | `worker` | Human-readable name for this worker instance |
 | `--max-concurrency` | `MAX_CONCURRENCY` | `1` | Maximum number of concurrent requests this worker will handle |
-| `--log-level` | `LOG_LEVEL` | `info` | Log level filter (e.g. `info`, `debug`, or `worker_daemon=debug`). Overridden by `RUST_LOG` if set. |
+| `--log-level` | `LOG_LEVEL` | `info` | Log level filter (e.g. `info`, `debug`, or `modelrelay_worker=debug`). Overridden by `RUST_LOG` if set. |
 
 All flags can be passed as CLI arguments or set via the corresponding environment variable.
 
@@ -213,23 +213,23 @@ Service files live in [`extras/`](extras/):
 
 ```bash
 # Install binaries (from a release archive or cargo build --release)
-sudo install -m 755 proxy-server worker-daemon /usr/local/bin/
+sudo install -m 755 modelrelay-server modelrelay-worker /usr/local/bin/
 
 # Create a service user
-sudo useradd --system --no-create-home llm-worker-proxy
-sudo mkdir -p /var/lib/llm-worker-proxy /etc/llm-worker-proxy
+sudo useradd --system --no-create-home modelrelay
+sudo mkdir -p /var/lib/modelrelay /etc/modelrelay
 
 # Proxy
-sudo cp extras/proxy-server.service /etc/systemd/system/
-sudo cp extras/proxy.env.example /etc/llm-worker-proxy/proxy.env
-sudo vim /etc/llm-worker-proxy/proxy.env   # set WORKER_SECRET
-sudo systemctl enable --now proxy-server
+sudo cp extras/modelrelay-server.service /etc/systemd/system/
+sudo cp extras/proxy.env.example /etc/modelrelay/proxy.env
+sudo vim /etc/modelrelay/proxy.env   # set WORKER_SECRET
+sudo systemctl enable --now modelrelay-server
 
 # Workers — the template unit lets you run multiple instances:
-sudo cp extras/worker-daemon@.service /etc/systemd/system/
-sudo cp extras/worker.env.example /etc/llm-worker-proxy/worker-gpu0.env
-sudo vim /etc/llm-worker-proxy/worker-gpu0.env   # set PROXY_URL, BACKEND_URL, MODELS
-sudo systemctl enable --now worker-daemon@gpu0
+sudo cp extras/modelrelay-worker@.service /etc/systemd/system/
+sudo cp extras/worker.env.example /etc/modelrelay/worker-gpu0.env
+sudo vim /etc/modelrelay/worker-gpu0.env   # set PROXY_URL, BACKEND_URL, MODELS
+sudo systemctl enable --now modelrelay-worker@gpu0
 ```
 
 See [`extras/`](extras/) for the full service files and annotated env examples.
@@ -241,7 +241,7 @@ See [`extras/`](extras/) for the full service files and annotated env examples.
 
 ## Validation
 
-The behavior matrix is exercised at three layers: black-box contract harnesses in `proxy-contract-tests`, live HTTP integration tests in `proxy-server`, and end-to-end live backend tests in `worker-daemon`.
+The behavior matrix is exercised at three layers: black-box contract harnesses in `modelrelay-contract-tests`, live HTTP integration tests in `modelrelay-server`, and end-to-end live backend tests in `modelrelay-worker`.
 
 ```bash
 cargo fmt --check

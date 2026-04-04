@@ -12,7 +12,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
-use worker_protocol::{
+use modelrelay_protocol::{
     ModelsUpdateMessage, PongMessage, RegisterMessage, RequestMessage, ResponseChunkMessage,
     ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };

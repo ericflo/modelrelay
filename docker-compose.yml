@@ -1,6 +1,6 @@
-# Production-ready docker-compose for llm-worker-proxy.
+# Production-ready docker-compose for ModelRelay.
 #
-# Runs one proxy-server and two worker-daemon instances.  Adapt for your
+# Runs one modelrelay-server and two modelrelay-worker instances.  Adapt for your
 # own setup by adding/removing worker services and adjusting MODELS and
 # BACKEND_URL for each GPU box.
 #
@@ -13,7 +13,7 @@
 services:
   # ── Proxy server ──────────────────────────────────────────────────
   proxy:
-    image: ghcr.io/ericflo/llm-worker-proxy/proxy-server:latest
+    image: ghcr.io/ericflo/modelrelay/modelrelay-server:latest
     # Or build from source:
     # build:
     #   context: .
@@ -45,13 +45,13 @@ services:
         max-size: "10m"
         max-file: "3"
     networks:
-      - llm-proxy
+      - modelrelay
 
   # ── Worker 1 ──────────────────────────────────────────────────────
   # Each worker connects *out* to the proxy and forwards requests to
   # its local model backend.  Duplicate this block for more workers.
   worker1:
-    image: ghcr.io/ericflo/llm-worker-proxy/worker-daemon:latest
+    image: ghcr.io/ericflo/modelrelay/modelrelay-worker:latest
     # build:
     #   context: .
     #   dockerfile: Dockerfile.worker
@@ -77,11 +77,11 @@ services:
         max-size: "10m"
         max-file: "3"
     networks:
-      - llm-proxy
+      - modelrelay
 
   # ── Worker 2 ──────────────────────────────────────────────────────
   worker2:
-    image: ghcr.io/ericflo/llm-worker-proxy/worker-daemon:latest
+    image: ghcr.io/ericflo/modelrelay/modelrelay-worker:latest
     # build:
     #   context: .
     #   dockerfile: Dockerfile.worker
@@ -107,8 +107,8 @@ services:
         max-size: "10m"
         max-file: "3"
     networks:
-      - llm-proxy
+      - modelrelay
 
 networks:
-  llm-proxy:
+  modelrelay:
     driver: bridge

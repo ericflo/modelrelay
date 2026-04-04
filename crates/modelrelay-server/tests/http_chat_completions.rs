@@ -4,7 +4,7 @@ use support::*;
 use std::{fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use futures_util::SinkExt;
-use proxy_server::{
+use modelrelay_server::{
     CancelReason as ProxyCancelReason, ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore,
     RequestState, WorkerSocketApp, WorkerSocketProviderConfig,
 };
@@ -18,7 +18,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
-use worker_protocol::{
+use modelrelay_protocol::{
     CancelMessage, CancelReason, HeaderMap, ModelsUpdateMessage, RegisterMessage,
     ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
@@ -73,7 +73,7 @@ fn worker_connect_request(addr: SocketAddr, secret: &str) -> http::Request<()> {
 async fn register_test_worker(socket: &mut TestSocket) {
     let register = WorkerToServerMessage::Register(RegisterMessage {
         worker_name: "gpu-box-a".to_string(),
-        models: vec!["gpt-4.1-mini".to_string()],
+        models: vec!["llama-3.1-70b".to_string()],
         max_concurrent: 1,
         protocol_version: Some("2026-04-bridge-v1".to_string()),
         current_load: Some(0),
@@ -91,13 +91,13 @@ async fn register_test_worker(socket: &mut TestSocket) {
     };
 }
 
-async fn post_responses(addr: SocketAddr, body: &str, headers: &[(&str, &str)]) -> String {
+async fn post_chat_completions(addr: SocketAddr, body: &str, headers: &[(&str, &str)]) -> String {
     let mut stream = TcpStream::connect(addr)
         .await
         .expect("connect to test server");
 
     let mut request = format!(
-        "POST /v1/responses HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
     for (name, value) in headers {
@@ -120,7 +120,7 @@ async fn post_responses(addr: SocketAddr, body: &str, headers: &[(&str, &str)]) 
     String::from_utf8(response).expect("http response is utf8")
 }
 
-async fn open_responses_request(
+async fn open_chat_completions_request(
     addr: SocketAddr,
     body: &str,
     headers: &[(&str, &str)],
@@ -130,7 +130,7 @@ async fn open_responses_request(
         .expect("connect to test server");
 
     let mut request = format!(
-        "POST /v1/responses HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
     for (name, value) in headers {
@@ -147,49 +147,11 @@ async fn open_responses_request(
     stream
 }
 
-fn assert_responses_response(response: &str, worker_backend: &str, body: &str) {
+fn assert_chat_completion_response(response: &str, worker_backend: &str, body: &str) {
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("\r\ncontent-type: application/json\r\n"));
-    assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
     assert!(response.contains(&format!("\r\nx-worker-backend: {worker_backend}\r\n")));
     assert!(response.ends_with(body));
-}
-
-async fn assert_timed_out_request_state(core: &Arc<Mutex<ProxyServerCore>>, request_id: &str) {
-    let core = core.lock().await;
-    assert_eq!(
-        core.request_state(request_id),
-        Some(RequestState::InFlight {
-            worker_id: "worker-1".to_string(),
-            cancellation: Some(ProxyCancelReason::RequestTimedOut),
-        })
-    );
-    assert_eq!(core.request_state("request-2"), Some(RequestState::Queued));
-    assert_eq!(
-        core.queued_request_ids("openai"),
-        vec!["request-2".to_string()]
-    );
-}
-
-async fn assert_timeout_keeps_http_clients_pending(
-    first_http_request: &mut tokio::task::JoinHandle<String>,
-    second_http_stream: &mut TcpStream,
-) {
-    assert!(
-        timeout(std::time::Duration::from_millis(200), first_http_request)
-            .await
-            .is_err(),
-        "timed-out in-flight HTTP request should remain pending until the worker completes it"
-    );
-    assert!(
-        timeout(
-            std::time::Duration::from_millis(200),
-            read_until_contains(second_http_stream, "HTTP/1.1"),
-        )
-        .await
-        .is_err(),
-        "queued follow-up HTTP request should remain pending while the timed-out request is uncleared"
-    );
 }
 
 async fn send_response_chunk(socket: &mut TestSocket, request_id: &str, chunk: &str) {
@@ -229,7 +191,6 @@ async fn send_response_complete(
         status_code: 200,
         headers: HeaderMap::from([
             ("content-type".to_string(), "application/json".to_string()),
-            ("openai-beta".to_string(), "responses=v1".to_string()),
             ("x-worker-backend".to_string(), worker_backend.to_string()),
         ]),
         body: Some(body.to_string()),
@@ -243,31 +204,67 @@ async fn send_response_complete(
         .expect("send response_complete");
 }
 
+async fn assert_timed_out_request_state(core: &Arc<Mutex<ProxyServerCore>>, request_id: &str) {
+    let core = core.lock().await;
+    assert_eq!(
+        core.request_state(request_id),
+        Some(RequestState::InFlight {
+            worker_id: "worker-1".to_string(),
+            cancellation: Some(ProxyCancelReason::RequestTimedOut),
+        })
+    );
+    assert_eq!(core.request_state("request-2"), Some(RequestState::Queued));
+    assert_eq!(
+        core.queued_request_ids("openai"),
+        vec!["request-2".to_string()]
+    );
+}
+
+async fn assert_timeout_keeps_http_clients_pending(
+    first_http_request: &mut tokio::task::JoinHandle<String>,
+    second_http_stream: &mut TcpStream,
+) {
+    assert!(
+        timeout(std::time::Duration::from_millis(200), first_http_request)
+            .await
+            .is_err(),
+        "timed-out in-flight HTTP request should remain pending until the worker completes it"
+    );
+    assert!(
+        timeout(
+            std::time::Duration::from_millis(200),
+            read_until_contains(second_http_stream, "HTTP/1.1"),
+        )
+        .await
+        .is_err(),
+        "queued follow-up HTTP request should remain pending while the timed-out request is uncleared"
+    );
+}
+
 async fn connect_and_register_replacement_worker(addr: SocketAddr) -> TestSocket {
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
         .await
         .expect("connect second websocket");
     register_test_worker(&mut socket).await;
-    send_models_update(&mut socket, vec!["gpt-4.1-mini".to_string()], 0).await;
+    send_models_update(&mut socket, vec!["llama-3.1-70b".to_string()], 0).await;
     socket
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_forwards_request_and_preserves_response() {
+async fn worker_backed_chat_completions_route_forwards_request_and_preserves_response() {
     let addr = spawn_server().await;
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
         .await
         .expect("connect websocket");
     register_test_worker(&mut socket).await;
 
-    let body = r#"{"model":"gpt-4.1-mini","input":"hello from responses"}"#;
-    let http_request = tokio::spawn(post_responses(
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hello"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(
         addr,
         body,
         &[
             ("Authorization", "Bearer test-token"),
-            ("OpenAI-Beta", "responses=v1"),
-            ("X-Trace-Id", "trace-456"),
+            ("X-Trace-Id", "trace-123"),
         ],
     ));
 
@@ -277,8 +274,8 @@ async fn worker_backed_responses_route_forwards_request_and_preserves_response()
         panic!("expected worker request message");
     };
 
-    assert_eq!(request.model, "gpt-4.1-mini");
-    assert_eq!(request.endpoint_path, "/v1/responses");
+    assert_eq!(request.model, "llama-3.1-70b");
+    assert_eq!(request.endpoint_path, "/v1/chat/completions");
     assert!(!request.is_streaming);
     assert_eq!(request.body, body);
     assert_eq!(
@@ -286,20 +283,18 @@ async fn worker_backed_responses_route_forwards_request_and_preserves_response()
         HeaderMap::from([
             ("authorization".to_string(), "Bearer test-token".to_string()),
             ("content-type".to_string(), "application/json".to_string()),
-            ("openai-beta".to_string(), "responses=v1".to_string()),
-            ("x-trace-id".to_string(), "trace-456".to_string()),
+            ("x-trace-id".to_string(), "trace-123".to_string()),
         ])
     );
 
     let complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
         request_id: request.request_id,
-        status_code: 201,
+        status_code: 202,
         headers: HeaderMap::from([
             ("content-type".to_string(), "application/json".to_string()),
-            ("openai-beta".to_string(), "responses=v1".to_string()),
             ("x-worker-backend".to_string(), "gpu-box-a".to_string()),
         ]),
-        body: Some(r#"{"id":"resp_1","object":"response","output":[]}"#.to_string()),
+        body: Some(r#"{"id":"chatcmpl-1","object":"chat.completion"}"#.to_string()),
         token_counts: None,
     });
     let complete_payload = serde_json::to_string(&complete).expect("serialize response_complete");
@@ -310,27 +305,22 @@ async fn worker_backed_responses_route_forwards_request_and_preserves_response()
         .expect("send response_complete");
 
     let response = http_request.await.expect("join http request task");
-    assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
+    assert!(response.starts_with("HTTP/1.1 202 Accepted\r\n"));
     assert!(response.contains("\r\ncontent-type: application/json\r\n"));
-    assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
     assert!(response.contains("\r\nx-worker-backend: gpu-box-a\r\n"));
-    assert!(response.ends_with(r#"{"id":"resp_1","object":"response","output":[]}"#));
+    assert!(response.ends_with(r#"{"id":"chatcmpl-1","object":"chat.completion"}"#));
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_preserves_upstream_http_error() {
+async fn worker_backed_chat_completions_route_preserves_upstream_http_error() {
     let addr = spawn_server().await;
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
         .await
         .expect("connect websocket");
     register_test_worker(&mut socket).await;
 
-    let body = r#"{"model":"gpt-4.1-mini","input":"bad request"}"#;
-    let http_request = tokio::spawn(post_responses(
-        addr,
-        body,
-        &[("OpenAI-Beta", "responses=v1")],
-    ));
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"bad request"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
 
     let ServerToWorkerMessage::Request(request) =
         next_server_message(&mut socket, "worker request").await
@@ -342,10 +332,9 @@ async fn worker_backed_responses_route_preserves_upstream_http_error() {
         r#"{"error":{"message":"upstream rejected the payload","type":"invalid_request_error"}}"#;
     let complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
         request_id: request.request_id,
-        status_code: 429,
+        status_code: 422,
         headers: HeaderMap::from([
             ("content-type".to_string(), "application/json".to_string()),
-            ("openai-beta".to_string(), "responses=v1".to_string()),
             ("retry-after".to_string(), "7".to_string()),
             (
                 "x-upstream-request-id".to_string(),
@@ -363,25 +352,25 @@ async fn worker_backed_responses_route_preserves_upstream_http_error() {
         .expect("send response_complete");
 
     let response = http_request.await.expect("join http request task");
-    assert!(response.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+    assert!(response.starts_with("HTTP/1.1 422 Unprocessable Entity\r\n"));
     assert!(response.contains("\r\ncontent-type: application/json\r\n"));
-    assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
     assert!(response.contains("\r\nretry-after: 7\r\n"));
     assert!(response.contains("\r\nx-upstream-request-id: req-upstream-123\r\n"));
     assert!(response.ends_with(error_body));
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_streams_live_sse_chunks() {
+async fn worker_backed_chat_completions_streams_live_sse_chunks() {
     let addr = spawn_server().await;
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
         .await
         .expect("connect websocket");
     register_test_worker(&mut socket).await;
 
-    let body = r#"{"model":"gpt-4.1-mini","stream":true,"input":"hello from responses"}"#;
+    let body =
+        r#"{"model":"llama-3.1-70b","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
     let mut http_stream =
-        open_responses_request(addr, body, &[("OpenAI-Beta", "responses=v1")]).await;
+        open_chat_completions_request(addr, body, &[("Authorization", "Bearer test-token")]).await;
 
     let ServerToWorkerMessage::Request(request) =
         next_server_message(&mut socket, "streaming worker request").await
@@ -389,34 +378,31 @@ async fn worker_backed_responses_route_streams_live_sse_chunks() {
         panic!("expected worker request message");
     };
 
-    assert_eq!(request.endpoint_path, "/v1/responses");
+    assert_eq!(request.endpoint_path, "/v1/chat/completions");
     assert!(request.is_streaming);
     assert_eq!(request.body, body);
 
     send_response_chunk(
         &mut socket,
         &request.request_id,
-        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
     )
     .await;
 
     let first_fragment = read_until_contains(
         &mut http_stream,
-        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
     )
     .await;
     assert!(first_fragment.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(first_fragment.contains("\r\ncontent-type: text/event-stream\r\n"));
-    assert!(
-        first_fragment
-            .contains("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n")
-    );
+    assert!(first_fragment.contains("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n"));
     assert!(!first_fragment.contains("data: [DONE]\n\n"));
 
     send_response_chunk(
         &mut socket,
         &request.request_id,
-        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
     )
     .await;
     send_response_chunk(&mut socket, &request.request_id, "data: [DONE]\n\n").await;
@@ -442,25 +428,21 @@ async fn worker_backed_responses_route_streams_live_sse_chunks() {
         .expect("read streaming http response");
     let full_response = first_fragment + &String::from_utf8(rest).expect("http response is utf8");
 
-    assert!(
-        full_response
-            .contains("data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n")
-    );
+    assert!(full_response.contains("data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n"));
     assert!(full_response.contains("data: [DONE]\n\n"));
     assert!(full_response.ends_with("0\r\n\r\n"));
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_oversized_stream_emits_sse_error_and_terminates() {
+async fn worker_backed_chat_completions_route_terminates_oversized_live_sse_stream() {
     let addr = spawn_server().await;
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
         .await
         .expect("connect websocket");
     register_test_worker(&mut socket).await;
 
-    let body = r#"{"model":"gpt-4.1-mini","stream":true,"input":"overflow"}"#;
-    let mut http_stream =
-        open_responses_request(addr, body, &[("OpenAI-Beta", "responses=v1")]).await;
+    let body = r#"{"model":"llama-3.1-70b","stream":true,"messages":[{"role":"user","content":"overflow"}]}"#;
+    let mut http_stream = open_chat_completions_request(addr, body, &[]).await;
 
     let ServerToWorkerMessage::Request(request) =
         next_server_message(&mut socket, "oversized streaming worker request").await
@@ -471,22 +453,21 @@ async fn worker_backed_responses_route_oversized_stream_emits_sse_error_and_term
     send_response_chunk(
         &mut socket,
         &request.request_id,
-        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
     )
     .await;
 
     let first_fragment = read_until_contains(
         &mut http_stream,
-        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
     )
     .await;
     assert!(first_fragment.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(first_fragment.contains("\r\ncontent-type: text/event-stream\r\n"));
 
     let oversized_marker = "oversized-boundary-".repeat(4_200);
-    let oversized_chunk = format!(
-        "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{oversized_marker}\"}}\n\n"
-    );
+    let oversized_chunk =
+        format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{oversized_marker}\"}}}}]}}\n\n");
     send_response_chunk(&mut socket, &request.request_id, &oversized_chunk).await;
 
     let rest = timeout(
@@ -511,40 +492,30 @@ async fn worker_backed_responses_route_oversized_stream_emits_sse_error_and_term
         !full_response.contains("data: [DONE]\n\n"),
         "oversized termination should close the HTTP stream before late completion chunks arrive"
     );
-    assert!(
-        !full_response.contains("\"id\":\"resp-late\""),
-        "late completion metadata should not be forwarded after oversized termination"
-    );
     assert!(full_response.ends_with("0\r\n\r\n"));
 
     send_response_complete(
         &mut socket,
         &request.request_id,
         "gpu-box-a",
-        r#"{"id":"resp-late","object":"response","output":[]}"#,
+        r#"{"id":"chatcmpl-late","object":"chat.completion.chunk","choices":[]}"#,
     )
     .await;
     send_response_chunk(&mut socket, &request.request_id, "data: [DONE]\n\n").await;
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_cancels_in_flight_request_when_http_client_disconnects() {
+async fn worker_backed_chat_completions_route_cancels_in_flight_request_when_http_client_disconnects()
+ {
     let addr = spawn_server().await;
     let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
         .await
         .expect("connect websocket");
     register_test_worker(&mut socket).await;
 
-    let body = r#"{"model":"gpt-4.1-mini","stream":true,"input":"cancel me"}"#;
-    let mut http_stream = open_responses_request(
-        addr,
-        body,
-        &[
-            ("Authorization", "Bearer test-token"),
-            ("OpenAI-Beta", "responses=v1"),
-        ],
-    )
-    .await;
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"cancel me"}]}"#;
+    let mut http_stream =
+        open_chat_completions_request(addr, body, &[("Authorization", "Bearer test-token")]).await;
 
     let ServerToWorkerMessage::Request(request) =
         next_server_message(&mut socket, "worker request").await
@@ -568,7 +539,7 @@ async fn worker_backed_responses_route_cancels_in_flight_request_when_http_clien
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_times_out_in_flight_request_before_redispatching_queued_work()
+async fn worker_backed_chat_completions_route_times_out_in_flight_request_before_redispatching_queued_work()
  {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let addr = spawn_server_with_core(core.clone(), true).await;
@@ -578,14 +549,10 @@ async fn worker_backed_responses_route_times_out_in_flight_request_before_redisp
         .expect("connect websocket");
     register_test_worker(&mut socket).await;
 
-    let first_body = r#"{"model":"gpt-4.1-mini","input":"time out before completion"}"#;
-    let second_body = r#"{"model":"gpt-4.1-mini","input":"stay queued until timeout clears"}"#;
+    let first_body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"time out before completion"}]}"#;
+    let second_body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued until timeout clears"}]}"#;
 
-    let mut first_http_request = tokio::spawn(post_responses(
-        addr,
-        first_body,
-        &[("OpenAI-Beta", "responses=v1")],
-    ));
+    let mut first_http_request = tokio::spawn(post_chat_completions(addr, first_body, &[]));
     let ServerToWorkerMessage::Request(first_request) =
         next_server_message(&mut socket, "first worker request").await
     else {
@@ -593,8 +560,7 @@ async fn worker_backed_responses_route_times_out_in_flight_request_before_redisp
     };
     assert_eq!(first_request.body, first_body);
 
-    let mut second_http_stream =
-        open_responses_request(addr, second_body, &[("OpenAI-Beta", "responses=v1")]).await;
+    let mut second_http_stream = open_chat_completions_request(addr, second_body, &[]).await;
     wait_for_request_state(&core, "request-2", RequestState::Queued).await;
 
     {
@@ -604,8 +570,8 @@ async fn worker_backed_responses_route_times_out_in_flight_request_before_redisp
                 &first_request.request_id,
                 ProxyCancelReason::RequestTimedOut
             ),
-            Some(proxy_server::CancellationOutcome::WorkerCancelSent(
-                proxy_server::WorkerCancelSignal {
+            Some(modelrelay_server::CancellationOutcome::WorkerCancelSent(
+                modelrelay_server::WorkerCancelSignal {
                     worker_id: "worker-1".to_string(),
                     request_id: first_request.request_id.clone(),
                     reason: ProxyCancelReason::RequestTimedOut,
@@ -626,7 +592,7 @@ async fn worker_backed_responses_route_times_out_in_flight_request_before_redisp
         &mut socket,
         &first_request.request_id,
         "gpu-box-a",
-        r#"{"id":"resp_timeout_1","object":"response","output":[]}"#,
+        r#"{"id":"chatcmpl-timeout-1","object":"chat.completion","choices":[]}"#,
     )
     .await;
 
@@ -656,27 +622,31 @@ async fn worker_backed_responses_route_times_out_in_flight_request_before_redisp
         panic!("expected queued worker request after timeout clears");
     };
     assert_eq!(second_request.request_id, "request-2");
-    assert_eq!(second_request.endpoint_path, "/v1/responses");
+    assert_eq!(second_request.endpoint_path, "/v1/chat/completions");
     assert_eq!(second_request.body, second_body);
 
     send_response_complete(
         &mut replacement_socket,
         &second_request.request_id,
         "gpu-box-b",
-        r#"{"id":"resp_timeout_2","object":"response","output":[]}"#,
+        r#"{"id":"chatcmpl-timeout-2","object":"chat.completion","choices":[]}"#,
     )
     .await;
 
     let second_response = read_http_response(&mut second_http_stream).await;
-    assert_responses_response(
+    assert_chat_completion_response(
         &second_response,
         "gpu-box-b",
-        r#"{"id":"resp_timeout_2","object":"response","output":[]}"#,
+        r#"{"id":"chatcmpl-timeout-2","object":"chat.completion","choices":[]}"#,
+    );
+    assert!(
+        !second_response.contains("chatcmpl-timeout-1"),
+        "late output from the timed-out request should not leak into the queued follow-up response"
     );
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_returns_sanitized_no_workers_error() {
+async fn worker_backed_chat_completions_route_returns_sanitized_no_workers_error() {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     {
         let mut core = core.lock().await;
@@ -690,16 +660,8 @@ async fn worker_backed_responses_route_returns_sanitized_no_workers_error() {
     }
     let addr = spawn_server_with_core(core, true).await;
 
-    let body = r#"{"model":"gpt-4.1-mini","input":"hello from responses"}"#;
-    let response = post_responses(
-        addr,
-        body,
-        &[
-            ("Authorization", "Bearer test-token"),
-            ("OpenAI-Beta", "responses=v1"),
-        ],
-    )
-    .await;
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hello"}]}"#;
+    let response = post_chat_completions(addr, body, &[]).await;
 
     assert_service_unavailable(&response, "No workers available to handle request");
     assert!(
@@ -709,7 +671,128 @@ async fn worker_backed_responses_route_returns_sanitized_no_workers_error() {
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_recovers_after_worker_auth_rate_limit_window_expires() {
+async fn worker_backed_chat_completions_route_returns_sanitized_queue_timeout_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: Some(0),
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"timeout me"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
+    wait_for_request_state(&core, "request-1", RequestState::Queued).await;
+
+    {
+        let mut core = core.lock().await;
+        let failures = core.expire_queue_timeouts(std::time::Instant::now());
+        assert_eq!(failures.len(), 1);
+    }
+
+    let response = http_request.await.expect("join timed-out http request");
+    assert_service_unavailable(&response, "Request timed out waiting for worker");
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_returns_sanitized_queue_full_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    {
+        let mut core = core.lock().await;
+        core.configure_provider_queue(
+            "openai",
+            ProviderQueuePolicy {
+                max_queue_len: 1,
+                queue_timeout_ticks: None,
+            },
+        );
+    }
+    let addr = spawn_server_with_core(core.clone(), true).await;
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hello"}]}"#;
+    let first_request = tokio::spawn(open_chat_completions_request(addr, body, &[]));
+    let ServerToWorkerMessage::Request(_) =
+        next_server_message(&mut socket, "first worker request").await
+    else {
+        panic!("expected first worker request message");
+    };
+
+    let second_request = tokio::spawn(open_chat_completions_request(addr, body, &[]));
+    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
+
+    let response = post_chat_completions(addr, body, &[]).await;
+    assert_service_unavailable(&response, "Service temporarily at capacity, please retry");
+    assert!(
+        !response.contains("queue is full"),
+        "the client boundary should not expose the raw queue-full reason"
+    );
+
+    first_request.abort();
+    second_request.abort();
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_returns_sanitized_provider_disabled_error() {
+    let addr = spawn_server_with_core(Arc::new(Mutex::new(ProxyServerCore::new())), false).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"hello"}]}"#;
+    let response = post_chat_completions(addr, body, &[]).await;
+
+    assert_service_unavailable(&response, "Provider is currently disabled");
+    assert!(
+        !response.contains("virtual provider is disabled"),
+        "the compatibility boundary should use the stable disabled message"
+    );
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_returns_sanitized_provider_deleted_error() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let addr = spawn_server_with_core(core.clone(), true).await;
+
+    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
+        .await
+        .expect("connect websocket");
+    register_test_worker(&mut socket).await;
+
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"delete provider while in flight"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
+
+    let ServerToWorkerMessage::Request(_) =
+        next_server_message(&mut socket, "in-flight worker request").await
+    else {
+        panic!("expected in-flight worker request message");
+    };
+
+    {
+        let mut core = core.lock().await;
+        core.delete_provider("openai");
+    }
+
+    let response = http_request
+        .await
+        .expect("join provider-deleted http request");
+    assert_service_unavailable(&response, "Internal server error processing request");
+    assert!(
+        !response.contains("provider was deleted"),
+        "the compatibility boundary should not leak the internal provider-deletion reason"
+    );
+
+    assert_worker_socket_closes(&mut socket).await;
+}
+
+#[tokio::test]
+async fn worker_backed_chat_completions_route_recovers_after_worker_auth_rate_limit_window_expires()
+{
     let addr = spawn_server().await;
 
     for _ in 0..3 {
@@ -738,186 +821,39 @@ async fn worker_backed_responses_route_recovers_after_worker_auth_rate_limit_win
         .expect("connect websocket");
     register_test_worker(&mut socket).await;
 
-    let body = r#"{"model":"gpt-4.1-mini","input":"auth cooldown expired"}"#;
-    let http_request = tokio::spawn(post_responses(
-        addr,
-        body,
-        &[
-            ("Authorization", "Bearer test-token"),
-            ("OpenAI-Beta", "responses=v1"),
-        ],
-    ));
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"auth cooldown expired"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
 
     let ServerToWorkerMessage::Request(request) =
-        next_server_message(&mut socket, "responses request after auth cooldown").await
+        next_server_message(&mut socket, "chat completions request after auth cooldown").await
     else {
         panic!("expected request message");
     };
-    assert_eq!(request.endpoint_path, "/v1/responses");
+    assert_eq!(request.endpoint_path, "/v1/chat/completions");
     assert_eq!(request.body, body);
     assert_eq!(
         request.headers,
-        HeaderMap::from([
-            ("authorization".to_string(), "Bearer test-token".to_string()),
-            ("content-type".to_string(), "application/json".to_string()),
-            ("openai-beta".to_string(), "responses=v1".to_string()),
-        ])
+        HeaderMap::from([("content-type".to_string(), "application/json".to_string()),])
     );
 
     send_response_complete(
         &mut socket,
         &request.request_id,
         "gpu-box-a",
-        r#"{"id":"resp_auth_expiry","object":"response","output":[{"type":"message","id":"msg_auth_expiry","status":"completed","role":"assistant","content":[{"type":"output_text","text":"worker re-authenticated"}]}]}"#,
+        r#"{"id":"chatcmpl-auth-expiry","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"worker re-authenticated"},"finish_reason":"stop"}]}"#,
     )
     .await;
 
     let response = http_request.await.expect("join http request");
-    assert_responses_response(
+    assert_chat_completion_response(
         &response,
         "gpu-box-a",
-        r#"{"id":"resp_auth_expiry","object":"response","output":[{"type":"message","id":"msg_auth_expiry","status":"completed","role":"assistant","content":[{"type":"output_text","text":"worker re-authenticated"}]}]}"#,
+        r#"{"id":"chatcmpl-auth-expiry","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"worker re-authenticated"},"finish_reason":"stop"}]}"#,
     );
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_returns_sanitized_queue_timeout_error() {
-    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
-    {
-        let mut core = core.lock().await;
-        core.configure_provider_queue(
-            "openai",
-            ProviderQueuePolicy {
-                max_queue_len: 1,
-                queue_timeout_ticks: Some(0),
-            },
-        );
-    }
-    let addr = spawn_server_with_core(core.clone(), true).await;
-
-    let body = r#"{"model":"gpt-4.1-mini","input":"timeout me"}"#;
-    let http_request = tokio::spawn(post_responses(
-        addr,
-        body,
-        &[("OpenAI-Beta", "responses=v1")],
-    ));
-    wait_for_request_state(&core, "request-1", RequestState::Queued).await;
-
-    {
-        let mut core = core.lock().await;
-        let failures = core.expire_queue_timeouts(std::time::Instant::now());
-        assert_eq!(failures.len(), 1);
-    }
-
-    let response = http_request.await.expect("join timed-out http request");
-    assert_service_unavailable(&response, "Request timed out waiting for worker");
-}
-
-#[tokio::test]
-async fn worker_backed_responses_route_returns_sanitized_queue_full_error() {
-    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
-    {
-        let mut core = core.lock().await;
-        core.configure_provider_queue(
-            "openai",
-            ProviderQueuePolicy {
-                max_queue_len: 1,
-                queue_timeout_ticks: None,
-            },
-        );
-    }
-    let addr = spawn_server_with_core(core.clone(), true).await;
-    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
-        .await
-        .expect("connect websocket");
-    register_test_worker(&mut socket).await;
-
-    let body = r#"{"model":"gpt-4.1-mini","input":"hello from responses"}"#;
-    let first_request = tokio::spawn(open_responses_request(
-        addr,
-        body,
-        &[("OpenAI-Beta", "responses=v1")],
-    ));
-    let ServerToWorkerMessage::Request(_) =
-        next_server_message(&mut socket, "first worker request").await
-    else {
-        panic!("expected first worker request message");
-    };
-
-    let second_request = tokio::spawn(open_responses_request(
-        addr,
-        body,
-        &[("OpenAI-Beta", "responses=v1")],
-    ));
-    wait_for_request_state(&core, "request-2", RequestState::Queued).await;
-
-    let response = post_responses(addr, body, &[("OpenAI-Beta", "responses=v1")]).await;
-    assert_service_unavailable(&response, "Service temporarily at capacity, please retry");
-    assert!(
-        !response.contains("queue is full"),
-        "the client boundary should not expose the raw queue-full reason"
-    );
-
-    first_request.abort();
-    second_request.abort();
-}
-
-#[tokio::test]
-async fn worker_backed_responses_route_returns_sanitized_provider_disabled_error() {
-    let addr = spawn_server_with_core(Arc::new(Mutex::new(ProxyServerCore::new())), false).await;
-
-    let body = r#"{"model":"gpt-4.1-mini","input":"hello from responses"}"#;
-    let response = post_responses(addr, body, &[("OpenAI-Beta", "responses=v1")]).await;
-
-    assert_service_unavailable(&response, "Provider is currently disabled");
-    assert!(
-        !response.contains("virtual provider is disabled"),
-        "the compatibility boundary should use the stable disabled message"
-    );
-}
-
-#[tokio::test]
-async fn worker_backed_responses_route_returns_sanitized_provider_deleted_error() {
-    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
-    let addr = spawn_server_with_core(core.clone(), true).await;
-
-    let (mut socket, _) = connect_async(worker_connect_request(addr, "top-secret"))
-        .await
-        .expect("connect websocket");
-    register_test_worker(&mut socket).await;
-
-    let body = r#"{"model":"gpt-4.1-mini","input":"delete provider while in flight"}"#;
-    let http_request = tokio::spawn(post_responses(
-        addr,
-        body,
-        &[("OpenAI-Beta", "responses=v1")],
-    ));
-
-    let ServerToWorkerMessage::Request(_) =
-        next_server_message(&mut socket, "in-flight worker request").await
-    else {
-        panic!("expected in-flight worker request message");
-    };
-
-    {
-        let mut core = core.lock().await;
-        core.delete_provider("openai");
-    }
-
-    let response = http_request
-        .await
-        .expect("join provider-deleted http request");
-    assert_service_unavailable(&response, "Internal server error processing request");
-    assert!(
-        !response.contains("provider was deleted"),
-        "the compatibility boundary should not leak the internal provider-deletion reason"
-    );
-
-    assert_worker_socket_closes(&mut socket).await;
-}
-
-#[tokio::test]
-async fn worker_backed_responses_route_requeues_live_request_after_worker_disconnect() {
+async fn worker_backed_chat_completions_route_requeues_live_request_after_worker_disconnect() {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let addr = spawn_server_with_core(core.clone(), true).await;
 
@@ -926,12 +862,8 @@ async fn worker_backed_responses_route_requeues_live_request_after_worker_discon
         .expect("connect first websocket");
     register_test_worker(&mut socket_one).await;
 
-    let body = r#"{"model":"gpt-4.1-mini","input":"finish after reconnect"}"#;
-    let http_request = tokio::spawn(post_responses(
-        addr,
-        body,
-        &[("OpenAI-Beta", "responses=v1")],
-    ));
+    let body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"finish after reconnect"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
 
     let ServerToWorkerMessage::Request(first_request) =
         next_server_message(&mut socket_one, "first worker request").await
@@ -949,7 +881,7 @@ async fn worker_backed_responses_route_requeues_live_request_after_worker_discon
         .await
         .expect("connect second websocket");
     register_test_worker(&mut socket_two).await;
-    send_models_update(&mut socket_two, vec!["gpt-4.1-mini".to_string()], 0).await;
+    send_models_update(&mut socket_two, vec!["llama-3.1-70b".to_string()], 0).await;
 
     let ServerToWorkerMessage::Request(requeued_request) =
         next_server_message(&mut socket_two, "requeued worker request").await
@@ -958,14 +890,11 @@ async fn worker_backed_responses_route_requeues_live_request_after_worker_discon
     };
 
     assert_eq!(requeued_request.request_id, first_request.request_id);
-    assert_eq!(requeued_request.endpoint_path, "/v1/responses");
+    assert_eq!(requeued_request.endpoint_path, "/v1/chat/completions");
     assert_eq!(requeued_request.body, body);
     assert_eq!(
         requeued_request.headers,
-        HeaderMap::from([
-            ("content-type".to_string(), "application/json".to_string()),
-            ("openai-beta".to_string(), "responses=v1".to_string()),
-        ])
+        HeaderMap::from([("content-type".to_string(), "application/json".to_string()),])
     );
 
     let complete = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
@@ -973,10 +902,11 @@ async fn worker_backed_responses_route_requeues_live_request_after_worker_discon
         status_code: 200,
         headers: HeaderMap::from([
             ("content-type".to_string(), "application/json".to_string()),
-            ("openai-beta".to_string(), "responses=v1".to_string()),
             ("x-worker-backend".to_string(), "gpu-box-b".to_string()),
         ]),
-        body: Some(r#"{"id":"resp_requeued","object":"response","output":[]}"#.to_string()),
+        body: Some(
+            r#"{"id":"chatcmpl-requeued","object":"chat.completion","choices":[]}"#.to_string(),
+        ),
         token_counts: None,
     });
     let complete_payload = serde_json::to_string(&complete).expect("serialize response_complete");
@@ -992,13 +922,15 @@ async fn worker_backed_responses_route_requeues_live_request_after_worker_discon
         .expect("join http request task");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("\r\ncontent-type: application/json\r\n"));
-    assert!(response.contains("\r\nopenai-beta: responses=v1\r\n"));
     assert!(response.contains("\r\nx-worker-backend: gpu-box-b\r\n"));
-    assert!(response.ends_with(r#"{"id":"resp_requeued","object":"response","output":[]}"#));
+    assert!(
+        response.ends_with(r#"{"id":"chatcmpl-requeued","object":"chat.completion","choices":[]}"#)
+    );
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_drains_in_flight_request_before_redispatching_queued_work() {
+async fn worker_backed_chat_completions_route_drains_in_flight_request_before_redispatching_queued_work()
+ {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let addr = spawn_server_with_core(core.clone(), true).await;
 
@@ -1007,14 +939,11 @@ async fn worker_backed_responses_route_drains_in_flight_request_before_redispatc
         .expect("connect first websocket");
     register_test_worker(&mut socket_one).await;
 
-    let first_body = r#"{"model":"gpt-4.1-mini","input":"finish before drain"}"#;
-    let second_body = r#"{"model":"gpt-4.1-mini","input":"stay queued during drain"}"#;
+    let first_body =
+        r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"finish before drain"}]}"#;
+    let second_body = r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"stay queued during drain"}]}"#;
 
-    let first_http_request = tokio::spawn(post_responses(
-        addr,
-        first_body,
-        &[("OpenAI-Beta", "responses=v1")],
-    ));
+    let first_http_request = tokio::spawn(post_chat_completions(addr, first_body, &[]));
     let ServerToWorkerMessage::Request(first_request) =
         next_server_message(&mut socket_one, "first worker request").await
     else {
@@ -1022,8 +951,7 @@ async fn worker_backed_responses_route_drains_in_flight_request_before_redispatc
     };
     assert_eq!(first_request.body, first_body);
 
-    let mut second_http_stream =
-        open_responses_request(addr, second_body, &[("OpenAI-Beta", "responses=v1")]).await;
+    let mut second_http_stream = open_chat_completions_request(addr, second_body, &[]).await;
     wait_for_request_state(&core, "request-2", RequestState::Queued).await;
     begin_graceful_shutdown(&core).await;
     assert_graceful_shutdown_signal(&mut socket_one).await;
@@ -1042,7 +970,7 @@ async fn worker_backed_responses_route_drains_in_flight_request_before_redispatc
         &mut socket_one,
         &first_request.request_id,
         "gpu-box-a",
-        r#"{"id":"resp_drain_1","object":"response","output":[]}"#,
+        r#"{"id":"chatcmpl-drain-1","object":"chat.completion","choices":[]}"#,
     )
     .await;
 
@@ -1050,10 +978,10 @@ async fn worker_backed_responses_route_drains_in_flight_request_before_redispatc
         .await
         .expect("first http request completed before timeout")
         .expect("join first http request task");
-    assert_responses_response(
+    assert_chat_completion_response(
         &first_response,
         "gpu-box-a",
-        r#"{"id":"resp_drain_1","object":"response","output":[]}"#,
+        r#"{"id":"chatcmpl-drain-1","object":"chat.completion","choices":[]}"#,
     );
     assert_post_drain_close(&mut socket_one).await;
 
@@ -1074,27 +1002,27 @@ async fn worker_backed_responses_route_drains_in_flight_request_before_redispatc
         panic!("expected queued worker request after drain");
     };
     assert_eq!(second_request.request_id, "request-2");
-    assert_eq!(second_request.endpoint_path, "/v1/responses");
+    assert_eq!(second_request.endpoint_path, "/v1/chat/completions");
     assert_eq!(second_request.body, second_body);
 
     send_response_complete(
         &mut socket_two,
         &second_request.request_id,
         "gpu-box-b",
-        r#"{"id":"resp_drain_2","object":"response","output":[]}"#,
+        r#"{"id":"chatcmpl-drain-2","object":"chat.completion","choices":[]}"#,
     )
     .await;
 
     let second_response = read_http_response(&mut second_http_stream).await;
-    assert_responses_response(
+    assert_chat_completion_response(
         &second_response,
         "gpu-box-b",
-        r#"{"id":"resp_drain_2","object":"response","output":[]}"#,
+        r#"{"id":"chatcmpl-drain-2","object":"chat.completion","choices":[]}"#,
     );
 }
 
 #[tokio::test]
-async fn worker_backed_responses_route_returns_sanitized_requeue_exhaustion_error() {
+async fn worker_backed_chat_completions_route_returns_sanitized_requeue_exhaustion_error() {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let addr = spawn_server_with_core(core.clone(), true).await;
 
@@ -1103,12 +1031,9 @@ async fn worker_backed_responses_route_returns_sanitized_requeue_exhaustion_erro
         .expect("connect first websocket");
     register_test_worker(&mut socket_one).await;
 
-    let body = r#"{"model":"gpt-4.1-mini","input":"keep retrying"}"#;
-    let http_request = tokio::spawn(post_responses(
-        addr,
-        body,
-        &[("OpenAI-Beta", "responses=v1")],
-    ));
+    let body =
+        r#"{"model":"llama-3.1-70b","messages":[{"role":"user","content":"keep retrying"}]}"#;
+    let http_request = tokio::spawn(post_chat_completions(addr, body, &[]));
 
     let ServerToWorkerMessage::Request(first_request) =
         next_server_message(&mut socket_one, "first worker request").await
@@ -1127,7 +1052,7 @@ async fn worker_backed_responses_route_returns_sanitized_requeue_exhaustion_erro
             .await
             .unwrap_or_else(|_| panic!("connect {label} websocket"));
         register_test_worker(&mut socket).await;
-        send_models_update(&mut socket, vec!["gpt-4.1-mini".to_string()], 0).await;
+        send_models_update(&mut socket, vec!["llama-3.1-70b".to_string()], 0).await;
 
         let ServerToWorkerMessage::Request(requeued_request) =
             next_server_message(&mut socket, &format!("{label} worker request")).await

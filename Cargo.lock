@@ -755,6 +755,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "modelrelay-contract-tests"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "modelrelay-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "modelrelay-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "futures-util",
+ "http",
+ "modelrelay-protocol",
+ "modelrelay-worker",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "modelrelay-worker"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "futures-util",
+ "modelrelay-protocol",
+ "modelrelay-server",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -812,33 +864,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "proxy-contract-tests"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "proxy-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "futures-util",
- "http",
- "serde",
- "serde_json",
- "subtle",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tracing",
- "tracing-subscriber",
- "worker-daemon",
- "worker-protocol",
 ]
 
 [[package]]
@@ -1846,31 +1871,6 @@ name = "wit-bindgen"
 version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
-
-[[package]]
-name = "worker-daemon"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "futures-util",
- "proxy-server",
- "reqwest",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tracing",
- "tracing-subscriber",
- "worker-protocol",
-]
-
-[[package]]
-name = "worker-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "writeable"

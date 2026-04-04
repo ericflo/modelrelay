@@ -1,0 +1,49 @@
+# ModelRelay — modelrelay-worker systemd template unit
+#
+# This is an instantiated (template) unit. The instance name (%i) is used as
+# the worker name, so you can run multiple workers on the same host:
+#
+#   sudo systemctl enable --now modelrelay-worker@gpu0
+#   sudo systemctl enable --now modelrelay-worker@gpu1
+#
+# Each instance loads its own env file at /etc/modelrelay/worker-%i.env
+# (e.g. worker-gpu0.env, worker-gpu1.env), falling back to the shared
+# worker.env if the per-instance file doesn't exist.
+#
+# Install:
+#   sudo cp modelrelay-worker@.service /etc/systemd/system/
+#   sudo cp worker.env.example /etc/modelrelay/worker-gpu0.env  # edit values
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now modelrelay-worker@gpu0
+
+[Unit]
+Description=ModelRelay worker daemon (%i)
+Documentation=https://modelrelay.io
+After=network.target
+
+[Service]
+Type=simple
+
+User=modelrelay
+Group=modelrelay
+
+WorkingDirectory=/var/lib/modelrelay
+
+# Per-instance env file takes precedence; shared file is the fallback.
+EnvironmentFile=-/etc/modelrelay/worker.env
+EnvironmentFile=-/etc/modelrelay/worker-%i.env
+
+# The %i instance name (e.g. "gpu0") becomes the worker name.
+ExecStart=/usr/local/bin/modelrelay-worker --worker-name %i
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
