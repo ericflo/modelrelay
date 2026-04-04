@@ -154,6 +154,37 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
+## Connecting your tools
+
+Once the proxy is running, point your existing tools at it — no special client needed.
+
+**curl** — see [Try it](#try-it) above.
+
+**Claude Code / Claude Desktop** — set the base URL to your proxy:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8080
+claude    # requests now route through ModelRelay
+```
+
+**LiteLLM** — add a model entry in your `config.yaml`:
+
+```yaml
+model_list:
+  - model_name: llama3.2:3b
+    litellm_params:
+      model: openai/llama3.2:3b
+      api_base: http://localhost:8080/v1
+```
+
+**Open WebUI** — point the OpenAI-compatible backend at the proxy:
+
+```bash
+export OPENAI_API_BASE_URL=http://localhost:8080/v1
+```
+
+Any tool that speaks OpenAI or Anthropic API formats works — just change the base URL.
+
 ## Features
 
 - **Cross-platform** — pre-built binaries for Linux, macOS, and Windows (x86_64 + arm64)
