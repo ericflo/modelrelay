@@ -1,0 +1,16 @@
+[book]
+title = "ModelRelay"
+description = "Central HTTP LLM proxy that routes inference requests to authenticated remote workers over WebSocket."
+authors = ["Eric Florenzano"]
+language = "en"
+multilingual = false
+src = "docs"
+
+[build]
+build-dir = "book"
+
+[output.html]
+site-url = "/modelrelay/"
+git-repository-url = "https://github.com/ericflo/modelrelay"
+git-repository-icon = "fa-github"
+edit-url-template = "https://github.com/ericflo/modelrelay/edit/main/{path}"
