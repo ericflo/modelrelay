@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use crate::state::AppState;
 
+mod auth;
 mod checkout;
 mod dashboard;
 mod pricing;
@@ -20,6 +21,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(landing))
         .route("/health", get(health))
         .route("/pricing", get(pricing::page))
+        .route("/signup", get(auth::signup_page).post(auth::signup_submit))
+        .route("/login", get(auth::login_page).post(auth::login_submit))
+        .route("/logout", post(auth::logout))
         .route("/checkout", post(checkout::create))
         .route("/checkout/success", get(checkout::success))
         .route("/checkout/cancel", get(checkout::cancel))

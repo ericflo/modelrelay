@@ -25,6 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+argon2 = "0.5"
 
 [lints]
 workspace = true
