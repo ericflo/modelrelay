@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- CI now respects `rust-toolchain.toml` for MSRV verification — replaced `dtolnay/rust-toolchain@stable` with `rustup show` so the test matrix runs against the pinned 1.94.1 toolchain rather than latest stable
+
 ## [0.1.4] - 2026-04-04
 
 ### Added
