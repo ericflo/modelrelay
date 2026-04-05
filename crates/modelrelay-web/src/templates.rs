@@ -560,7 +560,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
 
     let wizard_js = r#"
 (function() {
-  const STEPS = 7;
+  const STEPS = 8;
   let currentStep = 1;
   let detectedPlatform = 'linux';
   let workerPollInterval = null;
@@ -769,6 +769,14 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     btnEl.textContent = 'Send Test Request';
   };
 
+  // Step 8: persistence platform tabs
+  window.__setPersistPlatform = function(p) {
+    $$('.persist-content').forEach(el => el.style.display = el.dataset.platform === p ? 'block' : 'none');
+    // Update tabs within the persist step only
+    const step8 = $$('.wizard-step[data-step="8"] .tab');
+    step8.forEach(t => t.classList.toggle('active', t.dataset.platform === p));
+  };
+
   window.__copyCode = function(id) {
     const el = document.getElementById(id);
     if (el) navigator.clipboard.writeText(el.textContent);
@@ -777,6 +785,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   // Init
   goToStep(1);
   window.__setPlatform(detectedPlatform);
+  window.__setPersistPlatform(detectedPlatform);
 
   // Pre-fill config inputs from cloud config
   if (cloudCfg) {
@@ -803,6 +812,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
         "Configure",
         "Connect",
         "Test",
+        "Persist",
     ];
 
     let mut progress_html = String::from("<div class=\"wizard-progress\">");
@@ -988,9 +998,169 @@ models = ["*"]</code>
   -d '{"model":"your-model","messages":[{"role":"user","content":"Hello!"}],"max_tokens":100}'</code>
         </div>
       </div>
+      <div class="wizard-nav">
+        <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
+        <button class="btn" onclick="window.__wizNext()">Next &rarr;</button>
+      </div>
+    </div>
+
+    <!-- Step 8: Make it Persistent -->
+    <div class="wizard-step" data-step="8">
+      <div class="wizard-card">
+        <h2><span class="step-num">8</span> Make it persistent</h2>
+        <p>Your worker is running, but it won't survive a reboot yet. Set it up as a system service so it starts automatically.</p>
+
+        <div class="platform-tabs" style="margin-top:20px;">
+          <div class="tab" data-platform="linux" onclick="window.__setPersistPlatform('linux')">Linux</div>
+          <div class="tab" data-platform="macos" onclick="window.__setPersistPlatform('macos')">macOS</div>
+          <div class="tab" data-platform="windows" onclick="window.__setPersistPlatform('windows')">Windows</div>
+        </div>
+
+        <div class="persist-content" data-platform="linux">
+          <p style="font-weight:600;color:#e6edf3;">systemd (recommended)</p>
+          <p>ModelRelay ships a systemd template unit that supports multiple workers per machine (e.g. <code>gpu0</code>, <code>gpu1</code>).</p>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">1. Install the binary and create a service user</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-linux-1')">Copy</button>
+            <code id="persist-linux-1">sudo install -m 755 modelrelay-worker /usr/local/bin/
+sudo useradd --system --no-create-home modelrelay
+sudo mkdir -p /var/lib/modelrelay /etc/modelrelay</code>
+          </div>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">2. Install the service file and configure</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-linux-2')">Copy</button>
+            <code id="persist-linux-2"># Download the template unit file
+curl -L -o /tmp/modelrelay-worker@.service \
+  https://raw.githubusercontent.com/ericflo/modelrelay/main/extras/modelrelay-worker%40.service
+
+sudo cp /tmp/modelrelay-worker@.service /etc/systemd/system/
+
+# Create per-instance env file (edit with your values)
+sudo tee /etc/modelrelay/worker-gpu0.env > /dev/null &lt;&lt;'EOF'
+PROXY_URL=http://your-proxy:8080
+WORKER_SECRET=your-secret
+BACKEND_URL=http://127.0.0.1:8000
+MODELS=llama3.2:3b
+EOF</code>
+          </div>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">3. Enable and start</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-linux-3')">Copy</button>
+            <code id="persist-linux-3">sudo systemctl daemon-reload
+sudo systemctl enable --now modelrelay-worker@gpu0</code>
+          </div>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">4. Verify it survived</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-linux-4')">Copy</button>
+            <code id="persist-linux-4">systemctl status modelrelay-worker@gpu0
+journalctl -u modelrelay-worker@gpu0 -f</code>
+          </div>
+
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:12px;">
+            Add more workers with <code>modelrelay-worker@gpu1</code>, <code>@gpu2</code>, etc. Each gets its own env file at <code>/etc/modelrelay/worker-gpu1.env</code>.
+          </p>
+        </div>
+
+        <div class="persist-content" data-platform="macos" style="display:none;">
+          <p style="font-weight:600;color:#e6edf3;">launchd</p>
+          <p>Create a Launch Daemon so the worker starts on boot.</p>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">1. Create the plist file</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-macos-1')">Copy</button>
+            <code id="persist-macos-1">sudo tee /Library/LaunchDaemons/io.modelrelay.worker.plist > /dev/null &lt;&lt;'EOF'
+&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;
+&lt;plist version="1.0"&gt;
+&lt;dict&gt;
+  &lt;key&gt;Label&lt;/key&gt;
+  &lt;string&gt;io.modelrelay.worker&lt;/string&gt;
+  &lt;key&gt;ProgramArguments&lt;/key&gt;
+  &lt;array&gt;
+    &lt;string&gt;/usr/local/bin/modelrelay-worker&lt;/string&gt;
+    &lt;string&gt;--config&lt;/string&gt;
+    &lt;string&gt;/etc/modelrelay/config.toml&lt;/string&gt;
+  &lt;/array&gt;
+  &lt;key&gt;RunAtLoad&lt;/key&gt;
+  &lt;true/&gt;
+  &lt;key&gt;KeepAlive&lt;/key&gt;
+  &lt;true/&gt;
+  &lt;key&gt;StandardErrorPath&lt;/key&gt;
+  &lt;string&gt;/var/log/modelrelay-worker.log&lt;/string&gt;
+&lt;/dict&gt;
+&lt;/plist&gt;
+EOF</code>
+          </div>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">2. Install the binary and config</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-macos-2')">Copy</button>
+            <code id="persist-macos-2">sudo cp modelrelay-worker /usr/local/bin/
+sudo mkdir -p /etc/modelrelay
+sudo cp config.toml /etc/modelrelay/config.toml</code>
+          </div>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">3. Load and start</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-macos-3')">Copy</button>
+            <code id="persist-macos-3">sudo launchctl load /Library/LaunchDaemons/io.modelrelay.worker.plist</code>
+          </div>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">4. Verify</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-macos-4')">Copy</button>
+            <code id="persist-macos-4">sudo launchctl list | grep modelrelay
+tail -f /var/log/modelrelay-worker.log</code>
+          </div>
+        </div>
+
+        <div class="persist-content" data-platform="windows" style="display:none;">
+          <p style="font-weight:600;color:#e6edf3;">Windows Service</p>
+          <p>Register the worker as a native Windows Service using <code>sc.exe</code>. Run PowerShell as Administrator.</p>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">1. Install the binary</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-win-1')">Copy</button>
+            <code id="persist-win-1">mkdir C:\ModelRelay
+copy modelrelay-worker.exe C:\ModelRelay\</code>
+          </div>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">2. Create the service</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-win-2')">Copy</button>
+            <code id="persist-win-2">sc.exe create ModelRelayWorker binPath= "C:\ModelRelay\modelrelay-worker.exe" start= auto</code>
+          </div>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">3. Set environment variables (persists across reboots)</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-win-3')">Copy</button>
+            <code id="persist-win-3">[Environment]::SetEnvironmentVariable("PROXY_URL", "http://your-proxy:8080", "Machine")
+[Environment]::SetEnvironmentVariable("WORKER_SECRET", "your-secret", "Machine")
+[Environment]::SetEnvironmentVariable("BACKEND_URL", "http://localhost:8000", "Machine")
+[Environment]::SetEnvironmentVariable("MODELS", "llama3.2:3b", "Machine")</code>
+          </div>
+
+          <p style="margin-top:16px;font-weight:600;color:#e6edf3;">4. Start and verify</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-win-4')">Copy</button>
+            <code id="persist-win-4">Start-Service ModelRelayWorker
+Get-Service ModelRelayWorker</code>
+          </div>
+
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:12px;">
+            For fully annotated scripts with error handling, see <a href="https://github.com/ericflo/modelrelay/blob/main/extras/install-windows-service-worker.ps1">extras/install-windows-service-worker.ps1</a>.
+          </p>
+        </div>
+      </div>
+
       <div class="wizard-card" style="text-align:center;">
         <h2 style="color:#34d399;">&#127881; Setup complete!</h2>
-        <p>Your worker is connected and serving inference requests through ModelRelay.</p>
+        <p>Your worker is connected, tested, and will start automatically on boot.</p>
         <p style="margin-top:16px;">
           <a href="/dashboard" class="btn">Go to Dashboard</a>
           <a href="/setup" class="btn btn-back" style="margin-left:8px;" onclick="event.preventDefault();window.__wizGoTo(1);">Add another machine</a>

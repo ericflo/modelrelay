@@ -54,7 +54,38 @@ Don't want to run the infrastructure yourself? A fully-managed hosted version is
 
 ## Quickstart
 
-### Docker (recommended)
+### Pre-built binaries (recommended)
+
+Download the latest release for your platform from the [Releases page](https://github.com/ericflo/modelrelay/releases):
+
+| Platform | modelrelay-server | modelrelay-worker |
+|----------|-------------------|-------------------|
+| Linux x86_64 | `modelrelay-server-linux-amd64` | `modelrelay-worker-linux-amd64` |
+| Linux arm64 | `modelrelay-server-linux-arm64` | `modelrelay-worker-linux-arm64` |
+| macOS Intel | `modelrelay-server-darwin-amd64` | `modelrelay-worker-darwin-amd64` |
+| macOS Apple Silicon | `modelrelay-server-darwin-arm64` | `modelrelay-worker-darwin-arm64` |
+| Windows x86_64 | `modelrelay-server-windows-amd64.exe` | `modelrelay-worker-windows-amd64.exe` |
+| Windows arm64 | `modelrelay-server-windows-arm64.exe` | `modelrelay-worker-windows-arm64.exe` |
+
+**Start the proxy:**
+
+```bash
+./modelrelay-server \
+  --listen 0.0.0.0:8080 \
+  --worker-secret mysecret
+```
+
+**Start a worker** (on a GPU box with `llama-server` or any OpenAI-compatible backend running):
+
+```bash
+./modelrelay-worker \
+  --proxy-url http://<proxy-host>:8080 \
+  --worker-secret mysecret \
+  --backend-url http://127.0.0.1:8000 \
+  --models llama3.2:3b,llama3.2:1b
+```
+
+### Docker
 
 Pre-built images are published to GitHub Container Registry on every release and main push.
 
@@ -78,7 +109,7 @@ docker run \
   ghcr.io/ericflo/modelrelay/modelrelay-worker:latest
 ```
 
-For pinned versions, replace `:latest` with a release tag (e.g. `:0.1.0`).
+For pinned versions, replace `:latest` with a release tag (e.g. `:0.2.1`).
 
 ### With Docker Compose (easiest for local dev)
 
@@ -92,22 +123,9 @@ docker compose up
 
 The proxy is now listening on `http://localhost:8080`. The worker connects to it automatically and forwards requests to your backend.
 
-### Pre-built binaries
-
-Download the latest release for your platform from the [Releases page](https://github.com/ericflo/modelrelay/releases):
-
-| Platform | modelrelay-server | modelrelay-worker |
-|----------|-------------------|-------------------|
-| Linux x86_64 | `modelrelay-server-linux-amd64` | `modelrelay-worker-linux-amd64` |
-| Linux arm64 | `modelrelay-server-linux-arm64` | `modelrelay-worker-linux-arm64` |
-| macOS Intel | `modelrelay-server-darwin-amd64` | `modelrelay-worker-darwin-amd64` |
-| macOS Apple Silicon | `modelrelay-server-darwin-arm64` | `modelrelay-worker-darwin-arm64` |
-| Windows x86_64 | `modelrelay-server-windows-amd64.exe` | `modelrelay-worker-windows-amd64.exe` |
-| Windows arm64 | `modelrelay-server-windows-arm64.exe` | `modelrelay-worker-windows-arm64.exe` |
-
 ### From crates.io
 
-> **Note:** The crates are not yet published to crates.io. Use [pre-built binaries](#pre-built-binaries) or [Docker](#docker-recommended) in the meantime. See [CONTRIBUTING.md](CONTRIBUTING.md#ci-secrets) for how to configure the `CRATES_IO_TOKEN` secret for publishing.
+> **Note:** The crates are not yet published to crates.io. Use [pre-built binaries](#pre-built-binaries-recommended) or [Docker](#docker) in the meantime. See [CONTRIBUTING.md](CONTRIBUTING.md#ci-secrets) for how to configure the `CRATES_IO_TOKEN` secret for publishing.
 
 ```bash
 cargo install modelrelay-server modelrelay-worker
@@ -118,24 +136,6 @@ cargo install modelrelay-server modelrelay-worker
 ```bash
 cargo build --release
 # Binaries: target/release/modelrelay-server  target/release/modelrelay-worker
-```
-
-**Start the proxy:**
-
-```bash
-./target/release/modelrelay-server \
-  --listen 0.0.0.0:8080 \
-  --worker-secret mysecret
-```
-
-**Start a worker** (on a GPU box with `llama-server` or any OpenAI-compatible backend running):
-
-```bash
-./target/release/modelrelay-worker \
-  --proxy-url http://<proxy-host>:8080 \
-  --worker-secret mysecret \
-  --backend-url http://127.0.0.1:8000 \
-  --models llama3.2:3b,llama3.2:1b
 ```
 
 ### Try it
@@ -190,6 +190,14 @@ export OPENAI_API_BASE_URL=http://localhost:8080/v1
 ```
 
 Any tool that speaks OpenAI or Anthropic API formats works — just change the base URL.
+
+## Make it persistent
+
+Once your worker is running, set it up as a system service so it starts automatically on boot. The setup wizard (at `/setup` in the web UI) walks through this interactively, but here's the quick version:
+
+- **Linux (systemd):** Use the template unit in [`extras/modelrelay-worker@.service`](extras/modelrelay-worker@.service) — supports multiple workers per machine (`modelrelay-worker@gpu0`, `@gpu1`, etc.). See [Systemd](#systemd-bare-metal--vm) below.
+- **macOS (launchd):** Create a Launch Daemon plist pointing at the binary and your `config.toml`. The worker starts on boot and restarts on crash.
+- **Windows (Service):** Register with `sc.exe create` and set env vars with `[Environment]::SetEnvironmentVariable`. See [Windows Service](#windows-service) below.
 
 ## Features
 
