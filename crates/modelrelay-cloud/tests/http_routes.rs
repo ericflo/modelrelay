@@ -87,7 +87,7 @@ async fn pricing_returns_200_with_html() {
     let (status, body) = get("/pricing").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body.contains("<") && body.len() > 50,
+        body.contains('<') && body.len() > 50,
         "expected HTML pricing page"
     );
 }
@@ -259,7 +259,7 @@ async fn webhook_with_missing_v1_returns_400() {
                 .uri("/webhook/stripe")
                 .header("content-type", "application/json")
                 .header("Stripe-Signature", "t=1700000000")
-                .body(Body::from(r#"{}"#.to_owned()))
+                .body(Body::from("{}".to_owned()))
                 .unwrap(),
         )
         .await
@@ -288,7 +288,7 @@ async fn webhook_without_secret_configured_returns_500() {
                 .uri("/webhook/stripe")
                 .header("content-type", "application/json")
                 .header("Stripe-Signature", "t=1700000000,v1=abc")
-                .body(Body::from(r#"{}"#.to_owned()))
+                .body(Body::from("{}".to_owned()))
                 .unwrap(),
         )
         .await
