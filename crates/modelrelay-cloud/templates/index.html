@@ -112,6 +112,38 @@
     /* Footer */
     footer { padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }
     footer a { color: #8b949e; }
+
+    /* Tablet */
+    @media (max-width: 768px) {
+      .hero { padding: 64px 0 48px; }
+      .hero h1 { font-size: 2rem; }
+      .hero p { font-size: 1.05rem; }
+      .features, .how-it-works, .pricing { padding: 48px 0; }
+      .features h2, .how-it-works h2, .pricing h2 { font-size: 1.6rem; margin-bottom: 32px; }
+      .feature-grid, .steps { grid-template-columns: 1fr; }
+      .code-example pre { font-size: 0.8rem; }
+      .price-card { padding: 32px; }
+      .price-card .amount { font-size: 2.8rem; }
+      .nav-links { gap: 12px; }
+      .nav-links a { font-size: 0.8rem; }
+    }
+
+    /* Mobile */
+    @media (max-width: 480px) {
+      .container { padding: 0 16px; }
+      .hero { padding: 48px 0 36px; }
+      .hero h1 { font-size: 1.6rem; }
+      .hero p { font-size: 0.95rem; margin-bottom: 28px; }
+      .btn { display: block; width: 100%; text-align: center; padding: 14px 20px; }
+      .features, .how-it-works, .pricing { padding: 36px 0; }
+      .features h2, .how-it-works h2, .pricing h2 { font-size: 1.4rem; margin-bottom: 24px; }
+      .feature-card, .step { padding: 24px; }
+      .code-example { padding: 16px; }
+      .code-example pre { font-size: 0.75rem; }
+      .price-card { padding: 24px; max-width: 100%; }
+      .price-card .amount { font-size: 2.4rem; }
+      .nav-links .btn-signup { padding: 6px 12px; }
+    }
   </style>
 </head>
 <body>
