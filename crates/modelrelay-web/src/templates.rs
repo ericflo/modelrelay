@@ -174,7 +174,7 @@ pub fn dashboard_page() -> String {
       const d = await r.json();
       const workers = d.workers || [];
       if (workers.length === 0) {
-        el.innerHTML = '<div class="empty-state">No workers connected.<br><a href="https://github.com/ericflo/llm-worker-proxy#quickstart" target="_blank">How to connect a worker &rarr;</a></div>';
+        el.innerHTML = '<div class="empty-state">No workers connected.<br><a href="/setup" class="btn-sm" style="margin-top:8px;display:inline-block;">Set up your first worker &rarr;</a></div>';
         return;
       }
       let html = '<table class="data"><thead><tr><th>Worker</th><th>Models</th><th>Load</th><th>Status</th></tr></thead><tbody>';
@@ -391,13 +391,17 @@ pub fn dashboard_page() -> String {
       <a href="/" class="logo">Model<span>Relay</span></a>
       <div class="nav-links">
         <a href="/dashboard">Dashboard</a>
+        <a href="/setup">Setup</a>
       </div>
     </div>
   </nav>
 
   <section class="content">
     <div class="container">
-      <h1>Dashboard</h1>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+        <h1 style="margin-bottom:0;">Dashboard</h1>
+        <a href="/setup" class="btn">+ Add a machine</a>
+      </div>
       {body_content}
     </div>
   </section>
@@ -409,6 +413,629 @@ pub fn dashboard_page() -> String {
   </footer>
 
   <script>{dashboard_js}</script>
+</body>
+</html>"#
+    )
+}
+
+/// Build the worker onboarding setup wizard page.
+///
+/// A 7-step guided flow for connecting a new worker machine to `ModelRelay`.
+/// Always accessible — shown prominently when zero workers exist, and reachable
+/// via the "Add a machine" button on the dashboard at any time.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn setup_wizard_page() -> String {
+    use std::fmt::Write;
+
+    let wizard_css = r"
+    .wizard-progress {
+      display:flex; gap:0; margin-bottom:32px; overflow-x:auto;
+    }
+    .wizard-progress .step-indicator {
+      flex:1; text-align:center; padding:12px 4px; font-size:0.75rem;
+      color:#484f58; border-bottom:3px solid #21262d; min-width:90px;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .wizard-progress .step-indicator.active {
+      color:#7c3aed; border-bottom-color:#7c3aed; font-weight:600;
+    }
+    .wizard-progress .step-indicator.done {
+      color:#34d399; border-bottom-color:#34d399;
+    }
+
+    .wizard-step { display:none; animation:fadeIn 0.3s ease; }
+    .wizard-step.active { display:block; }
+
+    .wizard-card {
+      background:#161b22; border:1px solid #21262d; border-radius:12px;
+      padding:32px; margin-bottom:24px;
+    }
+    .wizard-card h2 { font-size:1.25rem; margin-bottom:16px; }
+    .wizard-card p { color:#8b949e; margin-bottom:12px; line-height:1.7; }
+
+    .platform-tabs {
+      display:flex; gap:8px; margin-bottom:20px;
+    }
+    .platform-tabs .tab {
+      padding:10px 20px; background:#0d1117; border:1px solid #30363d;
+      border-radius:8px; color:#8b949e; cursor:pointer; font-size:0.9rem;
+      font-weight:600; transition: all 0.2s;
+    }
+    .platform-tabs .tab:hover { border-color:#7c3aed; color:#e6edf3; }
+    .platform-tabs .tab.active { background:#7c3aed; border-color:#7c3aed; color:#fff; }
+
+    .platform-content { display:none; }
+    .platform-content.active { display:block; }
+
+    .code-block {
+      background:#0d1117; border:1px solid #30363d; border-radius:8px;
+      padding:16px; font-family:'SFMono-Regular',Consolas,monospace;
+      font-size:0.85rem; color:#e6edf3; overflow-x:auto; position:relative;
+      line-height:1.6; margin:12px 0;
+    }
+    .code-block .copy-btn {
+      position:absolute; top:8px; right:8px; padding:4px 10px;
+      font-size:0.75rem; background:#30363d; color:#e6edf3;
+      border:none; border-radius:4px; cursor:pointer;
+    }
+    .code-block .copy-btn:hover { background:#484f58; }
+
+    .wizard-nav {
+      display:flex; justify-content:space-between; align-items:center;
+      margin-top:24px; padding-top:24px; border-top:1px solid #21262d;
+    }
+    .wizard-nav .btn { min-width:120px; text-align:center; }
+    .wizard-nav .btn-back {
+      background:transparent; border:1px solid #30363d; color:#8b949e;
+    }
+    .wizard-nav .btn-back:hover { border-color:#7c3aed; color:#e6edf3; }
+
+    .status-indicator {
+      display:flex; align-items:center; gap:10px; padding:16px;
+      background:#0d1117; border:1px solid #21262d; border-radius:8px;
+      margin:16px 0; font-size:0.95rem;
+    }
+    .status-indicator .pulse {
+      width:12px; height:12px; border-radius:50%; background:#484f58;
+    }
+    .status-indicator .pulse.searching {
+      background:#fbbf24;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    .status-indicator .pulse.connected { background:#34d399; }
+    @keyframes pulse {
+      0%,100% { opacity:1; }
+      50% { opacity:0.4; }
+    }
+
+    .check-mark { color:#34d399; font-weight:700; margin-right:4px; }
+    .step-num {
+      display:inline-flex; align-items:center; justify-content:center;
+      width:28px; height:28px; border-radius:50%; background:#7c3aed;
+      color:#fff; font-size:0.8rem; font-weight:700; margin-right:10px;
+      flex-shrink:0;
+    }
+
+    .test-result {
+      background:#0d1117; border:1px solid #21262d; border-radius:8px;
+      padding:16px; margin-top:16px; font-family:'SFMono-Regular',Consolas,monospace;
+      font-size:0.85rem; color:#e6edf3; max-height:300px; overflow-y:auto;
+      white-space:pre-wrap;
+    }
+
+    .config-input {
+      display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:12px 0;
+    }
+    .config-input label { color:#8b949e; font-size:0.85rem; min-width:120px; }
+    .config-input input {
+      padding:8px 12px; background:#0d1117; border:1px solid #30363d;
+      border-radius:8px; color:#e6edf3; font-size:0.9rem; flex:1; min-width:200px;
+    }
+    .config-input input:focus { outline:none; border-color:#7c3aed; }
+
+    @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    ";
+
+    let wizard_js = r#"
+(function() {
+  const STEPS = 7;
+  let currentStep = 1;
+  let detectedPlatform = 'linux';
+  let workerPollInterval = null;
+  let initialWorkerIds = new Set();
+
+  const $ = s => document.querySelector(s);
+  const $$ = s => document.querySelectorAll(s);
+
+  // Platform detection
+  const ua = navigator.userAgent.toLowerCase();
+  if (ua.includes('mac')) detectedPlatform = 'macos';
+  else if (ua.includes('win')) detectedPlatform = 'windows';
+
+  function getAdminToken() {
+    return localStorage.getItem('mr_admin_token') || '';
+  }
+  function getServerUrl() {
+    return localStorage.getItem('mr_server_url') || window.location.origin;
+  }
+  function authHeaders() {
+    const h = { 'Content-Type': 'application/json' };
+    const t = getAdminToken();
+    if (t) h['Authorization'] = 'Bearer ' + t;
+    return h;
+  }
+
+  function escHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function goToStep(n) {
+    if (n < 1 || n > STEPS) return;
+    currentStep = n;
+    $$('.wizard-step').forEach((el, i) => {
+      el.classList.toggle('active', i + 1 === n);
+    });
+    $$('.step-indicator').forEach((el, i) => {
+      el.classList.remove('active', 'done');
+      if (i + 1 === n) el.classList.add('active');
+      else if (i + 1 < n) el.classList.add('done');
+    });
+    // Start/stop worker polling on step 6
+    if (n === 6) startWorkerPoll();
+    else stopWorkerPoll();
+  }
+
+  function nextStep() { goToStep(currentStep + 1); }
+  function prevStep() { goToStep(currentStep - 1); }
+  window.__wizNext = nextStep;
+  window.__wizPrev = prevStep;
+  window.__wizGoTo = goToStep;
+
+  // Platform tab switching
+  window.__setPlatform = function(p) {
+    detectedPlatform = p;
+    $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.platform === p));
+    $$('.platform-content').forEach(el => el.classList.toggle('active', el.dataset.platform === p));
+    updateDownloadLinks();
+    updateConfigSnippet();
+  };
+
+  function updateDownloadLinks() {
+    const base = 'https://github.com/ericflo/modelrelay/releases/latest/download';
+    const binMap = {
+      'macos': 'modelrelay-worker-darwin-arm64',
+      'windows': 'modelrelay-worker-windows-amd64.exe',
+      'linux': 'modelrelay-worker-linux-amd64',
+    };
+    const bin = binMap[detectedPlatform] || binMap['linux'];
+    const el = $('#download-cmd');
+    if (el) {
+      if (detectedPlatform === 'windows') {
+        el.textContent = 'curl -L -o modelrelay-worker.exe ' + base + '/' + bin;
+      } else {
+        el.textContent = 'curl -L -o modelrelay-worker ' + base + '/' + bin + ' && chmod +x modelrelay-worker';
+      }
+    }
+  }
+
+  function updateConfigSnippet() {
+    const serverUrl = $('#cfg-server-url') ? $('#cfg-server-url').value : getServerUrl();
+    const secret = $('#cfg-worker-secret') ? $('#cfg-worker-secret').value : 'your-worker-secret';
+    const el = $('#config-toml');
+    if (el) {
+      el.textContent =
+        '[server]\n' +
+        'url = "' + serverUrl + '"\n' +
+        'worker_secret = "' + secret + '"\n\n' +
+        '[worker]\n' +
+        'name = "my-gpu-box"\n\n' +
+        '[[backends]]\n' +
+        'name = "lmstudio"\n' +
+        'url = "http://localhost:1234"\n' +
+        'models = ["*"]';
+    }
+  }
+  window.__updateConfig = updateConfigSnippet;
+
+  // Step 6: poll for new worker
+  async function snapshotWorkers() {
+    try {
+      const r = await fetch(getServerUrl() + '/admin/workers', { headers: authHeaders() });
+      if (!r.ok) return;
+      const d = await r.json();
+      (d.workers || []).forEach(w => initialWorkerIds.add(w.worker_id));
+    } catch(e) {}
+  }
+
+  function startWorkerPoll() {
+    stopWorkerPoll();
+    snapshotWorkers();
+    const indicator = $('#worker-status');
+    const pulse = $('#worker-pulse');
+    const statusText = $('#worker-status-text');
+    if (pulse) { pulse.className = 'pulse searching'; }
+    if (statusText) { statusText.textContent = 'Waiting for worker to connect...'; }
+
+    workerPollInterval = setInterval(async () => {
+      try {
+        const r = await fetch(getServerUrl() + '/admin/workers', { headers: authHeaders() });
+        if (!r.ok) return;
+        const d = await r.json();
+        const workers = d.workers || [];
+        const newWorker = workers.find(w => !initialWorkerIds.has(w.worker_id));
+        if (newWorker) {
+          stopWorkerPoll();
+          if (pulse) { pulse.className = 'pulse connected'; }
+          if (statusText) {
+            const name = newWorker.worker_name || newWorker.worker_id;
+            const models = (newWorker.models || []).join(', ');
+            statusText.innerHTML = '<span class="check-mark">&#10003;</span> Worker <strong>' + escHtml(name) + '</strong> connected!' +
+              (models ? ' <span style="color:#8b949e;">(' + escHtml(models) + ')</span>' : '');
+          }
+          // Enable next button
+          const nextBtn = $('#step6-next');
+          if (nextBtn) { nextBtn.disabled = false; nextBtn.style.opacity = '1'; }
+        }
+      } catch(e) {}
+    }, 3000);
+  }
+
+  function stopWorkerPoll() {
+    if (workerPollInterval) {
+      clearInterval(workerPollInterval);
+      workerPollInterval = null;
+    }
+  }
+
+  // Step 7: test inference
+  window.__testInference = async function() {
+    const resultEl = $('#test-result');
+    const btnEl = $('#test-btn');
+    if (!resultEl || !btnEl) return;
+    btnEl.disabled = true;
+    btnEl.textContent = 'Sending...';
+    resultEl.textContent = 'Sending request...';
+    resultEl.style.display = 'block';
+
+    const serverUrl = getServerUrl();
+    const model = $('#test-model') ? $('#test-model').value.trim() : 'default';
+    const body = {
+      model: model || 'default',
+      messages: [{ role: 'user', content: 'Hello! Reply in one short sentence.' }],
+      max_tokens: 100,
+    };
+
+    try {
+      const apiKey = localStorage.getItem('mr_test_api_key') || '';
+      const headers = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+      const r = await fetch(serverUrl + '/v1/chat/completions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      const text = await r.text();
+      if (r.ok) {
+        try {
+          const d = JSON.parse(text);
+          const reply = d.choices && d.choices[0] && d.choices[0].message
+            ? d.choices[0].message.content
+            : text;
+          resultEl.innerHTML = '<span class="check-mark">&#10003;</span> <strong>Success!</strong>\n\n'
+            + 'Model: ' + escHtml(d.model || model) + '\n'
+            + 'Response: ' + escHtml(reply);
+        } catch(e) {
+          resultEl.textContent = 'Response (raw):\n' + text;
+        }
+      } else {
+        resultEl.textContent = 'Error ' + r.status + ':\n' + text;
+      }
+    } catch(e) {
+      resultEl.textContent = 'Connection failed: ' + e.message;
+    }
+    btnEl.disabled = false;
+    btnEl.textContent = 'Send Test Request';
+  };
+
+  window.__copyCode = function(id) {
+    const el = document.getElementById(id);
+    if (el) navigator.clipboard.writeText(el.textContent);
+  };
+
+  // Init
+  goToStep(1);
+  window.__setPlatform(detectedPlatform);
+
+  // Reconfigure when config inputs change
+  document.addEventListener('input', (e) => {
+    if (e.target.id === 'cfg-server-url' || e.target.id === 'cfg-worker-secret') {
+      updateConfigSnippet();
+    }
+  });
+})();
+    "#;
+
+    let step_labels = [
+        "Platform",
+        "Install LM Studio",
+        "Load Model",
+        "Download Worker",
+        "Configure",
+        "Connect",
+        "Test",
+    ];
+
+    let mut progress_html = String::from("<div class=\"wizard-progress\">");
+    for (i, label) in step_labels.iter().enumerate() {
+        let cls = if i == 0 { " active" } else { "" };
+        let _ = write!(
+            progress_html,
+            "<div class=\"step-indicator{cls}\">{label}</div>"
+        );
+    }
+    progress_html.push_str("</div>");
+
+    let steps_html = r#"
+    <!-- Step 1: Platform Detection -->
+    <div class="wizard-step active" data-step="1">
+      <div class="wizard-card">
+        <h2><span class="step-num">1</span> Choose your platform</h2>
+        <p>ModelRelay workers run on your machine alongside your local model server. Select your operating system to get started.</p>
+        <div class="platform-tabs">
+          <div class="tab" data-platform="macos" onclick="window.__setPlatform('macos')">macOS</div>
+          <div class="tab" data-platform="windows" onclick="window.__setPlatform('windows')">Windows</div>
+          <div class="tab" data-platform="linux" onclick="window.__setPlatform('linux')">Linux</div>
+        </div>
+        <div class="platform-content" data-platform="macos">
+          <p>Great — macOS with Apple Silicon is an excellent choice for running local models. You'll need a Mac with an M-series chip for best performance.</p>
+        </div>
+        <div class="platform-content" data-platform="windows">
+          <p>Windows works well for local inference. You'll want a machine with an NVIDIA GPU for best performance.</p>
+        </div>
+        <div class="platform-content" data-platform="linux">
+          <p>Linux is the most common choice for GPU inference servers. Works great with NVIDIA GPUs and CUDA.</p>
+        </div>
+      </div>
+      <div class="wizard-nav">
+        <div></div>
+        <button class="btn" onclick="window.__wizNext()">Next &rarr;</button>
+      </div>
+    </div>
+
+    <!-- Step 2: Install LM Studio -->
+    <div class="wizard-step" data-step="2">
+      <div class="wizard-card">
+        <h2><span class="step-num">2</span> Install LM Studio</h2>
+        <p>LM Studio is a free desktop app for running local LLMs. It provides an OpenAI-compatible API server that ModelRelay workers connect to.</p>
+        <p style="margin:20px 0;">
+          <a href="https://lmstudio.ai" target="_blank" class="btn">Download LM Studio &rarr;</a>
+        </p>
+        <div class="platform-content active" data-platform="macos">
+          <p>Download the macOS DMG, drag LM Studio to your Applications folder, and launch it.</p>
+        </div>
+        <div class="platform-content" data-platform="windows">
+          <p>Download the Windows installer (.exe), run it, and launch LM Studio from the Start menu.</p>
+        </div>
+        <div class="platform-content" data-platform="linux">
+          <p>Download the Linux AppImage, make it executable with <code>chmod +x</code>, and run it. Alternatively, if you prefer a headless setup, you can use <code>llama-server</code> or any OpenAI-compatible local server instead of LM Studio.</p>
+        </div>
+        <p style="color:#8b949e;font-size:0.85rem;margin-top:16px;">Already have LM Studio or another local model server? Skip ahead.</p>
+      </div>
+      <div class="wizard-nav">
+        <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
+        <button class="btn" onclick="window.__wizNext()">Next &rarr;</button>
+      </div>
+    </div>
+
+    <!-- Step 3: Configure a Model -->
+    <div class="wizard-step" data-step="3">
+      <div class="wizard-card">
+        <h2><span class="step-num">3</span> Download and load a model</h2>
+        <p>In LM Studio:</p>
+        <ol style="color:#8b949e;margin:12px 0 12px 20px;line-height:2;">
+          <li>Open the <strong style="color:#e6edf3;">Discover</strong> tab and search for a model (e.g. <code>llama-3.2-3b</code>)</li>
+          <li>Click <strong style="color:#e6edf3;">Download</strong> and wait for it to complete</li>
+          <li>Go to the <strong style="color:#e6edf3;">Developer</strong> tab</li>
+          <li>Select your downloaded model and click <strong style="color:#e6edf3;">Start Server</strong></li>
+          <li>Confirm the server is running on <code>http://localhost:1234</code></li>
+        </ol>
+        <p style="color:#8b949e;font-size:0.85rem;">Using llama-server or another backend? Just make sure it's running and note the URL and port.</p>
+      </div>
+      <div class="wizard-nav">
+        <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
+        <button class="btn" onclick="window.__wizNext()">Next &rarr;</button>
+      </div>
+    </div>
+
+    <!-- Step 4: Download Worker -->
+    <div class="wizard-step" data-step="4">
+      <div class="wizard-card">
+        <h2><span class="step-num">4</span> Download the ModelRelay worker</h2>
+        <p>Download the <code>modelrelay-worker</code> binary for your platform:</p>
+        <div class="code-block">
+          <button class="copy-btn" onclick="window.__copyCode('download-cmd')">Copy</button>
+          <code id="download-cmd">curl -L -o modelrelay-worker https://github.com/ericflo/modelrelay/releases/latest/download/modelrelay-worker-linux-amd64 &amp;&amp; chmod +x modelrelay-worker</code>
+        </div>
+        <p style="color:#8b949e;font-size:0.85rem;margin-top:12px;">
+          Or download directly from
+          <a href="https://github.com/ericflo/modelrelay/releases/latest" target="_blank">GitHub Releases</a>.
+        </p>
+      </div>
+      <div class="wizard-nav">
+        <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
+        <button class="btn" onclick="window.__wizNext()">Next &rarr;</button>
+      </div>
+    </div>
+
+    <!-- Step 5: Configure Worker -->
+    <div class="wizard-step" data-step="5">
+      <div class="wizard-card">
+        <h2><span class="step-num">5</span> Configure the worker</h2>
+        <p>Create a <code>config.toml</code> file next to the worker binary. Adjust the values below for your setup:</p>
+        <div class="config-input">
+          <label for="cfg-server-url">Server URL:</label>
+          <input id="cfg-server-url" type="text" placeholder="https://your-server.example.com">
+        </div>
+        <div class="config-input">
+          <label for="cfg-worker-secret">Worker Secret:</label>
+          <input id="cfg-worker-secret" type="text" placeholder="your-worker-secret">
+        </div>
+        <div class="code-block">
+          <button class="copy-btn" onclick="window.__copyCode('config-toml')">Copy</button>
+          <code id="config-toml">[server]
+url = ""
+worker_secret = "your-worker-secret"
+
+[worker]
+name = "my-gpu-box"
+
+[[backends]]
+name = "lmstudio"
+url = "http://localhost:1234"
+models = ["*"]</code>
+        </div>
+        <p style="color:#8b949e;font-size:0.85rem;margin-top:12px;">
+          The <code>worker_secret</code> must match the <code>MODELRELAY_WORKER_SECRET</code> configured on your server.
+          <code>models = ["*"]</code> advertises all models from your backend.
+        </p>
+      </div>
+      <div class="wizard-nav">
+        <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
+        <button class="btn" onclick="window.__wizNext()">Next &rarr;</button>
+      </div>
+    </div>
+
+    <!-- Step 6: Start Worker & Detect Connection -->
+    <div class="wizard-step" data-step="6">
+      <div class="wizard-card">
+        <h2><span class="step-num">6</span> Start the worker</h2>
+        <p>Run the worker from the directory containing your <code>config.toml</code>:</p>
+        <div class="code-block">
+          <button class="copy-btn" onclick="window.__copyCode('run-cmd')">Copy</button>
+          <code id="run-cmd">./modelrelay-worker --config config.toml</code>
+        </div>
+        <p style="margin-top:16px;">Once started, the worker will connect to your ModelRelay server. We'll detect it automatically:</p>
+        <div class="status-indicator" id="worker-status">
+          <div class="pulse" id="worker-pulse"></div>
+          <span id="worker-status-text">Waiting for worker to connect...</span>
+        </div>
+        <p style="color:#8b949e;font-size:0.85rem;margin-top:12px;">
+          Make sure your admin token is set on the
+          <a href="/dashboard">dashboard</a> so we can detect the connection. Polling every 3 seconds.
+        </p>
+      </div>
+      <div class="wizard-nav">
+        <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
+        <button class="btn" id="step6-next" onclick="window.__wizNext()">Next &rarr;</button>
+      </div>
+    </div>
+
+    <!-- Step 7: Test Inference -->
+    <div class="wizard-step" data-step="7">
+      <div class="wizard-card">
+        <h2><span class="step-num">7</span> Test inference</h2>
+        <p>Send a test request through ModelRelay to verify everything works end-to-end.</p>
+        <div class="config-input">
+          <label for="test-model">Model name:</label>
+          <input id="test-model" type="text" placeholder="e.g. llama-3.2-3b-instruct" value="">
+        </div>
+        <p style="margin:16px 0;">
+          <button class="btn" id="test-btn" onclick="window.__testInference()">Send Test Request</button>
+        </p>
+        <div id="test-result" class="test-result" style="display:none;"></div>
+        <p style="color:#8b949e;font-size:0.85rem;margin-top:16px;">
+          You can also test from the command line:
+        </p>
+        <div class="code-block">
+          <button class="copy-btn" onclick="window.__copyCode('curl-test')">Copy</button>
+          <code id="curl-test">curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"your-model","messages":[{"role":"user","content":"Hello!"}],"max_tokens":100}'</code>
+        </div>
+      </div>
+      <div class="wizard-card" style="text-align:center;">
+        <h2 style="color:#34d399;">&#127881; Setup complete!</h2>
+        <p>Your worker is connected and serving inference requests through ModelRelay.</p>
+        <p style="margin-top:16px;">
+          <a href="/dashboard" class="btn">Go to Dashboard</a>
+          <a href="/setup" class="btn btn-back" style="margin-left:8px;" onclick="event.preventDefault();window.__wizGoTo(1);">Add another machine</a>
+        </p>
+      </div>
+    </div>
+    "#;
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Setup — ModelRelay</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0d1117; color: #e6edf3; line-height: 1.6;
+    }}
+    a {{ color: #7c3aed; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    .container {{ max-width: 720px; margin: 0 auto; padding: 0 24px; }}
+
+    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; }}
+    nav .container {{ display: flex; justify-content: space-between; align-items: center; max-width: 960px; }}
+    .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
+    .logo span {{ color: #7c3aed; }}
+    .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
+    .nav-links a:hover {{ color: #e6edf3; }}
+
+    .content {{ padding: 32px 0; }}
+    .content h1 {{ font-size: 1.75rem; margin-bottom: 8px; }}
+    .subtitle {{ color: #8b949e; margin-bottom: 24px; }}
+
+    footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
+    footer a {{ color: #8b949e; }}
+
+    code {{ font-family: "SFMono-Regular", Consolas, monospace; }}
+
+    .btn {{
+      display: inline-block; padding: 10px 20px; background: #7c3aed; color: #fff;
+      border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
+      cursor: pointer; text-decoration: none;
+    }}
+    .btn:hover {{ background: #6d28d9; text-decoration: none; }}
+    {wizard_css}
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container" style="max-width:960px;">
+      <a href="/" class="logo">Model<span>Relay</span></a>
+      <div class="nav-links">
+        <a href="/dashboard">Dashboard</a>
+        <a href="/setup">Setup</a>
+      </div>
+    </div>
+  </nav>
+
+  <section class="content">
+    <div class="container">
+      <h1>Connect a Worker Machine</h1>
+      <p class="subtitle">Follow these steps to connect a GPU machine to your ModelRelay deployment.</p>
+      {progress_html}
+      {steps_html}
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+    </div>
+  </footer>
+
+  <script>{wizard_js}</script>
 </body>
 </html>"#
     )

@@ -13,6 +13,7 @@ pub fn router() -> Router {
         .route("/", get(landing))
         .route("/health", get(health))
         .route("/dashboard", get(dashboard))
+        .route("/setup", get(setup))
 }
 
 async fn landing() -> Html<String> {
@@ -35,4 +36,8 @@ async fn health() -> Json<Value> {
 
 async fn dashboard() -> Html<String> {
     Html(crate::templates::dashboard_page())
+}
+
+async fn setup() -> Html<String> {
+    Html(crate::templates::setup_wizard_page())
 }
