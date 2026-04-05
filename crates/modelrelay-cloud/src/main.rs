@@ -53,18 +53,18 @@ async fn main() {
     tracing::info!(admin_count = admin_emails.len(), "admin emails configured");
 
     // Backfill admin flag for existing users (grant-only, never demote)
-    if !admin_emails.is_empty() {
-        if let Some(ref p) = pool {
-            match sqlx::query(
-                "UPDATE users SET is_admin = true WHERE lower(email) = ANY($1) AND is_admin = false",
-            )
-            .bind(&admin_emails)
-            .execute(p)
-            .await
-            {
-                Ok(r) => tracing::info!(promoted = r.rows_affected(), "admin backfill complete"),
-                Err(e) => tracing::error!("admin backfill failed: {e}"),
-            }
+    if !admin_emails.is_empty()
+        && let Some(ref p) = pool
+    {
+        match sqlx::query(
+            "UPDATE users SET is_admin = true WHERE lower(email) = ANY($1) AND is_admin = false",
+        )
+        .bind(&admin_emails)
+        .execute(p)
+        .await
+        {
+            Ok(r) => tracing::info!(promoted = r.rows_affected(), "admin backfill complete"),
+            Err(e) => tracing::error!("admin backfill failed: {e}"),
         }
     }
 

@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -9,7 +10,7 @@ use crate::state::CloudState;
 
 // ─── Helpers shared across handlers ─────────────────────────────────────────
 
-/// Load user_id from session, returning a redirect to /login if absent.
+/// Load `user_id` from session, returning a redirect to /login if absent.
 async fn require_user(session: &Session) -> Result<uuid::Uuid, Response> {
     let user_id: Option<String> = session.get("user_id").await.unwrap_or(None);
     let Some(user_id) = user_id else {
@@ -459,7 +460,8 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow]) -> String {
             let name_escaped = html_escape(&key.name);
             let key_escaped = html_escape(&key.raw_key);
             let created = key.created_at.format("%Y-%m-%d %H:%M UTC").to_string();
-            keys_html.push_str(&format!(
+            let _ = write!(
+                keys_html,
                 "<tr>\
                    <td>{name_escaped}</td>\
                    <td><code style=\"font-size:0.85em;word-break:break-all;\">{key_escaped}</code></td>\
@@ -474,7 +476,7 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow]) -> String {
                    </td>\
                  </tr>",
                 key.id,
-            ));
+            );
         }
         keys_html.push_str("</table>");
     }
