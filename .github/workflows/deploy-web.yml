@@ -28,6 +28,15 @@ jobs:
             ghcr.io/ericflo/modelrelay/modelrelay-cloud:latest
             ghcr.io/ericflo/modelrelay/modelrelay-cloud:${{ github.sha }}
 
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ghcr.io/ericflo/modelrelay/modelrelay-server:latest
+            ghcr.io/ericflo/modelrelay/modelrelay-server:${{ github.sha }}
+
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -49,8 +58,13 @@ jobs:
           kubectl apply -f deploy/modelrelay-io/cloud-deployment.yaml
           kubectl apply -f deploy/modelrelay-io/cloud-service.yaml
           kubectl apply -f deploy/modelrelay-io/cloud-ingress.yaml
+          kubectl apply -f deploy/modelrelay-io/server-deployment.yaml
+          kubectl apply -f deploy/modelrelay-io/server-service.yaml
+          kubectl apply -f deploy/modelrelay-io/server-ingress.yaml
 
       - name: Restart and wait
         run: |
           kubectl rollout restart deployment/cloud -n modelrelay
           kubectl rollout status deployment/cloud -n modelrelay --timeout=300s
+          kubectl rollout restart deployment/server -n modelrelay
+          kubectl rollout status deployment/server -n modelrelay --timeout=300s
