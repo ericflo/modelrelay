@@ -160,7 +160,11 @@ pub async fn provision_api_key(
 }
 
 /// Call `DELETE {admin_url}/admin/keys/{key_id}` to revoke an API key.
-pub async fn revoke_api_key(admin_url: &str, admin_token: &str, key_id: &str) -> Result<(), String> {
+pub async fn revoke_api_key(
+    admin_url: &str,
+    admin_token: &str,
+    key_id: &str,
+) -> Result<(), String> {
     let client = reqwest::Client::new();
     let url = format!("{}/admin/keys/{}", admin_url.trim_end_matches('/'), key_id);
     let resp = client

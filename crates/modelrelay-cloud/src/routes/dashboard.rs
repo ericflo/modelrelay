@@ -253,23 +253,24 @@ pub async fn keys_generate(session: Session, State(state): State<Arc<CloudState>
     };
 
     // Verify admin
-    let is_admin: Option<bool> =
-        sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+    let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
 
     if is_admin != Some(true) {
         return (StatusCode::FORBIDDEN, "Forbidden").into_response();
     }
 
     let Some(ref admin_url) = state.admin_url else {
-        return error_page("Admin API not configured. Cannot generate API keys at this time.").into_response();
+        return error_page("Admin API not configured. Cannot generate API keys at this time.")
+            .into_response();
     };
     let Some(ref admin_token) = state.admin_token else {
-        return error_page("Admin API not configured. Cannot generate API keys at this time.").into_response();
+        return error_page("Admin API not configured. Cannot generate API keys at this time.")
+            .into_response();
     };
 
     // Get user email for key name
@@ -301,14 +302,20 @@ pub async fn keys_generate(session: Session, State(state): State<Arc<CloudState>
             .await
             {
                 tracing::error!("keys_generate db insert error: {e}");
-                return error_page("Key was provisioned on the server but could not be saved. Contact support.").into_response();
+                return error_page(
+                    "Key was provisioned on the server but could not be saved. Contact support.",
+                )
+                .into_response();
             }
             tracing::info!(key_id = %key_id, email = %email, "admin generated new API key");
             Redirect::to("/dashboard").into_response()
         }
         Err(e) => {
             tracing::error!("keys_generate provision error: {e}");
-            error_page("Could not generate API key. The relay server may be unreachable. Please try again later.").into_response()
+            error_page(
+                "Could not generate API key. The relay server may be unreachable. Please try again later.",
+            )
+            .into_response()
         }
     }
 }
@@ -331,13 +338,12 @@ pub async fn keys_revoke(
     };
 
     // Verify admin
-    let is_admin: Option<bool> =
-        sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+    let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
 
     if is_admin != Some(true) {
         return (StatusCode::FORBIDDEN, "Forbidden").into_response();
@@ -369,11 +375,10 @@ pub async fn keys_revoke(
     }
 
     // Mark as revoked in DB regardless of server result
-    if let Err(e) =
-        sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE id = $1")
-            .bind(key_uuid)
-            .execute(pool)
-            .await
+    if let Err(e) = sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE id = $1")
+        .bind(key_uuid)
+        .execute(pool)
+        .await
     {
         tracing::error!("keys_revoke db update error: {e}");
         return error_page("Could not revoke key. Please try again.").into_response();
@@ -436,8 +441,10 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow]) -> String {
             "<p style=\"margin-top:8px;color:#8b949e;\">No active API keys. Generate one below.</p>",
         );
     } else {
-        keys_html.push_str("<table class=\"info-table\" style=\"margin-top:12px;\">\
-            <tr><th>Name</th><th>Key</th><th>Created</th><th></th></tr>");
+        keys_html.push_str(
+            "<table class=\"info-table\" style=\"margin-top:12px;\">\
+            <tr><th>Name</th><th>Key</th><th>Created</th><th></th></tr>",
+        );
         for key in keys {
             let name_escaped = html_escape(&key.name);
             let key_escaped = html_escape(&key.raw_key);
