@@ -21,6 +21,10 @@ fn sample_metadata() -> ApiKeyMetadata {
 }
 
 /// `CreateKeyRequest` must serialize to `{"name":"..."}`.
+///
+/// # Panics
+///
+/// Panics if the wire format does not match the pinned expectation.
 #[must_use]
 pub fn test_create_key_request_serialization() -> bool {
     let req = CreateKeyRequest {
@@ -34,6 +38,10 @@ pub fn test_create_key_request_serialization() -> bool {
 
 /// `CreateKeyResponse` must deserialize from a pinned JSON literal that matches the
 /// exact field names the server emits.
+///
+/// # Panics
+///
+/// Panics if the pinned JSON cannot be deserialized or field values differ.
 #[must_use]
 pub fn test_create_key_response_deserialization() -> bool {
     let json = r#"{
@@ -60,6 +68,10 @@ pub fn test_create_key_response_deserialization() -> bool {
 }
 
 /// `AdminKeysResponse` must round-trip through serialize/deserialize with structural equality.
+///
+/// # Panics
+///
+/// Panics if the round-trip produces different values.
 #[must_use]
 pub fn test_admin_keys_response_roundtrip() -> bool {
     let original = AdminKeysResponse {
@@ -89,6 +101,10 @@ pub fn test_admin_keys_response_roundtrip() -> bool {
 /// The field names produced by `ApiKeyMetadata` serialized standalone must match the
 /// field names produced when it is `#[serde(flatten)]`ed inside `CreateKeyResponse`.
 /// This catches divergence caused by `rename_all` or per-field renames.
+///
+/// # Panics
+///
+/// Panics if standalone and flattened serialization produce different field names.
 #[must_use]
 pub fn test_metadata_flatten_ordering_is_stable() -> bool {
     let meta = sample_metadata();
@@ -121,6 +137,10 @@ pub fn test_metadata_flatten_ordering_is_stable() -> bool {
 
 /// Pinned JSON field-name check: serializing `CreateKeyResponse` must produce exactly
 /// these top-level field names. This catches renames that `serde(rename_all)` would apply.
+///
+/// # Panics
+///
+/// Panics if expected field names are missing or forbidden camelCase names appear.
 #[must_use]
 pub fn test_create_key_response_field_names() -> bool {
     let resp = CreateKeyResponse {
