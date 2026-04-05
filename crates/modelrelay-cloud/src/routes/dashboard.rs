@@ -8,6 +8,8 @@ use tower_sessions::Session;
 
 use crate::state::CloudState;
 
+use super::csrf;
+
 // ─── Helpers shared across handlers ─────────────────────────────────────────
 
 /// Load `user_id` from session, returning a redirect to /login if absent.
@@ -69,6 +71,8 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
         Err(r) => return r,
     };
 
+    let csrf_field = csrf::hidden_field(&session).await;
+
     // Query user info
     let user = sqlx::query_as::<_, UserRow>(
         "SELECT id, email, stripe_customer_id, is_admin FROM users WHERE id = $1",
@@ -102,7 +106,7 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
         .await
         .unwrap_or_default();
 
-        let html = admin_dashboard_html(&user.email, &keys);
+        let html = admin_dashboard_html(&user.email, &keys, &csrf_field);
         Html(modelrelay_web::templates::page_shell(
             "Dashboard",
             &html,
@@ -148,6 +152,7 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
             sub.as_ref(),
             has_stripe_customer,
             api_key_display.as_deref(),
+            &csrf_field,
         );
         Html(modelrelay_web::templates::page_shell(
             "Dashboard",
@@ -562,7 +567,7 @@ fn status_badge(status: &str) -> &'static str {
     }
 }
 
-fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow]) -> String {
+fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> String {
     let email_escaped = html_escape(email);
 
     let header = format!(
@@ -601,6 +606,7 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow]) -> String {
                    <td>{created}</td>\
                    <td>\
                      <form method=\"POST\" action=\"/dashboard/keys/{}/revoke\" style=\"display:inline;\">\
+                       {csrf_field}\
                        <button type=\"submit\" class=\"btn\" style=\"background:#d73a49;padding:4px 12px;font-size:0.85em;\" \
                          onclick=\"return confirm('Revoke this API key? This cannot be undone.')\">\
                          Revoke\
@@ -614,8 +620,10 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow]) -> String {
         keys_html.push_str("</table>");
     }
 
-    keys_html.push_str(
+    let _ = write!(
+        keys_html,
         "<form method=\"POST\" action=\"/dashboard/keys/generate\" style=\"margin-top:16px;\">\
+           {csrf_field}\
            <button type=\"submit\" class=\"btn\">Generate New API Key</button>\
          </form>\
        </div>",
@@ -646,6 +654,7 @@ fn subscriber_dashboard_html(
     sub: Option<&SubscriptionRow>,
     has_stripe_customer: bool,
     api_key: Option<&str>,
+    csrf_field: &str,
 ) -> String {
     let email_escaped = html_escape(email);
 
@@ -653,11 +662,14 @@ fn subscriber_dashboard_html(
         let badge = status_badge(&s.status);
         let updated = s.updated_at.format("%B %d, %Y").to_string();
         let billing_btn = if has_stripe_customer {
-            "<form method=\"POST\" action=\"/dashboard/billing-portal\" style=\"margin-top:16px;\">\
-               <button type=\"submit\" class=\"btn\">Manage Billing &rarr;</button>\
-             </form>"
+            format!(
+                "<form method=\"POST\" action=\"/dashboard/billing-portal\" style=\"margin-top:16px;\">\
+                   {csrf_field}\
+                   <button type=\"submit\" class=\"btn\">Manage Billing &rarr;</button>\
+                 </form>"
+            )
         } else {
-            ""
+            String::new()
         };
         format!(
             "<div class=\"card\">\
@@ -674,11 +686,14 @@ fn subscriber_dashboard_html(
         )
     } else {
         let billing_btn = if has_stripe_customer {
-            "<form method=\"POST\" action=\"/dashboard/billing-portal\" style=\"margin-top:16px;\">\
-               <button type=\"submit\" class=\"btn\">Manage Billing &rarr;</button>\
-             </form>"
+            format!(
+                "<form method=\"POST\" action=\"/dashboard/billing-portal\" style=\"margin-top:16px;\">\
+                   {csrf_field}\
+                   <button type=\"submit\" class=\"btn\">Manage Billing &rarr;</button>\
+                 </form>"
+            )
         } else {
-            ""
+            String::new()
         };
         format!(
             "<div class=\"card\">\

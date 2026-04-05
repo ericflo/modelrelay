@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -11,6 +12,7 @@ use crate::state::CloudState;
 
 mod auth;
 mod checkout;
+pub mod csrf;
 mod dashboard;
 mod pricing;
 mod webhook;
@@ -40,6 +42,7 @@ pub fn router(state: Arc<CloudState>) -> Router {
         .route("/setup", get(dashboard::setup))
         .route("/webhook/stripe", post(webhook::handle))
         .fallback(not_found)
+        .layer(middleware::from_fn(csrf::csrf_middleware))
         .with_state(state)
 }
 
