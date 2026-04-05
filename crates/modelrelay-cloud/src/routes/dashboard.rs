@@ -102,7 +102,12 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
         .unwrap_or_default();
 
         let html = admin_dashboard_html(&user.email, &keys);
-        Html(modelrelay_web::templates::page_shell("Dashboard", &html, true)).into_response()
+        Html(modelrelay_web::templates::page_shell(
+            "Dashboard",
+            &html,
+            true,
+        ))
+        .into_response()
     } else {
         // ── Regular user dashboard ──
         let subscription = sqlx::query_as::<_, SubscriptionRow>(
@@ -143,7 +148,12 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
             has_stripe_customer,
             api_key_display.as_deref(),
         );
-        Html(modelrelay_web::templates::page_shell("Dashboard", &html, true)).into_response()
+        Html(modelrelay_web::templates::page_shell(
+            "Dashboard",
+            &html,
+            true,
+        ))
+        .into_response()
     }
 }
 
