@@ -6,6 +6,9 @@
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "admin-api")]
+pub mod admin_api;
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
