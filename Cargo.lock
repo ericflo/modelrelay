@@ -83,6 +83,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures",
+ "password-hash",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -188,6 +200,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -1195,8 +1216,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "modelrelay-cloud"
+version = "0.2.0"
+dependencies = [
+ "argon2",
+ "axum",
+ "chrono",
+ "hex",
+ "hmac",
+ "modelrelay-web",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tower-sessions",
+ "tower-sessions-sqlx-store",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "modelrelay-contract-tests"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1204,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-protocol"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1212,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-server"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -1235,30 +1281,21 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
- "chrono",
- "hex",
- "hmac",
- "reqwest",
  "serde",
  "serde_json",
- "sha2",
- "sqlx",
  "tokio",
  "tower",
  "tower-http",
- "tower-sessions",
- "tower-sessions-sqlx-store",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
 name = "modelrelay-worker"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -1374,6 +1411,17 @@ dependencies = [
  "redox_syscall 0.5.18",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
 ]
 
 [[package]]
