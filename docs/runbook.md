@@ -55,6 +55,98 @@ failures.
 
 ---
 
+## Admin API & Monitoring
+
+ModelRelay includes admin endpoints for inspecting workers, request metrics,
+and managing client API keys. All `/admin/*` endpoints require a Bearer
+token.
+
+### Enabling Admin Endpoints
+
+Set `MODELRELAY_ADMIN_TOKEN` when starting the server:
+
+```bash
+modelrelay-server --worker-secret mysecret --admin-token my-admin-secret
+```
+
+Without this token, all `/admin/*` endpoints return `403 Forbidden`.
+
+### Querying Admin Endpoints
+
+```bash
+TOKEN="my-admin-secret"
+
+# List connected workers (models, load, capabilities)
+curl -s -H "Authorization: Bearer $TOKEN" http://proxy:8080/admin/workers | jq .
+
+# Request stats and queue depth
+curl -s -H "Authorization: Bearer $TOKEN" http://proxy:8080/admin/stats | jq .
+
+# List client API keys (metadata only, no secrets)
+curl -s -H "Authorization: Bearer $TOKEN" http://proxy:8080/admin/keys | jq .
+```
+
+### Managing Client API Keys
+
+When `MODELRELAY_REQUIRE_API_KEYS=true`, clients must send a valid API key
+as a Bearer token on inference requests.
+
+```bash
+TOKEN="my-admin-secret"
+
+# Create a new API key (the secret is returned only at creation time)
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "production-app"}' \
+  http://proxy:8080/admin/keys | jq .
+
+# Revoke a key by ID
+curl -s -X DELETE \
+  -H "Authorization: Bearer $TOKEN" \
+  http://proxy:8080/admin/keys/{key-id}
+```
+
+Clients use the returned secret as a Bearer token:
+
+```bash
+curl -H "Authorization: Bearer mr-..." \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3.2:3b", "messages": [{"role": "user", "content": "Hi"}]}' \
+  http://proxy:8080/v1/chat/completions
+```
+
+### Web Dashboard & Setup Wizard
+
+The proxy serves a built-in web UI:
+
+- **Dashboard** — visit `http://proxy:8080/dashboard` for real-time
+  worker status, request metrics, and queue depth.
+- **Setup Wizard** — visit `http://proxy:8080/setup` for a step-by-step
+  guide to connecting a new worker (platform detection, backend setup,
+  binary download, and live connection verification).
+
+The wizard is always accessible, not just on first run — use it whenever
+you add another GPU box.
+
+### Troubleshooting Admin Features
+
+**Admin endpoints return 403:**
+`MODELRELAY_ADMIN_TOKEN` is not set on the server, or the `Authorization`
+header doesn't match. Verify the token value and ensure the header format
+is `Authorization: Bearer <token>`.
+
+**Client requests return 401 when API key auth is enabled:**
+The client is not sending a Bearer token, or the key has been revoked.
+Create a new key via `POST /admin/keys` and ensure the client sends
+`Authorization: Bearer <key>`.
+
+**API key auth not taking effect:**
+`MODELRELAY_REQUIRE_API_KEYS` must be set to `true`. When `false`
+(the default), inference endpoints accept unauthenticated requests.
+
+---
+
 ## Checking Worker Registration
 
 After starting a new worker, confirm it registered:
@@ -271,6 +363,8 @@ proxy.
 | `QUEUE_TIMEOUT_SECS` | `30` | How long a request can wait in queue |
 | `REQUEST_TIMEOUT_SECS` | `300` | Total request timeout (5 min) |
 | `LOG_LEVEL` | `info` | Log verbosity |
+| `MODELRELAY_ADMIN_TOKEN` | *(none)* | Bearer token for `/admin/*` endpoints (if unset, admin returns 403) |
+| `MODELRELAY_REQUIRE_API_KEYS` | `false` | When `true`, client requests require a valid API key |
 
 ### Worker Daemon
 

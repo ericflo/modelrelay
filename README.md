@@ -218,6 +218,8 @@ Any tool that speaks OpenAI or Anthropic API formats works — just change the b
 | `--queue-timeout` | `QUEUE_TIMEOUT_SECS` | `30` | Seconds before a queued request times out (0 = no timeout) |
 | `--request-timeout` | `REQUEST_TIMEOUT_SECS` | `300` | Seconds before an in-flight HTTP request times out (0 = no timeout) |
 | `--log-level` | `LOG_LEVEL` | `info` | Log level filter (e.g. `info`, `debug`, or `modelrelay_server=debug`). Overridden by `RUST_LOG` if set. |
+| `--admin-token` | `MODELRELAY_ADMIN_TOKEN` | *(none)* | Bearer token for `/admin/*` endpoints. If unset, admin endpoints return 403. |
+| `--require-api-keys` | `MODELRELAY_REQUIRE_API_KEYS` | `false` | When `true`, client inference requests must include a valid API key as Bearer token. |
 
 ### modelrelay-worker
 
@@ -233,6 +235,72 @@ Any tool that speaks OpenAI or Anthropic API formats works — just change the b
 | `--log-level` | `LOG_LEVEL` | `info` | Log level filter (e.g. `info`, `debug`, or `modelrelay_worker=debug`). Overridden by `RUST_LOG` if set. |
 
 All flags can be passed as CLI arguments or set via the corresponding environment variable.
+
+## Admin API & Web Dashboard
+
+ModelRelay includes built-in admin endpoints for monitoring and an embedded web dashboard for managing your deployment.
+
+### Admin API Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | None | Basic health check — returns version, worker count, queue depth, and uptime |
+| GET | `/admin/workers` | Admin token | List connected workers with models, load, and capabilities |
+| GET | `/admin/stats` | Admin token | Request counts, queue depth per provider |
+| GET | `/admin/keys` | Admin token | List client API key metadata (no secrets) |
+| POST | `/admin/keys` | Admin token | Create a new client API key — returns the secret once |
+| DELETE | `/admin/keys/{id}` | Admin token | Revoke a client API key |
+
+### Admin Authentication
+
+All `/admin/*` endpoints require a Bearer token matching `MODELRELAY_ADMIN_TOKEN`:
+
+```bash
+# Set the admin token when starting the server
+modelrelay-server --worker-secret mysecret --admin-token my-admin-secret
+
+# Query admin endpoints
+curl -H "Authorization: Bearer my-admin-secret" http://localhost:8080/admin/workers
+curl -H "Authorization: Bearer my-admin-secret" http://localhost:8080/admin/stats
+```
+
+If `MODELRELAY_ADMIN_TOKEN` is not set, all admin endpoints return `403 Forbidden`.
+
+### Client API Key Authentication
+
+When `MODELRELAY_REQUIRE_API_KEYS` is set to `true`, clients must include a valid API key as a Bearer token on inference requests (`/v1/chat/completions`, `/v1/messages`, etc.). Without a valid key, requests are rejected with `401 Unauthorized`.
+
+```bash
+# Start the server with API key auth enabled
+modelrelay-server --worker-secret mysecret --admin-token my-admin-secret --require-api-keys true
+
+# Create a client API key (the secret is returned only once)
+curl -X POST -H "Authorization: Bearer my-admin-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-app"}' \
+  http://localhost:8080/admin/keys
+
+# Use the key for inference
+curl -H "Authorization: Bearer mr-..." \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3.2:3b", "messages": [{"role": "user", "content": "Hello"}]}' \
+  http://localhost:8080/v1/chat/completions
+
+# Revoke a key
+curl -X DELETE -H "Authorization: Bearer my-admin-secret" \
+  http://localhost:8080/admin/keys/{key-id}
+```
+
+When `MODELRELAY_REQUIRE_API_KEYS` is `false` (the default), inference endpoints accept requests without any authentication.
+
+### Web Dashboard & Setup Wizard
+
+The `modelrelay-web` crate provides an embedded web UI served by the proxy:
+
+- **Dashboard** at `/dashboard` — real-time view of connected workers, request metrics, and queue depth
+- **Setup Wizard** at `/setup` — step-by-step guide for connecting new workers (platform detection, backend configuration, worker binary download, and live connection verification)
+
+The setup wizard is always accessible — not just on first run. Use it to add additional GPU boxes to your fleet at any time.
 
 ## Production deployment
 
