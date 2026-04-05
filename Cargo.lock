@@ -1224,6 +1224,8 @@ dependencies = [
  "chrono",
  "hex",
  "hmac",
+ "http-body-util",
+ "modelrelay-protocol",
  "modelrelay-web",
  "reqwest",
  "serde",
@@ -1244,8 +1246,12 @@ dependencies = [
 name = "modelrelay-contract-tests"
 version = "0.2.0"
 dependencies = [
+ "axum",
+ "modelrelay-protocol",
+ "modelrelay-server",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
