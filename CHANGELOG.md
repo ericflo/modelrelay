@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Postgres-backed `ApiKeyStore` for multi-replica correctness — atomic `UPDATE...RETURNING`, trait-based store with in-memory and Postgres implementations (#215)
+- First-class admin users in modelrelay-cloud with proper `api_keys` association (#212)
+- Shared admin API types in `modelrelay-protocol` crate with contract tests to prevent server/cloud drift (#216)
+- Setup wizard integrated into cloud dashboard onboarding flow (#217)
+- HTTP integration tests for cloud route handlers (#219)
+- One-shot reprovision tool for syncing cloud API keys into server database (#222)
+- `--config` flag support for worker binary, with corrected wizard instructions (#224)
+- Kubernetes deployment manifests for modelrelay-server at api.modelrelay.io (#209, #210)
+
+### Changed
+
+- Cloud checkout success template uses `include_str!` instead of runtime file read (#213)
+
+### Fixed
+
+- Deploy: reference `modelrelay-cloud` secret in Postgres deployment manifest
+- Deploy: add `WORKER_SECRET` env var to server deployment (#211)
+- Deploy: give modelrelay-server its own Postgres database instead of sharing (#220)
+- Cloud: parse `secret` field from server admin API response correctly
+- Cloud: add login/signup nav links to pricing page (#214)
+- Web: show login/signup nav links for non-authenticated `page_shell` users (#221)
+
 ## [0.2.0] - 2026-04-05
 
 ### Added
