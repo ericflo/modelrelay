@@ -11,8 +11,14 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["postgres"]
+postgres = ["dep:sqlx", "dep:chrono"]
+
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
+chrono = { workspace = true, optional = true }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 futures-util.workspace = true
@@ -20,6 +26,7 @@ rand = "0.9"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+sqlx = { workspace = true, optional = true }
 subtle.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true

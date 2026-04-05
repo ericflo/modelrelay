@@ -26,6 +26,9 @@ subtle = "2.6"
 tokio = { version = "1.51", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "uuid", "chrono"] }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 modelrelay-protocol = { path = "crates/modelrelay-protocol" }

@@ -1260,7 +1260,9 @@ dependencies = [
 name = "modelrelay-server"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "axum",
+ "chrono",
  "clap",
  "clap_complete",
  "futures-util",
@@ -1271,6 +1273,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "subtle",
  "tokio",
  "tokio-tungstenite 0.29.0",

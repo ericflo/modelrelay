@@ -3,8 +3,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use modelrelay_server::{
-    ApiKeyStore, ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, WorkerSocketApp,
-    WorkerSocketProviderConfig,
+    ApiKeyStore, InMemoryApiKeyStore, ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore,
+    WorkerSocketApp, WorkerSocketProviderConfig,
 };
 use serde_json::Value;
 use tokio::{
@@ -17,7 +17,11 @@ struct TestServer {
     addr: SocketAddr,
 }
 
-async fn spawn_server(require_api_keys: bool, api_key_store: ApiKeyStore) -> TestServer {
+fn new_store() -> Arc<dyn ApiKeyStore> {
+    Arc::new(InMemoryApiKeyStore::new())
+}
+
+async fn spawn_server(require_api_keys: bool, api_key_store: Arc<dyn ApiKeyStore>) -> TestServer {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     {
         let mut c = core.lock().await;
@@ -104,7 +108,7 @@ async fn http_request(
 
 #[tokio::test]
 async fn admin_create_key_returns_secret_once() {
-    let store = ApiKeyStore::new();
+    let store = new_store();
     let server = spawn_server(false, store).await;
 
     let (status, body) = http_request(
@@ -133,7 +137,7 @@ async fn admin_create_key_returns_secret_once() {
 
 #[tokio::test]
 async fn admin_create_key_requires_admin_auth() {
-    let store = ApiKeyStore::new();
+    let store = new_store();
     let server = spawn_server(false, store).await;
 
     let (status, _) = http_request(
@@ -150,9 +154,9 @@ async fn admin_create_key_requires_admin_auth() {
 
 #[tokio::test]
 async fn admin_list_keys_returns_metadata_without_secrets() {
-    let store = ApiKeyStore::new();
-    store.create_key("key-one".to_string()).await;
-    store.create_key("key-two".to_string()).await;
+    let store = new_store();
+    store.create_key("key-one".to_string()).await.unwrap();
+    store.create_key("key-two".to_string()).await.unwrap();
 
     let server = spawn_server(false, store).await;
 
@@ -183,8 +187,8 @@ async fn admin_list_keys_returns_metadata_without_secrets() {
 
 #[tokio::test]
 async fn admin_revoke_key_marks_key_as_revoked() {
-    let store = ApiKeyStore::new();
-    let (metadata, _) = store.create_key("to-revoke".to_string()).await;
+    let store = new_store();
+    let (metadata, _) = store.create_key("to-revoke".to_string()).await.unwrap();
 
     let server = spawn_server(false, store).await;
 
@@ -202,7 +206,7 @@ async fn admin_revoke_key_marks_key_as_revoked() {
 
 #[tokio::test]
 async fn admin_revoke_nonexistent_key_returns_404() {
-    let store = ApiKeyStore::new();
+    let store = new_store();
     let server = spawn_server(false, store).await;
 
     let (status, _) = http_request(
@@ -221,7 +225,7 @@ async fn admin_revoke_nonexistent_key_returns_404() {
 
 #[tokio::test]
 async fn v1_route_works_without_auth_when_api_keys_not_required() {
-    let store = ApiKeyStore::new();
+    let store = new_store();
     let server = spawn_server(false, store).await;
 
     // No workers, so we expect 503 (no workers available), not 401
@@ -239,7 +243,7 @@ async fn v1_route_works_without_auth_when_api_keys_not_required() {
 
 #[tokio::test]
 async fn v1_route_returns_401_without_bearer_when_api_keys_required() {
-    let store = ApiKeyStore::new();
+    let store = new_store();
     let server = spawn_server(true, store).await;
 
     let (status, body) = http_request(
@@ -258,7 +262,7 @@ async fn v1_route_returns_401_without_bearer_when_api_keys_required() {
 
 #[tokio::test]
 async fn v1_route_returns_401_with_invalid_bearer_when_api_keys_required() {
-    let store = ApiKeyStore::new();
+    let store = new_store();
     let server = spawn_server(true, store).await;
 
     let (status, body) = http_request(
@@ -277,8 +281,8 @@ async fn v1_route_returns_401_with_invalid_bearer_when_api_keys_required() {
 
 #[tokio::test]
 async fn v1_route_accepts_valid_api_key_when_required() {
-    let store = ApiKeyStore::new();
-    let (_, secret) = store.create_key("valid-key".to_string()).await;
+    let store = new_store();
+    let (_, secret) = store.create_key("valid-key".to_string()).await.unwrap();
 
     let server = spawn_server(true, store).await;
 
@@ -300,9 +304,9 @@ async fn v1_route_accepts_valid_api_key_when_required() {
 
 #[tokio::test]
 async fn revoked_key_returns_401_on_v1_routes() {
-    let store = ApiKeyStore::new();
-    let (metadata, secret) = store.create_key("will-revoke".to_string()).await;
-    store.revoke_key(&metadata.id).await;
+    let store = new_store();
+    let (metadata, secret) = store.create_key("will-revoke".to_string()).await.unwrap();
+    store.revoke_key(&metadata.id).await.unwrap();
 
     let server = spawn_server(true, store).await;
 
@@ -320,7 +324,7 @@ async fn revoked_key_returns_401_on_v1_routes() {
 
 #[tokio::test]
 async fn messages_route_enforces_api_key_auth() {
-    let store = ApiKeyStore::new();
+    let store = new_store();
     let server = spawn_server(true, store).await;
 
     let (status, _) = http_request(
@@ -337,7 +341,7 @@ async fn messages_route_enforces_api_key_auth() {
 
 #[tokio::test]
 async fn responses_route_enforces_api_key_auth() {
-    let store = ApiKeyStore::new();
+    let store = new_store();
     let server = spawn_server(true, store).await;
 
     let (status, _) = http_request(
