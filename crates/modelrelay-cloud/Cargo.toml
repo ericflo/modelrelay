@@ -29,6 +29,10 @@ sha2 = "0.10"
 hex = "0.4"
 argon2 = "0.5"
 
+[[bin]]
+name = "reprovision-server-keys"
+path = "src/bin/reprovision_server_keys.rs"
+
 [dev-dependencies]
 http-body-util = "0.1"
 serde_json = { workspace = true }

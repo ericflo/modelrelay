@@ -9,6 +9,7 @@ FROM debian:bookworm-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/modelrelay-cloud /usr/local/bin/modelrelay-cloud
+COPY --from=builder /app/target/release/reprovision-server-keys /usr/local/bin/reprovision-server-keys
 COPY --from=builder /app/crates/modelrelay-cloud/templates/ /app/templates/
 EXPOSE 8000
 CMD ["modelrelay-cloud"]
