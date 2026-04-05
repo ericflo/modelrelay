@@ -11,16 +11,22 @@ use tower_sessions::Session;
 
 use crate::state::CloudState;
 
+use super::csrf;
+
 #[derive(Deserialize)]
 pub struct SignupForm {
     email: String,
     password: String,
+    #[allow(dead_code)]
+    _csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct LoginForm {
     email: String,
     password: String,
+    #[allow(dead_code)]
+    _csrf: Option<String>,
 }
 
 /// GET /signup — render the sign-up form.
@@ -29,9 +35,10 @@ pub async fn signup_page(session: Session) -> Response {
     if let Ok(Some(_)) = session.get::<String>("user_id").await {
         return Redirect::to("/dashboard").into_response();
     }
+    let csrf_field = csrf::hidden_field(&session).await;
     Html(modelrelay_web::templates::page_shell(
         "Sign Up",
-        &signup_form_html(None),
+        &signup_form_html(None, &csrf_field),
         false,
     ))
     .into_response()
@@ -43,6 +50,8 @@ pub async fn signup_submit(
     State(state): State<Arc<CloudState>>,
     Form(form): Form<SignupForm>,
 ) -> Response {
+    let csrf_field = csrf::hidden_field(&session).await;
+
     let Some(ref pool) = state.db else {
         return Html(modelrelay_web::templates::page_shell(
             "Sign Up",
@@ -59,7 +68,7 @@ pub async fn signup_submit(
     if email.is_empty() || !email.contains('@') {
         return Html(modelrelay_web::templates::page_shell(
             "Sign Up",
-            &signup_form_html(Some("Please enter a valid email address.")),
+            &signup_form_html(Some("Please enter a valid email address."), &csrf_field),
             false,
         ))
         .into_response();
@@ -67,7 +76,7 @@ pub async fn signup_submit(
     if password.len() < 8 {
         return Html(modelrelay_web::templates::page_shell(
             "Sign Up",
-            &signup_form_html(Some("Password must be at least 8 characters.")),
+            &signup_form_html(Some("Password must be at least 8 characters."), &csrf_field),
             false,
         ))
         .into_response();
@@ -84,9 +93,10 @@ pub async fn signup_submit(
     if let Some((_, Some(_))) = existing {
         return Html(modelrelay_web::templates::page_shell(
             "Sign Up",
-            &signup_form_html(Some(
-                "An account with this email already exists. <a href=\"/login\">Log in instead</a>.",
-            )),
+            &signup_form_html(
+                Some("An account with this email already exists. <a href=\"/login\">Log in instead</a>."),
+                &csrf_field,
+            ),
             false,
         ))
         .into_response();
@@ -99,7 +109,7 @@ pub async fn signup_submit(
             tracing::error!("password hash error: {e}");
             return Html(modelrelay_web::templates::page_shell(
                 "Sign Up",
-                &signup_form_html(Some("Internal error. Please try again.")),
+                &signup_form_html(Some("Internal error. Please try again."), &csrf_field),
                 false,
             ))
             .into_response();
@@ -124,7 +134,7 @@ pub async fn signup_submit(
             tracing::error!("user insert error: {e}");
             return Html(modelrelay_web::templates::page_shell(
                 "Sign Up",
-                &signup_form_html(Some("Could not create account. Please try again.")),
+                &signup_form_html(Some("Could not create account. Please try again."), &csrf_field),
                 false,
             ))
             .into_response();
@@ -157,9 +167,10 @@ pub async fn login_page(session: Session) -> Response {
     if let Ok(Some(_)) = session.get::<String>("user_id").await {
         return Redirect::to("/dashboard").into_response();
     }
+    let csrf_field = csrf::hidden_field(&session).await;
     Html(modelrelay_web::templates::page_shell(
         "Log In",
-        &login_form_html(None),
+        &login_form_html(None, &csrf_field),
         false,
     ))
     .into_response()
@@ -171,6 +182,8 @@ pub async fn login_submit(
     State(state): State<Arc<CloudState>>,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    let csrf_field = csrf::hidden_field(&session).await;
+
     let Some(ref pool) = state.db else {
         return Html(modelrelay_web::templates::page_shell(
             "Log In",
@@ -192,7 +205,7 @@ pub async fn login_submit(
     let Some((user_id, Some(stored_hash))) = row else {
         return Html(modelrelay_web::templates::page_shell(
             "Log In",
-            &login_form_html(Some("Invalid email or password.")),
+            &login_form_html(Some("Invalid email or password."), &csrf_field),
             false,
         ))
         .into_response();
@@ -201,7 +214,7 @@ pub async fn login_submit(
     if !verify_password(&form.password, &stored_hash) {
         return Html(modelrelay_web::templates::page_shell(
             "Log In",
-            &login_form_html(Some("Invalid email or password.")),
+            &login_form_html(Some("Invalid email or password."), &csrf_field),
             false,
         ))
         .into_response();
@@ -240,7 +253,7 @@ fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-fn signup_form_html(error: Option<&str>) -> String {
+fn signup_form_html(error: Option<&str>, csrf_field: &str) -> String {
     let error_html = error
         .map(|e| format!("<div class=\"error-msg\">{e}</div>"))
         .unwrap_or_default();
@@ -250,6 +263,7 @@ fn signup_form_html(error: Option<&str>) -> String {
   <h2>Create an Account</h2>
   {error_html}
   <form method="POST" action="/signup" class="auth-form">
+    {csrf_field}
     <div class="form-group">
       <label for="email">Email</label>
       <input type="email" id="email" name="email" required placeholder="you@example.com">
@@ -265,7 +279,7 @@ fn signup_form_html(error: Option<&str>) -> String {
     )
 }
 
-fn login_form_html(error: Option<&str>) -> String {
+fn login_form_html(error: Option<&str>, csrf_field: &str) -> String {
     let error_html = error
         .map(|e| format!("<div class=\"error-msg\">{e}</div>"))
         .unwrap_or_default();
@@ -275,6 +289,7 @@ fn login_form_html(error: Option<&str>) -> String {
   <h2>Log In</h2>
   {error_html}
   <form method="POST" action="/login" class="auth-form">
+    {csrf_field}
     <div class="form-group">
       <label for="email">Email</label>
       <input type="email" id="email" name="email" required placeholder="you@example.com">

@@ -10,6 +10,9 @@ use modelrelay_cloud::state::CloudState;
 
 /// Build the cloud router with no database and no Stripe — the minimum viable
 /// state for smoke-testing routes that don't require either.
+///
+/// NOTE: These tests run without a session layer, so the CSRF middleware
+/// passes through (no session in request extensions = skip validation).
 fn test_state() -> Arc<CloudState> {
     Arc::new(CloudState {
         db: None,
