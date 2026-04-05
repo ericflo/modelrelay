@@ -18,8 +18,14 @@
     nav .container { display: flex; justify-content: space-between; align-items: center; }
     .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; }
     .logo span { color: #7c3aed; }
-    nav a.gh { color: #8b949e; font-size: 0.9rem; }
-    nav a.gh:hover { color: #e6edf3; }
+    .nav-links { display: flex; align-items: center; gap: 16px; }
+    .nav-links a { color: #8b949e; font-size: 0.9rem; }
+    .nav-links a:hover { color: #e6edf3; text-decoration: none; }
+    .nav-links .btn-signup {
+      background: #7c3aed; color: #fff; padding: 6px 16px; border-radius: 6px;
+      font-weight: 600; font-size: 0.9rem;
+    }
+    .nav-links .btn-signup:hover { background: #6d28d9; color: #fff; }
 
     .pricing { padding: 100px 0; text-align: center; }
     .pricing h1 { font-size: 2.5rem; font-weight: 800; margin-bottom: 16px; }
@@ -53,7 +59,12 @@
   <nav>
     <div class="container">
       <a href="/" class="logo">Model<span>Relay</span></a>
-      <a class="gh" href="https://github.com/ericflo/modelrelay">GitHub</a>
+      <div class="nav-links">
+        <a href="/pricing">Pricing</a>
+        <a href="/login">Log in</a>
+        <a class="btn-signup" href="/signup">Sign up</a>
+        <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+      </div>
     </div>
   </nav>
 
