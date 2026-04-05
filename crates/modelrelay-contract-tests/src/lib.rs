@@ -1,3 +1,4 @@
+pub mod admin_api_harness;
 pub mod dispatch_harness;
 pub mod heartbeat_harness;
 pub mod registration_harness;
@@ -2307,5 +2308,32 @@ mod tests {
         InvalidJson(String),
         MissingModel,
         UnsupportedPath(String),
+    }
+
+    // ── Admin API contract tests ─────────────────────────────────────────────
+
+    #[test]
+    fn admin_api_create_key_request_serialization() {
+        assert!(crate::admin_api_harness::test_create_key_request_serialization());
+    }
+
+    #[test]
+    fn admin_api_create_key_response_deserialization() {
+        assert!(crate::admin_api_harness::test_create_key_response_deserialization());
+    }
+
+    #[test]
+    fn admin_api_keys_response_roundtrip() {
+        assert!(crate::admin_api_harness::test_admin_keys_response_roundtrip());
+    }
+
+    #[test]
+    fn admin_api_metadata_flatten_ordering_is_stable() {
+        assert!(crate::admin_api_harness::test_metadata_flatten_ordering_is_stable());
+    }
+
+    #[test]
+    fn admin_api_create_key_response_field_names() {
+        assert!(crate::admin_api_harness::test_create_key_response_field_names());
     }
 }
