@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
 use axum::{
     Json, Router,
@@ -15,145 +14,18 @@ use axum::{
 };
 use futures_util::stream;
 use modelrelay_protocol::{HeaderMap, ResponseCompleteMessage};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::{
     AdminWorkerInfo, CancelReason, HttpResponseEvent, PendingHttpResponse,
     PendingStreamingHttpResponse, ProxyServerCore, RequestFailureReason, WorkerSocketApp,
+    api_keys::{ApiKeyMetadata, ApiKeyStore},
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
 const MAX_STREAM_RESPONSE_BYTES: usize = 64 * 1024;
 const OVERSIZED_STREAM_ERROR_SSE: &str = "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":\"stream exceeded size limit\"}}\n\n";
-const API_KEY_PREFIX: &str = "mr_live_";
-const API_KEY_RANDOM_LEN: usize = 32;
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ApiKeyMetadata {
-    pub id: String,
-    pub name: String,
-    pub prefix: String,
-    pub created_at: u64,
-    pub last_used_at: Option<u64>,
-    pub revoked: bool,
-}
-
-#[derive(Debug)]
-struct StoredApiKey {
-    metadata: ApiKeyMetadata,
-    hash: [u8; 32],
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct ApiKeyStore {
-    inner: Arc<RwLock<ApiKeyStoreInner>>,
-}
-
-#[derive(Debug, Default)]
-struct ApiKeyStoreInner {
-    keys: HashMap<String, StoredApiKey>,
-}
-
-impl ApiKeyStore {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create a new API key. Returns (metadata, `raw_secret`). The raw secret is
-    /// returned exactly once and never stored.
-    pub async fn create_key(&self, name: String) -> (ApiKeyMetadata, String) {
-        let raw_secret = generate_api_key();
-        let hash = sha256_hash(raw_secret.as_bytes());
-        let id = uuid::Uuid::new_v4().to_string();
-        let prefix = raw_secret
-            .chars()
-            .take(8 + API_KEY_PREFIX.len())
-            .collect::<String>();
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let metadata = ApiKeyMetadata {
-            id: id.clone(),
-            name,
-            prefix,
-            created_at: now,
-            last_used_at: None,
-            revoked: false,
-        };
-
-        let stored = StoredApiKey {
-            metadata: metadata.clone(),
-            hash,
-        };
-
-        self.inner.write().await.keys.insert(id, stored);
-
-        (metadata, raw_secret)
-    }
-
-    /// Validate a raw API key. Returns the key id if valid and not revoked.
-    pub async fn validate_key(&self, raw_key: &str) -> Option<String> {
-        let hash = sha256_hash(raw_key.as_bytes());
-        let mut store = self.inner.write().await;
-
-        for stored in store.keys.values_mut() {
-            if stored.metadata.revoked {
-                continue;
-            }
-            if subtle::ConstantTimeEq::ct_eq(&stored.hash[..], &hash[..]).into() {
-                stored.metadata.last_used_at = Some(
-                    SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                );
-                return Some(stored.metadata.id.clone());
-            }
-        }
-        None
-    }
-
-    /// Revoke a key by id. Returns true if the key was found.
-    pub async fn revoke_key(&self, id: &str) -> bool {
-        let mut store = self.inner.write().await;
-        if let Some(stored) = store.keys.get_mut(id) {
-            stored.metadata.revoked = true;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// List all key metadata (never includes secrets or hashes).
-    pub async fn list_keys(&self) -> Vec<ApiKeyMetadata> {
-        let store = self.inner.read().await;
-        store.keys.values().map(|s| s.metadata.clone()).collect()
-    }
-}
-
-fn generate_api_key() -> String {
-    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::rng();
-    let random_part: String = (0..API_KEY_RANDOM_LEN)
-        .map(|_| {
-            let idx = rng.random_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect();
-    format!("{API_KEY_PREFIX}{random_part}")
-}
-
-fn sha256_hash(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
 
 #[derive(Clone)]
 pub struct ProxyHttpApp {
@@ -163,7 +35,7 @@ pub struct ProxyHttpApp {
     worker_socket_app: Option<WorkerSocketApp>,
     admin_token: Option<String>,
     require_api_keys: bool,
-    api_key_store: ApiKeyStore,
+    api_key_store: Arc<dyn ApiKeyStore>,
 }
 
 impl ProxyHttpApp {
@@ -176,7 +48,7 @@ impl ProxyHttpApp {
             worker_socket_app: None,
             admin_token: None,
             require_api_keys: false,
-            api_key_store: ApiKeyStore::new(),
+            api_key_store: Arc::new(crate::api_keys::InMemoryApiKeyStore::new()),
         }
     }
 
@@ -211,7 +83,7 @@ impl ProxyHttpApp {
     }
 
     #[must_use]
-    pub fn with_api_key_store(mut self, store: ApiKeyStore) -> Self {
+    pub fn with_api_key_store(mut self, store: Arc<dyn ApiKeyStore>) -> Self {
         self.api_key_store = store;
         self
     }
@@ -255,7 +127,7 @@ struct HttpState {
     started_at: Instant,
     admin_token: Option<String>,
     require_api_keys: bool,
-    api_key_store: ApiKeyStore,
+    api_key_store: Arc<dyn ApiKeyStore>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -387,8 +259,13 @@ async fn admin_keys_handler(State(state): State<HttpState>, headers: AxumHeaderM
         return status.into_response();
     }
 
-    let keys = state.api_key_store.list_keys().await;
-    Json(AdminKeysResponse { keys }).into_response()
+    match state.api_key_store.list_keys().await {
+        Ok(keys) => Json(AdminKeysResponse { keys }).into_response(),
+        Err(e) => {
+            tracing::error!("list_keys failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -412,12 +289,17 @@ async fn admin_keys_create_handler(
         return status.into_response();
     }
 
-    let (metadata, secret) = state.api_key_store.create_key(body.name).await;
-    (
-        StatusCode::CREATED,
-        Json(CreateKeyResponse { metadata, secret }),
-    )
-        .into_response()
+    match state.api_key_store.create_key(body.name).await {
+        Ok((metadata, secret)) => (
+            StatusCode::CREATED,
+            Json(CreateKeyResponse { metadata, secret }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("create_key failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 async fn admin_keys_revoke_handler(
@@ -429,10 +311,13 @@ async fn admin_keys_revoke_handler(
         return status.into_response();
     }
 
-    if state.api_key_store.revoke_key(&id).await {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        StatusCode::NOT_FOUND.into_response()
+    match state.api_key_store.revoke_key(&id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("revoke_key failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -461,16 +346,19 @@ async fn check_client_api_key(state: &HttpState, headers: &AxumHeaderMap) -> Res
 
     let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
 
-    if state.api_key_store.validate_key(token).await.is_some() {
-        Ok(())
-    } else {
-        Err((
+    match state.api_key_store.validate_key(token).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err((
             StatusCode::UNAUTHORIZED,
             Json(
                 serde_json::json!({"error": {"type": "auth_error", "message": "Invalid API key"}}),
             ),
         )
-            .into_response())
+            .into_response()),
+        Err(e) => {
+            tracing::error!("validate_key failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
     }
 }
 

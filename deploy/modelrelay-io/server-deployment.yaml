@@ -32,6 +32,11 @@ spec:
                 secretKeyRef:
                   name: modelrelay-cloud
                   key: WORKER_SECRET
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: modelrelay-cloud
+                  key: DATABASE_URL
           resources:
             requests:
               memory: "256Mi"

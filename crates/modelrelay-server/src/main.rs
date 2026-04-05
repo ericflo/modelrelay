@@ -5,7 +5,8 @@ use axum::{middleware, response::IntoResponse};
 use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
 use modelrelay_server::{
-    ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig,
+    ApiKeyStore, InMemoryApiKeyStore, ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore,
+    WorkerSocketApp, WorkerSocketProviderConfig,
 };
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
@@ -53,6 +54,11 @@ struct Args {
     /// Require client API keys for /v1/* endpoints (default: false, all clients accepted)
     #[arg(long, env = "MODELRELAY_REQUIRE_API_KEYS", default_value = "false")]
     require_api_keys: bool,
+
+    /// `PostgreSQL` connection URL for persistent API key storage.
+    /// If unset, keys are stored in memory (single-pod only, lost on restart).
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: Option<String>,
 
     /// Generate shell completion script for the given shell and exit
     #[arg(long, value_name = "SHELL", hide = true)]
@@ -104,6 +110,8 @@ async fn main() {
         );
     }
 
+    let api_key_store = build_api_key_store(args.database_url.as_deref()).await;
+
     let worker_socket_app = WorkerSocketApp::new(Arc::clone(&core)).with_provider(
         &args.provider,
         WorkerSocketProviderConfig::enabled(&args.worker_secret),
@@ -113,7 +121,8 @@ async fn main() {
         .with_models_provider(&args.provider)
         .with_worker_socket_app(worker_socket_app)
         .with_admin_token(args.admin_token)
-        .with_require_api_keys(args.require_api_keys);
+        .with_require_api_keys(args.require_api_keys)
+        .with_api_key_store(api_key_store);
 
     let mut router = http_app.router();
 
@@ -161,6 +170,34 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+}
+
+async fn build_api_key_store(database_url: Option<&str>) -> Arc<dyn ApiKeyStore> {
+    match database_url {
+        #[cfg(feature = "postgres")]
+        Some(url) => {
+            let pool = sqlx::PgPool::connect(url)
+                .await
+                .expect("failed to connect to DATABASE_URL");
+            sqlx::migrate!("./migrations")
+                .run(&pool)
+                .await
+                .expect("failed to run server migrations");
+            tracing::info!("api key store: postgres-backed");
+            Arc::new(modelrelay_server::PostgresApiKeyStore::new(pool))
+        }
+        #[cfg(not(feature = "postgres"))]
+        Some(_) => {
+            panic!("DATABASE_URL set but server was compiled without the `postgres` feature");
+        }
+        None => {
+            tracing::warn!(
+                "DATABASE_URL not set \u{2014} using in-memory API key store \
+                 (single-pod only, keys lost on restart)"
+            );
+            Arc::new(InMemoryApiKeyStore::new())
+        }
+    }
 }
 
 async fn shutdown_signal() {

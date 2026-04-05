@@ -1,3 +1,4 @@
+pub mod api_keys;
 pub mod http;
 pub mod worker_socket;
 
@@ -10,7 +11,10 @@ use modelrelay_protocol::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub use http::{ApiKeyMetadata, ApiKeyStore, ProxyHttpApp};
+#[cfg(feature = "postgres")]
+pub use api_keys::PostgresApiKeyStore;
+pub use api_keys::{ApiKeyMetadata, ApiKeyStore, InMemoryApiKeyStore, StoreError};
+pub use http::ProxyHttpApp;
 pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
 
 const MAX_REQUEUE_COUNT: usize = 3;
