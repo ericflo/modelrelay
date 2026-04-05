@@ -81,9 +81,8 @@ pub async fn csrf_middleware(request: Request, next: Next) -> Response {
 
     // Read the body to extract the _csrf field
     let (parts, body) = request.into_parts();
-    let bytes = match axum::body::to_bytes(body, 1_048_576).await {
-        Ok(b) => b,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(bytes) = axum::body::to_bytes(body, 1_048_576).await else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
 
     let body_str = String::from_utf8_lossy(&bytes);
