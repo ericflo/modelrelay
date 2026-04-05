@@ -50,6 +50,36 @@
     .feature-card h3 { font-size: 1.2rem; margin-bottom: 12px; color: #e6edf3; }
     .feature-card p { color: #8b949e; font-size: 0.95rem; }
 
+    /* How It Works */
+    .how-it-works { padding: 80px 0; border-top: 1px solid #21262d; }
+    .how-it-works h2 { text-align: center; font-size: 2rem; margin-bottom: 48px; }
+    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-bottom: 48px; }
+    .step {
+      background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 32px;
+      position: relative;
+    }
+    .step-number {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 36px; height: 36px; background: #7c3aed; color: #fff;
+      border-radius: 50%; font-weight: 700; font-size: 1rem; margin-bottom: 16px;
+    }
+    .step h3 { font-size: 1.1rem; margin-bottom: 8px; color: #e6edf3; }
+    .step p { color: #8b949e; font-size: 0.95rem; }
+    .code-example {
+      background: #161b22; border: 1px solid #21262d; border-radius: 12px;
+      padding: 24px 28px; max-width: 680px; margin: 0 auto; text-align: left;
+    }
+    .code-example .code-label {
+      font-size: 0.8rem; color: #8b949e; margin-bottom: 12px; text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .code-example pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.9rem; line-height: 1.7; color: #e6edf3; overflow-x: auto; margin: 0;
+    }
+    .code-example .comment { color: #484f58; }
+    .code-example .highlight { color: #7c3aed; font-weight: 600; }
+
     /* Pricing */
     .pricing { padding: 80px 0; border-top: 1px solid #21262d; text-align: center; }
     .pricing h2 { font-size: 2rem; margin-bottom: 16px; }
@@ -108,6 +138,45 @@
           <h3>Managed Infrastructure</h3>
           <p>Hosted on reliable Kubernetes infrastructure. No ops burden &mdash; we handle uptime, TLS, scaling, and monitoring so you can focus on models.</p>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="how-it-works">
+    <div class="container">
+      <h2>How It Works</h2>
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <h3>Sign Up &amp; Get Your API Key</h3>
+          <p>Create an account, subscribe, and receive your unique API key. It takes less than a minute.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">2</div>
+          <h3>Connect Your GPU Worker</h3>
+          <p>Run the open-source worker on any machine with a GPU. It connects to ModelRelay via WebSocket &mdash; no inbound ports needed.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">3</div>
+          <h3>Point Your SDK at ModelRelay</h3>
+          <p>Change one line &mdash; set your <code style="color:#7c3aed">base_url</code> to ModelRelay. Every request is routed to your own workers.</p>
+        </div>
+      </div>
+      <div class="code-example">
+        <div class="code-label">Python &mdash; OpenAI SDK</div>
+        <pre><span class="comment"># Just change the base_url to your ModelRelay endpoint</span>
+from openai import OpenAI
+
+client = OpenAI(
+    base_url=<span class="highlight">"https://api.modelrelay.io/v1"</span>,
+    api_key=<span class="highlight">"your-modelrelay-api-key"</span>,
+)
+
+response = client.chat.completions.create(
+    model=<span class="highlight">"your-model"</span>,
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(response.choices[0].message.content)</pre>
       </div>
     </div>
   </section>
