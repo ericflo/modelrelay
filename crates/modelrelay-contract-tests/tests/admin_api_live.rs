@@ -18,8 +18,7 @@ const ADMIN_TOKEN: &str = "test-admin-secret";
 
 async fn spawn_server() -> SocketAddr {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
-    let store: Arc<dyn modelrelay_server::ApiKeyStore> =
-        Arc::new(InMemoryApiKeyStore::new());
+    let store: Arc<dyn modelrelay_server::ApiKeyStore> = Arc::new(InMemoryApiKeyStore::new());
     let app = ProxyHttpApp::new(core)
         .with_admin_token(Some(ADMIN_TOKEN.to_string()))
         .with_api_key_store(store)
@@ -98,8 +97,8 @@ async fn create_key_deserializes_into_shared_type() {
 
     assert_eq!(status, 201, "expected 201, got {status}: {body}");
 
-    let response: CreateKeyResponse =
-        serde_json::from_str(&body).expect("deserialize server response into shared CreateKeyResponse");
+    let response: CreateKeyResponse = serde_json::from_str(&body)
+        .expect("deserialize server response into shared CreateKeyResponse");
 
     assert_eq!(response.metadata.name, "contract-test-key");
     assert!(!response.metadata.id.is_empty(), "id must be non-empty");
@@ -141,18 +140,23 @@ async fn list_keys_deserializes_into_shared_type() {
 
     assert_eq!(status, 200, "expected 200, got {status}: {body}");
 
-    let response: AdminKeysResponse =
-        serde_json::from_str(&body).expect("deserialize server response into shared AdminKeysResponse");
+    let response: AdminKeysResponse = serde_json::from_str(&body)
+        .expect("deserialize server response into shared AdminKeysResponse");
 
     assert_eq!(response.keys.len(), 2, "expected 2 keys");
     assert!(response.keys.iter().any(|k| k.name == "list-test-1"));
     assert!(response.keys.iter().any(|k| k.name == "list-test-2"));
 
-    // Keys in list response must NOT contain secrets
-    assert!(
-        !body.contains("mr_live_"),
-        "list response must not contain raw key secrets"
-    );
+    // Keys in list response must NOT contain full-length secrets (40 chars).
+    // The prefix field legitimately contains the mr_live_ prefix + first 8 random chars,
+    // so we check that no full-length key appears (prefix is 16 chars, full key is 40).
+    for key in &response.keys {
+        assert!(
+            key.prefix.len() < 20,
+            "prefix should be short, not a full secret: {}",
+            key.prefix
+        );
+    }
 }
 
 /// Full lifecycle: create → list → revoke → list, all deserialized via shared types.
@@ -184,7 +188,11 @@ async fn full_key_lifecycle_via_shared_types() {
     )
     .await;
     let listed: AdminKeysResponse = serde_json::from_str(&body).expect("deserialize list");
-    let found = listed.keys.iter().find(|k| k.id == *key_id).expect("key in list");
+    let found = listed
+        .keys
+        .iter()
+        .find(|k| k.id == *key_id)
+        .expect("key in list");
     assert!(!found.revoked, "key should not be revoked yet");
 
     // Revoke
@@ -207,7 +215,12 @@ async fn full_key_lifecycle_via_shared_types() {
         None,
     )
     .await;
-    let listed: AdminKeysResponse = serde_json::from_str(&body).expect("deserialize list after revoke");
-    let found = listed.keys.iter().find(|k| k.id == *key_id).expect("key still in list");
+    let listed: AdminKeysResponse =
+        serde_json::from_str(&body).expect("deserialize list after revoke");
+    let found = listed
+        .keys
+        .iter()
+        .find(|k| k.id == *key_id)
+        .expect("key still in list");
     assert!(found.revoked, "key should be revoked");
 }

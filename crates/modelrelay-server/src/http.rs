@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use crate::{
     AdminWorkerInfo, CancelReason, HttpResponseEvent, PendingHttpResponse,
     PendingStreamingHttpResponse, ProxyServerCore, RequestFailureReason, WorkerSocketApp,
-    api_keys::{ApiKeyMetadata, ApiKeyStore},
+    api_keys::ApiKeyStore,
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
