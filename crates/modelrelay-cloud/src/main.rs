@@ -47,7 +47,7 @@ async fn main() {
 
     // Parse admin emails from env var
     let admin_emails =
-        state::parse_admin_emails(&std::env::var("ADMIN_EMAILS").unwrap_or_default());
+        modelrelay_cloud::state::parse_admin_emails(&std::env::var("ADMIN_EMAILS").unwrap_or_default());
     tracing::info!(admin_count = admin_emails.len(), "admin emails configured");
 
     // Backfill admin flag for existing users (grant-only, never demote)
