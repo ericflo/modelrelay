@@ -7,9 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-05
+
 ### Added
 
 - `GET /health` endpoint returning JSON with version, status, connected worker count, queue depth, and uptime
+- Admin monitoring API: `GET /admin/workers`, `GET /admin/stats`, `GET /admin/keys` with `MODELRELAY_ADMIN_TOKEN` bearer auth
+- Optional client API key authentication via `MODELRELAY_REQUIRE_API_KEYS` env var with admin `POST`/`DELETE` endpoints for key create/revoke
+- `modelrelay-web` crate: Axum-based admin web service with embedded static assets, served under a configurable `/admin/` prefix
+- Live admin dashboard with real-time worker status, request metrics, queue depth, and API key management panels
+- Worker onboarding setup wizard: always-accessible step-by-step guide for connecting new machines (platform detection, LM Studio install, model config, worker download, live connection status, test inference)
+- `modelrelay-cloud` crate: commercial features separated from OSS core (Stripe billing, user auth, API key provisioning, landing page)
+- User authentication: sign-up, login, and logout flows in modelrelay-cloud
+- Stripe integration: checkout skeleton, webhook handler, billing portal, and subscription status dashboard
+- API key provisioning via admin API in modelrelay-cloud
+- PostgreSQL and session support for modelrelay-cloud
+- Login/signup/pricing navigation links on the cloud landing page
+- Hosted-version blurb in README and mdBook docs intro page linking to modelrelay.io
+- Admin API, API key auth, and web dashboard documentation in operational runbook
+- Unit tests for cloud webhook, auth, and dashboard modules
+
+### Changed
+
+- OSS admin routes from `modelrelay-web` are now mounted in `modelrelay-cloud` under `/admin`
+- Shared `page_shell` HTML template refactored for reuse across OSS and cloud web crates
+
+### Fixed
+
+- Added missing `tokio/signal` feature flag for graceful shutdown in `modelrelay-web`
 
 ## [0.1.6] - 2026-04-04
 
@@ -107,7 +132,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform release binaries (Linux x86_64/aarch64, macOS x86_64/aarch64) via GitHub Actions.
 - CI pipeline with formatting, linting, and test checks.
 
-[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ericflo/modelrelay/compare/v0.1.6...v0.2.0
+[0.1.6]: https://github.com/ericflo/modelrelay/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/ericflo/modelrelay/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/ericflo/modelrelay/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/ericflo/modelrelay/compare/v0.1.2...v0.1.3
