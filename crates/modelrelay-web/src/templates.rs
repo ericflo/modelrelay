@@ -656,14 +656,10 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     const el = $('#config-toml');
     if (el) {
       el.textContent =
-        '[server]\n' +
-        'url = "' + serverUrl + '"\n' +
-        'worker_secret = "' + secret + '"\n\n' +
-        '[worker]\n' +
-        'name = "my-gpu-box"\n\n' +
-        '[[backends]]\n' +
-        'name = "lmstudio"\n' +
-        'url = "http://localhost:1234"\n' +
+        'proxy_url = "' + serverUrl + '"\n' +
+        'worker_secret = "' + secret + '"\n' +
+        'worker_name = "my-gpu-box"\n' +
+        'backend_url = "http://localhost:1234"\n' +
         'models = ["*"]';
     }
   }
@@ -918,7 +914,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
         <p>Create a <code>config.toml</code> file next to the worker binary. Adjust the values below for your setup:</p>
         <div class="config-input">
           <label for="cfg-server-url">Server URL:</label>
-          <input id="cfg-server-url" type="text" placeholder="https://your-server.example.com">
+          <input id="cfg-server-url" type="text" placeholder="https://api.modelrelay.io">
         </div>
         <div class="config-input">
           <label for="cfg-worker-secret">Worker Secret:</label>
@@ -926,21 +922,16 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
         </div>
         <div class="code-block">
           <button class="copy-btn" onclick="window.__copyCode('config-toml')">Copy</button>
-          <code id="config-toml">[server]
-url = ""
+          <code id="config-toml">proxy_url = ""
 worker_secret = "your-worker-secret"
-
-[worker]
-name = "my-gpu-box"
-
-[[backends]]
-name = "lmstudio"
-url = "http://localhost:1234"
+worker_name = "my-gpu-box"
+backend_url = "http://localhost:1234"
 models = ["*"]</code>
         </div>
         <p style="color:#8b949e;font-size:0.85rem;margin-top:12px;">
-          The <code>worker_secret</code> must match the <code>MODELRELAY_WORKER_SECRET</code> configured on your server.
+          The <code>worker_secret</code> must match the <code>WORKER_SECRET</code> configured on your ModelRelay server.
           <code>models = ["*"]</code> advertises all models from your backend.
+          You can also pass these as CLI flags (e.g. <code>--proxy-url</code>, <code>--worker-secret</code>) or environment variables.
         </p>
       </div>
       <div class="wizard-nav">
