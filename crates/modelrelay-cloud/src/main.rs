@@ -6,11 +6,9 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-mod db;
-mod routes;
-mod state;
-
-use state::CloudState;
+use modelrelay_cloud::db;
+use modelrelay_cloud::routes;
+use modelrelay_cloud::state::CloudState;
 
 #[tokio::main]
 async fn main() {
