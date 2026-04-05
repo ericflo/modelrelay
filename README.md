@@ -48,6 +48,10 @@ ModelRelay flips the model: a central proxy receives standard inference requests
 | **nginx / HAProxy** | Doesn't understand LLM streaming semantics, no queueing, no worker auth, no cancellation propagation |
 | **LiteLLM / OpenRouter** | Cloud-first routing — not designed for your own private hardware calling home |
 
+## Hosted Version
+
+Don't want to run the infrastructure yourself? A fully-managed hosted version is available at [modelrelay.io](https://modelrelay.io) — no server setup, no infrastructure to manage. Just get an API key, point your workers at it, and start routing requests. Same open protocol, zero ops burden.
+
 ## Quickstart
 
 ### Docker (recommended)

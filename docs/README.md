@@ -26,6 +26,10 @@ ModelRelay flips the model: a central proxy receives standard inference requests
   +--------+  +--------+  +--------+
 ```
 
+## Hosted Version
+
+Don't want to run the infrastructure yourself? A fully-managed hosted version is available at [modelrelay.io](https://modelrelay.io) — no server setup, no infrastructure to manage. Just get an API key, point your workers at it, and start routing requests. Same open protocol, zero ops burden.
+
 ## Who is this for?
 
 - **Home GPU users** running local models who want a single API endpoint across multiple machines
