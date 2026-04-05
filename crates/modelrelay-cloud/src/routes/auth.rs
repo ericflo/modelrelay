@@ -134,7 +134,10 @@ pub async fn signup_submit(
             tracing::error!("user insert error: {e}");
             return Html(modelrelay_web::templates::page_shell(
                 "Sign Up",
-                &signup_form_html(Some("Could not create account. Please try again."), &csrf_field),
+                &signup_form_html(
+                    Some("Could not create account. Please try again."),
+                    &csrf_field,
+                ),
                 false,
             ))
             .into_response();
