@@ -460,17 +460,19 @@ pub async fn stats(session: Session, State(state): State<Arc<CloudState>>) -> Re
         Err(r) => return r,
     };
 
+    let empty_stats = || serde_json::json!({"queue_depth": {}, "active_workers": 0});
+
     let Some(ref admin_url) = state.admin_url else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({"error": "admin API not configured", "queue_depth": {}, "active_workers": 0})),
+            axum::Json(empty_stats()),
         )
             .into_response();
     };
     let Some(ref admin_token) = state.admin_token else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({"error": "admin API not configured", "queue_depth": {}, "active_workers": 0})),
+            axum::Json(empty_stats()),
         )
             .into_response();
     };
@@ -478,21 +480,23 @@ pub async fn stats(session: Session, State(state): State<Arc<CloudState>>) -> Re
     let client = reqwest::Client::new();
     let url = format!("{}/admin/stats", admin_url.trim_end_matches('/'));
     match client.get(&url).bearer_auth(admin_token).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => axum::Json(body).into_response(),
-            Err(e) => {
-                tracing::error!("stats proxy parse error: {e}");
-                axum::Json(serde_json::json!({"queue_depth": {}, "active_workers": 0})).into_response()
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(body) => axum::Json(body).into_response(),
+                Err(e) => {
+                    tracing::error!("stats proxy parse error: {e}");
+                    axum::Json(empty_stats()).into_response()
+                }
             }
-        },
+        }
         Ok(resp) => {
             let status = resp.status();
             tracing::warn!("stats proxy upstream error: {status}");
-            axum::Json(serde_json::json!({"queue_depth": {}, "active_workers": 0})).into_response()
+            axum::Json(empty_stats()).into_response()
         }
         Err(e) => {
             tracing::error!("stats proxy request error: {e}");
-            axum::Json(serde_json::json!({"queue_depth": {}, "active_workers": 0})).into_response()
+            axum::Json(empty_stats()).into_response()
         }
     }
 }
