@@ -27,6 +27,11 @@ spec:
                 secretKeyRef:
                   name: modelrelay-cloud
                   key: MODELRELAY_ADMIN_TOKEN
+            - name: WORKER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: modelrelay-cloud
+                  key: WORKER_SECRET
           resources:
             requests:
               memory: "256Mi"
