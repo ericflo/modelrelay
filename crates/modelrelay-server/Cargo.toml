@@ -1,6 +1,6 @@
 [package]
 name = "modelrelay-server"
-version = "0.1.6"
+version = "0.2.0"
 description = "Central HTTP proxy server that routes LLM inference requests to remote workers over WebSocket"
 keywords = ["llm", "proxy", "websocket", "inference", "openai"]
 categories = ["network-programming", "web-programming::http-server"]

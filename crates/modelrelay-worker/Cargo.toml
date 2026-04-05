@@ -1,6 +1,6 @@
 [package]
 name = "modelrelay-worker"
-version = "0.1.6"
+version = "0.2.0"
 description = "Worker daemon that connects to the proxy server and forwards requests to a local LLM backend"
 keywords = ["llm", "worker", "websocket", "inference", "llama"]
 categories = ["network-programming", "web-programming::http-client"]
