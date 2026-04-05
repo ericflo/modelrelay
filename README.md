@@ -218,6 +218,8 @@ Any tool that speaks OpenAI or Anthropic API formats works — just change the b
 | `--queue-timeout` | `QUEUE_TIMEOUT_SECS` | `30` | Seconds before a queued request times out (0 = no timeout) |
 | `--request-timeout` | `REQUEST_TIMEOUT_SECS` | `300` | Seconds before an in-flight HTTP request times out (0 = no timeout) |
 | `--log-level` | `LOG_LEVEL` | `info` | Log level filter (e.g. `info`, `debug`, or `modelrelay_server=debug`). Overridden by `RUST_LOG` if set. |
+| `--admin-token` | `MODELRELAY_ADMIN_TOKEN` | *(none)* | Bearer token for `/admin/*` endpoints. If unset, admin endpoints return 403. |
+| `--require-api-keys` | `MODELRELAY_REQUIRE_API_KEYS` | `false` | When `true`, client inference requests must include a valid API key as `Bearer` token. |
 
 ### modelrelay-worker
 
@@ -233,6 +235,71 @@ Any tool that speaks OpenAI or Anthropic API formats works — just change the b
 | `--log-level` | `LOG_LEVEL` | `info` | Log level filter (e.g. `info`, `debug`, or `modelrelay_worker=debug`). Overridden by `RUST_LOG` if set. |
 
 All flags can be passed as CLI arguments or set via the corresponding environment variable.
+
+## Admin API & Web Dashboard
+
+ModelRelay includes admin monitoring endpoints, optional client API key authentication, and a built-in web dashboard with a worker onboarding wizard.
+
+### Admin API Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | None | Basic health check (version, worker count, queue depth, uptime) |
+| GET | `/admin/workers` | Admin token | Active workers with models, load, and capabilities |
+| GET | `/admin/stats` | Admin token | Request counts, latency histograms, queue depth |
+| GET | `/admin/keys` | Admin token | List client API keys (metadata only — no secrets) |
+| POST | `/admin/keys` | Admin token | Create a new client API key |
+| DELETE | `/admin/keys/{id}` | Admin token | Revoke a client API key |
+
+**Authentication:** All `/admin/*` endpoints require a `Bearer` token matching `MODELRELAY_ADMIN_TOKEN`. If the token is not configured, admin endpoints return `403 Forbidden`.
+
+```bash
+# Set the admin token when starting the server
+MODELRELAY_ADMIN_TOKEN=my-admin-secret modelrelay-server --worker-secret mysecret
+
+# Query admin endpoints
+curl -H "Authorization: Bearer my-admin-secret" http://localhost:8080/admin/workers
+curl -H "Authorization: Bearer my-admin-secret" http://localhost:8080/admin/stats
+curl -H "Authorization: Bearer my-admin-secret" http://localhost:8080/admin/keys
+```
+
+### Client API Key Authentication
+
+When `MODELRELAY_REQUIRE_API_KEYS` is set to `true`, all inference requests (`/v1/chat/completions`, `/v1/messages`, etc.) must include a valid API key as a `Bearer` token. Requests without a valid key receive `401 Unauthorized`.
+
+```bash
+# Enable API key auth
+MODELRELAY_REQUIRE_API_KEYS=true \
+MODELRELAY_ADMIN_TOKEN=my-admin-secret \
+  modelrelay-server --worker-secret mysecret
+
+# Create an API key
+curl -X POST -H "Authorization: Bearer my-admin-secret" \
+  http://localhost:8080/admin/keys
+
+# Use the key for inference requests
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <client-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3.2:3b", "messages": [{"role": "user", "content": "Hello!"}]}'
+
+# Revoke a key
+curl -X DELETE -H "Authorization: Bearer my-admin-secret" \
+  http://localhost:8080/admin/keys/<key-id>
+```
+
+### Web Dashboard & Setup Wizard
+
+The `modelrelay-web` crate provides a built-in web dashboard and worker onboarding wizard. Run it as a standalone service or integrate it into your deployment:
+
+```bash
+# Run the dashboard (standalone)
+cargo run -p modelrelay-web
+# Listens on PORT (default 8000)
+```
+
+- **Dashboard** (`/dashboard`) — real-time worker connection status, request metrics, queue depth, and a link to add more machines.
+- **Setup Wizard** (`/setup`) — step-by-step worker onboarding: platform detection, LM Studio download, model configuration, worker binary download, config setup, and live connection verification. Always accessible — not just for first-time setup.
 
 ## Production deployment
 

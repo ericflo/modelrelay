@@ -55,6 +55,79 @@ failures.
 
 ---
 
+## Admin API & Monitoring
+
+ModelRelay provides admin endpoints for monitoring workers, viewing stats, and managing client API keys. These are separate from the unauthenticated `/health` endpoint.
+
+### Enabling Admin Endpoints
+
+Set `MODELRELAY_ADMIN_TOKEN` to enable the `/admin/*` endpoints:
+
+```bash
+MODELRELAY_ADMIN_TOKEN=my-admin-secret modelrelay-server --worker-secret mysecret
+```
+
+If `MODELRELAY_ADMIN_TOKEN` is not set, all `/admin/*` requests return `403 Forbidden`.
+
+### Querying Admin Endpoints
+
+All admin endpoints require the token as a `Bearer` header:
+
+```bash
+# List connected workers with models, load, and capabilities
+curl -s -H "Authorization: Bearer $MODELRELAY_ADMIN_TOKEN" \
+  http://proxy:8080/admin/workers | jq .
+
+# View request stats (counts, latency, queue depth)
+curl -s -H "Authorization: Bearer $MODELRELAY_ADMIN_TOKEN" \
+  http://proxy:8080/admin/stats | jq .
+
+# List client API keys (metadata only, no secrets)
+curl -s -H "Authorization: Bearer $MODELRELAY_ADMIN_TOKEN" \
+  http://proxy:8080/admin/keys | jq .
+```
+
+### Managing Client API Keys
+
+When `MODELRELAY_REQUIRE_API_KEYS=true`, clients must send a valid API key as a `Bearer` token on inference requests. Create and revoke keys via the admin API:
+
+```bash
+# Create a new API key (returns the key — save it, it won't be shown again)
+curl -s -X POST -H "Authorization: Bearer $MODELRELAY_ADMIN_TOKEN" \
+  http://proxy:8080/admin/keys | jq .
+
+# Revoke a key by ID
+curl -s -X DELETE -H "Authorization: Bearer $MODELRELAY_ADMIN_TOKEN" \
+  http://proxy:8080/admin/keys/<key-id>
+```
+
+### Web Dashboard & Setup Wizard
+
+The `modelrelay-web` crate provides a browser-based admin UI:
+
+- **Dashboard** (`/dashboard`) — live view of worker connections, request metrics, and queue depth. Includes an "Add a machine" button for easy fleet expansion.
+- **Setup Wizard** (`/setup`) — guided worker onboarding with platform detection, LM Studio setup, worker binary download, configuration, and live connection verification. Always accessible, not just for initial setup.
+
+Run the dashboard standalone:
+
+```bash
+PORT=8000 cargo run -p modelrelay-web
+# Then open http://localhost:8000/dashboard
+```
+
+### Troubleshooting
+
+**Admin endpoints return 403:**
+- `MODELRELAY_ADMIN_TOKEN` is not set on the server. Set it and restart.
+- The `Authorization: Bearer <token>` header is missing or the token doesn't match.
+
+**API key auth not working (clients get 401):**
+- Verify `MODELRELAY_REQUIRE_API_KEYS=true` is set on the server.
+- Verify the client is sending `Authorization: Bearer <client-key>` (not the admin token).
+- Verify the key hasn't been revoked: `curl -H "Authorization: Bearer $MODELRELAY_ADMIN_TOKEN" http://proxy:8080/admin/keys`
+
+---
+
 ## Checking Worker Registration
 
 After starting a new worker, confirm it registered:
@@ -271,6 +344,8 @@ proxy.
 | `QUEUE_TIMEOUT_SECS` | `30` | How long a request can wait in queue |
 | `REQUEST_TIMEOUT_SECS` | `300` | Total request timeout (5 min) |
 | `LOG_LEVEL` | `info` | Log verbosity |
+| `MODELRELAY_ADMIN_TOKEN` | *(none)* | Bearer token for `/admin/*` endpoints (if unset, admin endpoints return 403) |
+| `MODELRELAY_REQUIRE_API_KEYS` | `false` | When `true`, client requests must include a valid API key as `Bearer` token |
 
 ### Worker Daemon
 
