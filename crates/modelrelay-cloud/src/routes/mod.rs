@@ -17,7 +17,7 @@ mod webhook;
 static LANDING_HTML: &str = include_str!("../../templates/index.html");
 
 /// Build the full cloud router: commercial routes + OSS admin routes.
-#[must_use]
+#[must_use = "returns the configured router"]
 pub fn router(state: Arc<CloudState>) -> Router {
     Router::new()
         // Commercial routes: landing page, auth, billing, pricing

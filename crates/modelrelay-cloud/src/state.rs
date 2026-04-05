@@ -19,7 +19,7 @@ pub struct CloudState {
 
 /// Parse the `ADMIN_EMAILS` environment variable into a deduplicated list of
 /// lowercase, trimmed email addresses.
-#[must_use]
+#[must_use = "returns the parsed email list"]
 pub fn parse_admin_emails(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(|s| s.trim().to_lowercase())
