@@ -418,6 +418,20 @@ pub fn dashboard_page() -> String {
     )
 }
 
+/// Optional configuration for embedding the setup wizard in a cloud context.
+///
+/// When provided, the wizard JS pre-fills the server URL, API key, and uses
+/// a session-authenticated proxy endpoint for worker polling instead of
+/// requiring a raw admin token.
+pub struct CloudWizardConfig {
+    /// The relay server URL to pre-fill (e.g. `https://api.modelrelay.io`).
+    pub server_url: String,
+    /// The user's API key to pre-fill for the test inference step.
+    pub api_key: Option<String>,
+    /// The proxy endpoint for polling worker status (e.g. `/dashboard/workers`).
+    pub workers_poll_url: String,
+}
+
 /// Build the worker onboarding setup wizard page.
 ///
 /// A 7-step guided flow for connecting a new worker machine to `ModelRelay`.
@@ -426,6 +440,13 @@ pub fn dashboard_page() -> String {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn setup_wizard_page() -> String {
+    setup_wizard_page_with_config(None)
+}
+
+/// Build the setup wizard page, optionally pre-configured for cloud users.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> String {
     use std::fmt::Write;
 
     let wizard_css = r"
@@ -553,11 +574,19 @@ pub fn setup_wizard_page() -> String {
   if (ua.includes('mac')) detectedPlatform = 'macos';
   else if (ua.includes('win')) detectedPlatform = 'windows';
 
+  const cloudCfg = window.__mrCloudConfig || null;
+
   function getAdminToken() {
+    if (cloudCfg) return ''; // cloud uses session auth via proxy
     return localStorage.getItem('mr_admin_token') || '';
   }
   function getServerUrl() {
+    if (cloudCfg && cloudCfg.serverUrl) return cloudCfg.serverUrl;
     return localStorage.getItem('mr_server_url') || window.location.origin;
+  }
+  function getWorkersPollUrl() {
+    if (cloudCfg && cloudCfg.workersPollUrl) return cloudCfg.workersPollUrl;
+    return getServerUrl() + '/admin/workers';
   }
   function authHeaders() {
     const h = { 'Content-Type': 'application/json' };
@@ -643,7 +672,9 @@ pub fn setup_wizard_page() -> String {
   // Step 6: poll for new worker
   async function snapshotWorkers() {
     try {
-      const r = await fetch(getServerUrl() + '/admin/workers', { headers: authHeaders() });
+      const pollUrl = getWorkersPollUrl();
+      const opts = cloudCfg ? { credentials: 'same-origin' } : { headers: authHeaders() };
+      const r = await fetch(pollUrl, opts);
       if (!r.ok) return;
       const d = await r.json();
       (d.workers || []).forEach(w => initialWorkerIds.add(w.worker_id));
@@ -661,7 +692,9 @@ pub fn setup_wizard_page() -> String {
 
     workerPollInterval = setInterval(async () => {
       try {
-        const r = await fetch(getServerUrl() + '/admin/workers', { headers: authHeaders() });
+        const pollUrl = getWorkersPollUrl();
+        const opts = cloudCfg ? { credentials: 'same-origin' } : { headers: authHeaders() };
+        const r = await fetch(pollUrl, opts);
         if (!r.ok) return;
         const d = await r.json();
         const workers = d.workers || [];
@@ -709,7 +742,7 @@ pub fn setup_wizard_page() -> String {
     };
 
     try {
-      const apiKey = localStorage.getItem('mr_test_api_key') || '';
+      const apiKey = (cloudCfg && cloudCfg.apiKey) ? cloudCfg.apiKey : (localStorage.getItem('mr_test_api_key') || '');
       const headers = { 'Content-Type': 'application/json' };
       if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
       const r = await fetch(serverUrl + '/v1/chat/completions', {
@@ -748,6 +781,14 @@ pub fn setup_wizard_page() -> String {
   // Init
   goToStep(1);
   window.__setPlatform(detectedPlatform);
+
+  // Pre-fill config inputs from cloud config
+  if (cloudCfg) {
+    const urlInput = $('#cfg-server-url');
+    if (urlInput && cloudCfg.serverUrl) { urlInput.value = cloudCfg.serverUrl; }
+    const apiKeyInput = $('#test-api-key');
+    if (apiKeyInput && cloudCfg.apiKey) { apiKeyInput.value = cloudCfg.apiKey; }
+  }
 
   // Reconfigure when config inputs change
   document.addEventListener('input', (e) => {
@@ -1035,9 +1076,33 @@ models = ["*"]</code>
     </div>
   </footer>
 
+  {cloud_config_script}
   <script>{wizard_js}</script>
 </body>
-</html>"#
+</html>"#,
+        cloud_config_script = cloud_config_script(cloud_config),
+    )
+}
+
+fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
+    let Some(cfg) = config else {
+        return String::new();
+    };
+    let api_key_js = match &cfg.api_key {
+        Some(k) => {
+            // Escape any quotes/backslashes in the key for safe JS embedding
+            let escaped = k.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        }
+        None => "null".to_string(),
+    };
+    let server_url = cfg.server_url.replace('\\', "\\\\").replace('"', "\\\"");
+    let poll_url = cfg
+        .workers_poll_url
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!(
+        "<script>window.__mrCloudConfig = {{ serverUrl: \"{server_url}\", apiKey: {api_key_js}, workersPollUrl: \"{poll_url}\" }};</script>"
     )
 }
 
