@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: reprovision-server-keys
+  namespace: modelrelay
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: reprovision
+          image: ghcr.io/ericflo/modelrelay/modelrelay-cloud:latest
+          command: ["/usr/local/bin/reprovision-server-keys"]
+          env:
+            - name: CLOUD_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: modelrelay-cloud
+                  key: DATABASE_URL
+            - name: SERVER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: modelrelay-server
+                  key: DATABASE_URL
