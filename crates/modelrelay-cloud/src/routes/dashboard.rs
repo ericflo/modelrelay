@@ -399,6 +399,96 @@ pub async fn keys_revoke(
     Redirect::to("/dashboard").into_response()
 }
 
+// ─── GET /dashboard/workers ─────────────────────────────────────────────────
+//
+// Proxy endpoint: authenticated cloud users can poll worker status via the
+// admin API without needing the raw admin token.
+
+/// GET /dashboard/workers — proxy to admin API `/admin/workers` for authenticated users.
+pub async fn workers(session: Session, State(state): State<Arc<CloudState>>) -> Response {
+    let _user_id = match require_user(&session).await {
+        Ok(id) => id,
+        Err(r) => return r,
+    };
+
+    let Some(ref admin_url) = state.admin_url else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "admin API not configured", "workers": []})),
+        )
+            .into_response();
+    };
+    let Some(ref admin_token) = state.admin_token else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "admin API not configured", "workers": []})),
+        )
+            .into_response();
+    };
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/admin/workers", admin_url.trim_end_matches('/'));
+    match client.get(&url).bearer_auth(admin_token).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => axum::Json(body).into_response(),
+            Err(e) => {
+                tracing::error!("workers proxy parse error: {e}");
+                axum::Json(serde_json::json!({"workers": []})).into_response()
+            }
+        },
+        Ok(resp) => {
+            let status = resp.status();
+            tracing::warn!("workers proxy upstream error: {status}");
+            axum::Json(serde_json::json!({"workers": []})).into_response()
+        }
+        Err(e) => {
+            tracing::error!("workers proxy request error: {e}");
+            axum::Json(serde_json::json!({"workers": []})).into_response()
+        }
+    }
+}
+
+// ─── GET /setup ─────────────────────────────────────────────────────────────
+
+/// GET /setup — serve the setup wizard with cloud context pre-filled for
+/// authenticated users (server URL, API key, proxy poll endpoint).
+pub async fn setup(session: Session, State(state): State<Arc<CloudState>>) -> Response {
+    // If the user is logged in, inject cloud config; otherwise serve the plain wizard.
+    let cloud_config = if let Ok(user_id) = require_user(&session).await {
+        let pool = state.db.as_ref();
+        let api_key: Option<String> = if let Some(pool) = pool {
+            sqlx::query_scalar(
+                "SELECT raw_key FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL \
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+
+        Some(modelrelay_web::templates::CloudWizardConfig {
+            server_url: state
+                .admin_url
+                .as_deref()
+                .unwrap_or("https://api.modelrelay.io")
+                .to_string(),
+            api_key,
+            workers_poll_url: "/dashboard/workers".to_string(),
+        })
+    } else {
+        None
+    };
+
+    Html(modelrelay_web::templates::setup_wizard_page_with_config(
+        cloud_config.as_ref(),
+    ))
+    .into_response()
+}
+
 // ─── HTML rendering ─────────────────────────────────────────────────────────
 
 fn error_page(message: &str) -> Html<String> {
@@ -488,16 +578,26 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow]) -> String {
        </div>",
     );
 
-    let usage_card = "<div class=\"card\">\
-       <h2>Usage</h2>\
-       <p style=\"margin-top:8px;\"><span class=\"badge\">Coming Soon</span></p>\
-       <p style=\"margin-top:12px;color:#8b949e;\">Request counts, connected workers, and usage statistics will be available here once the admin API is connected.</p>\
-       <p style=\"margin-top:12px;\"><a href=\"/admin/dashboard\">Open Admin Dashboard &rarr;</a></p>\
-     </div>";
+    let onboarding_card = if keys.is_empty() {
+        "<div class=\"card\" style=\"border-color:#7c3aed;\">\
+           <h2>&#x1F680; Get Started</h2>\
+           <p style=\"margin-top:8px;\">Generate an API key above, then connect your first worker machine.</p>\
+           <p style=\"margin-top:16px;\"><a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a></p>\
+         </div>"
+            .to_string()
+    } else {
+        "<div class=\"card\" style=\"border-color:#7c3aed;\">\
+           <h2>&#x1F680; Connect a Worker Machine</h2>\
+           <p style=\"margin-top:8px;\">You have an API key &mdash; now connect a GPU machine to start serving inference requests through ModelRelay.</p>\
+           <p style=\"margin-top:16px;\"><a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a></p>\
+         </div>"
+            .to_string()
+    };
 
-    format!("{header}\n{keys_html}\n{usage_card}")
+    format!("{header}\n{keys_html}\n{onboarding_card}")
 }
 
+#[allow(clippy::too_many_lines)]
 fn subscriber_dashboard_html(
     email: &str,
     sub: Option<&SubscriptionRow>,
@@ -594,14 +694,24 @@ fn subscriber_dashboard_html(
             .to_string()
     };
 
-    let usage_card = "<div class=\"card\">\
-       <h2>Usage</h2>\
-       <p style=\"margin-top:8px;\"><span class=\"badge\">Coming Soon</span></p>\
-       <p style=\"margin-top:12px;color:#8b949e;\">Request counts, connected workers, and usage statistics will be available here once the admin API is connected.</p>\
-       <p style=\"margin-top:12px;\"><a href=\"/admin/dashboard\">Open Admin Dashboard &rarr;</a></p>\
-     </div>";
+    let onboarding_card = if api_key.is_some() {
+        "<div class=\"card\" style=\"border-color:#7c3aed;\">\
+           <h2>&#x1F680; Connect a Worker Machine</h2>\
+           <p style=\"margin-top:8px;\">You have an API key &mdash; now connect a GPU machine to start serving inference requests through ModelRelay.</p>\
+           <p style=\"margin-top:8px;color:#8b949e;\">The setup wizard will walk you through downloading the worker binary, configuring it with your server URL and API key, and verifying the connection.</p>\
+           <p style=\"margin-top:16px;\"><a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a></p>\
+         </div>"
+            .to_string()
+    } else {
+        "<div class=\"card\">\
+           <h2>Next Steps</h2>\
+           <p style=\"margin-top:8px;color:#8b949e;\">Once you have an active subscription and API key, you'll be able to connect worker machines and start serving inference requests.</p>\
+           <p style=\"margin-top:12px;\"><a href=\"/pricing\">View Pricing &rarr;</a></p>\
+         </div>"
+            .to_string()
+    };
 
-    format!("{sub_card}\n{api_key_card}\n{usage_card}")
+    format!("{sub_card}\n{api_key_card}\n{onboarding_card}")
 }
 
 /// Minimal HTML entity escaping for untrusted strings.
