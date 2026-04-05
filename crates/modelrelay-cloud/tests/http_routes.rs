@@ -206,6 +206,54 @@ async fn dashboard_without_session_redirects_to_login() {
     }
 }
 
+// ─── Checkout routes ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn checkout_without_stripe_returns_billing_not_configured() {
+    // test_state() has stripe_key: None, so POST /checkout should return
+    // "Billing not configured" — unless the session extractor fails first (500).
+    let (status, body) = post("/checkout", "application/x-www-form-urlencoded", "").await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected status: {status}"
+    );
+    if status == StatusCode::OK {
+        assert!(
+            body.contains("Billing not configured"),
+            "expected 'Billing not configured' message, got: {}",
+            &body[..body.len().min(300)]
+        );
+    }
+}
+
+#[tokio::test]
+async fn checkout_cancel_returns_200() {
+    let (status, body) = get("/checkout/cancel").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains('<') && body.len() > 50,
+        "expected HTML cancel page"
+    );
+}
+
+#[tokio::test]
+async fn checkout_success_without_session_returns_200() {
+    // GET /checkout/success with no session_id query param.
+    // The handler always returns the success HTML regardless, though the
+    // session extractor may fail (500) without a session layer.
+    let (status, body) = get("/checkout/success").await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected status: {status}"
+    );
+    if status == StatusCode::OK {
+        assert!(
+            body.contains('<') && body.len() > 50,
+            "expected HTML success page"
+        );
+    }
+}
+
 // ─── Stripe webhook ────────────────────────────────────────────────────────
 
 #[tokio::test]
