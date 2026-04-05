@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+modelrelay-protocol = { workspace = true, features = ["admin-api"] }
 modelrelay-web = { path = "../modelrelay-web" }
 axum = { workspace = true }
 tokio = { workspace = true }

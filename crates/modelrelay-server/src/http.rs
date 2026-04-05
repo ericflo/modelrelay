@@ -13,6 +13,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use futures_util::stream;
+use modelrelay_protocol::admin_api::{AdminKeysResponse, CreateKeyRequest, CreateKeyResponse};
 use modelrelay_protocol::{HeaderMap, ResponseCompleteMessage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -20,7 +21,7 @@ use tokio::sync::Mutex;
 use crate::{
     AdminWorkerInfo, CancelReason, HttpResponseEvent, PendingHttpResponse,
     PendingStreamingHttpResponse, ProxyServerCore, RequestFailureReason, WorkerSocketApp,
-    api_keys::{ApiKeyMetadata, ApiKeyStore},
+    api_keys::ApiKeyStore,
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
@@ -249,11 +250,6 @@ async fn admin_stats_handler(State(state): State<HttpState>, headers: AxumHeader
     .into_response()
 }
 
-#[derive(Serialize)]
-struct AdminKeysResponse {
-    keys: Vec<ApiKeyMetadata>,
-}
-
 async fn admin_keys_handler(State(state): State<HttpState>, headers: AxumHeaderMap) -> Response {
     if let Err(status) = check_admin_auth(&state, &headers) {
         return status.into_response();
@@ -266,18 +262,6 @@ async fn admin_keys_handler(State(state): State<HttpState>, headers: AxumHeaderM
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateKeyRequest {
-    name: String,
-}
-
-#[derive(Serialize)]
-struct CreateKeyResponse {
-    #[serde(flatten)]
-    metadata: ApiKeyMetadata,
-    secret: String,
 }
 
 async fn admin_keys_create_handler(

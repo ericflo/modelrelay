@@ -126,12 +126,16 @@ pub async fn provision_api_key(
     admin_token: &str,
     name: &str,
 ) -> Result<(String, String), String> {
+    use modelrelay_protocol::admin_api::{CreateKeyRequest, CreateKeyResponse};
+
     let client = reqwest::Client::new();
     let url = format!("{}/admin/keys", admin_url.trim_end_matches('/'));
     let resp = client
         .post(&url)
         .bearer_auth(admin_token)
-        .json(&serde_json::json!({ "name": name }))
+        .json(&CreateKeyRequest {
+            name: name.to_string(),
+        })
         .send()
         .await
         .map_err(|e| format!("admin API request error: {e}"))?;
@@ -142,21 +146,12 @@ pub async fn provision_api_key(
         return Err(format!("admin API returned {status}: {body}"));
     }
 
-    let body: serde_json::Value = resp
+    let response: CreateKeyResponse = resp
         .json()
         .await
         .map_err(|e| format!("admin API response parse error: {e}"))?;
 
-    let key_id = body["id"]
-        .as_str()
-        .ok_or("admin API response missing 'id'")?
-        .to_string();
-    let raw_key = body["secret"]
-        .as_str()
-        .ok_or("admin API response missing 'secret'")?
-        .to_string();
-
-    Ok((key_id, raw_key))
+    Ok((response.metadata.id, response.secret))
 }
 
 /// Call `DELETE {admin_url}/admin/keys/{key_id}` to revoke an API key.
