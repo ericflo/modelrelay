@@ -151,9 +151,9 @@ pub async fn provision_api_key(
         .as_str()
         .ok_or("admin API response missing 'id'")?
         .to_string();
-    let raw_key = body["key"]
+    let raw_key = body["secret"]
         .as_str()
-        .ok_or("admin API response missing 'key'")?
+        .ok_or("admin API response missing 'secret'")?
         .to_string();
 
     Ok((key_id, raw_key))
