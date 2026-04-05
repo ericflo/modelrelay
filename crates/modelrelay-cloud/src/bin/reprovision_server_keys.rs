@@ -24,8 +24,8 @@
 //! ```
 
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 /// Prefix length stored in `server_api_keys.prefix`: the `mr_live_` tag (8 chars)
 /// plus 8 random chars = 16.
@@ -47,8 +47,7 @@ fn sha256_hash(data: &[u8]) -> Vec<u8> {
 }
 
 async fn connect(env_var: &str) -> Result<PgPool, String> {
-    let url = std::env::var(env_var)
-        .map_err(|_| format!("{env_var} is not set"))?;
+    let url = std::env::var(env_var).map_err(|_| format!("{env_var} is not set"))?;
 
     PgPoolOptions::new()
         .max_connections(5)
