@@ -8,6 +8,7 @@ use tower_sessions::Session;
 use crate::state::CloudState;
 
 static CANCEL_HTML: &str = include_str!("../../templates/checkout_cancel.html");
+static SUCCESS_HTML: &str = include_str!("../../templates/checkout_success.html");
 
 /// POST /checkout — create a Stripe Checkout Session and redirect to Stripe.
 ///
@@ -132,7 +133,7 @@ pub async fn success(
         tracing::error!("failed to store user_id in session: {e}");
     }
 
-    Html(success_html()).into_response()
+    Html(SUCCESS_HTML).into_response()
 }
 
 /// Retrieve the Stripe checkout session, extract the customer email, and find the user.
@@ -179,65 +180,4 @@ async fn resolve_user_from_stripe(
 /// GET /checkout/cancel
 pub async fn cancel() -> Html<&'static str> {
     Html(CANCEL_HTML)
-}
-
-fn success_html() -> String {
-    r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Checkout Success — ModelRelay</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #0d1117; color: #e6edf3; line-height: 1.6;
-    }
-    a { color: #7c3aed; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
-    nav { padding: 20px 0; border-bottom: 1px solid #21262d; }
-    nav .container { display: flex; justify-content: space-between; align-items: center; }
-    .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; }
-    .logo span { color: #7c3aed; }
-    .nav-links a { color: #8b949e; font-size: 0.9rem; margin-left: 16px; }
-    .nav-links a:hover { color: #e6edf3; }
-    .content { padding: 60px 0; text-align: center; }
-    .content h1 { font-size: 2rem; margin-bottom: 16px; }
-    .content p { color: #8b949e; margin-bottom: 24px; }
-    .btn {
-      display: inline-block; padding: 12px 24px; background: #7c3aed; color: #fff;
-      border-radius: 8px; font-weight: 600; text-decoration: none;
-    }
-    .btn:hover { background: #6d28d9; text-decoration: none; }
-    footer { padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }
-    footer a { color: #8b949e; }
-  </style>
-</head>
-<body>
-  <nav>
-    <div class="container">
-      <a href="/" class="logo">Model<span>Relay</span></a>
-      <div class="nav-links">
-        <a href="/dashboard">Dashboard</a>
-        <a href="/pricing">Pricing</a>
-      </div>
-    </div>
-  </nav>
-  <section class="content">
-    <div class="container">
-      <h1>&#10003; Subscription Activated!</h1>
-      <p>Thank you for subscribing to ModelRelay. Your account is being set up.</p>
-      <a href="/dashboard" class="btn">Go to Dashboard &rarr;</a>
-    </div>
-  </section>
-  <footer>
-    <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
-    </div>
-  </footer>
-</body>
-</html>"#
-        .to_string()
 }
