@@ -31,6 +31,11 @@ pub fn router(state: Arc<CloudState>) -> Router {
         .route("/checkout/cancel", get(checkout::cancel))
         .route("/dashboard", get(dashboard::page))
         .route("/dashboard/billing-portal", post(dashboard::billing_portal))
+        .route("/dashboard/keys/generate", post(dashboard::keys_generate))
+        .route(
+            "/dashboard/keys/{id}/revoke",
+            post(dashboard::keys_revoke),
+        )
         .route("/webhook/stripe", post(webhook::handle))
         .with_state(state)
 }

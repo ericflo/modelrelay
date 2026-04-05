@@ -131,6 +131,19 @@ pub async fn signup_submit(
         }
     };
 
+    // Auto-promote admin users
+    if state.admin_emails.contains(&email) {
+        if let Err(e) = sqlx::query("UPDATE users SET is_admin = true WHERE id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await
+        {
+            tracing::error!("admin auto-promote error: {e}");
+        } else {
+            tracing::info!(email = %email, "auto-promoted new signup to admin");
+        }
+    }
+
     // Set session
     if let Err(e) = session.insert("user_id", user_id.to_string()).await {
         tracing::error!("session insert error: {e}");

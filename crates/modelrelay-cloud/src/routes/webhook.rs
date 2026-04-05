@@ -121,7 +121,7 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// Call `POST {admin_url}/admin/keys` to provision a new API key.
-async fn provision_api_key(
+pub async fn provision_api_key(
     admin_url: &str,
     admin_token: &str,
     name: &str,
@@ -160,7 +160,7 @@ async fn provision_api_key(
 }
 
 /// Call `DELETE {admin_url}/admin/keys/{key_id}` to revoke an API key.
-async fn revoke_api_key(admin_url: &str, admin_token: &str, key_id: &str) -> Result<(), String> {
+pub async fn revoke_api_key(admin_url: &str, admin_token: &str, key_id: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
     let url = format!("{}/admin/keys/{}", admin_url.trim_end_matches('/'), key_id);
     let resp = client
@@ -236,12 +236,16 @@ async fn handle_checkout_completed(
                 .await
                 .map_err(|e| format!("failed to store api_key_id: {e}"))?;
 
-                sqlx::query("UPDATE users SET api_key = $1 WHERE id = $2")
-                    .bind(&raw_key)
-                    .bind(user_id)
-                    .execute(pool)
-                    .await
-                    .map_err(|e| format!("failed to store api_key: {e}"))?;
+                sqlx::query(
+                    "INSERT INTO api_keys (user_id, key_id, raw_key, name) VALUES ($1, $2, $3, $4)",
+                )
+                .bind(user_id)
+                .bind(&key_id)
+                .bind(&raw_key)
+                .bind(&key_name)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("failed to store api_key: {e}"))?;
 
                 tracing::info!(
                     "provisioned API key {key_id} for user={email} subscription={stripe_subscription_id}"
@@ -327,6 +331,13 @@ async fn handle_subscription_deleted(
         } else {
             tracing::warn!("admin API not configured — cannot revoke API key {key_id}");
         }
+
+        // Mark the key as revoked in the api_keys table
+        sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE key_id = $1")
+            .bind(key_id)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("api_keys revoke error: {e}"))?;
     }
 
     let rows = sqlx::query(
@@ -338,15 +349,6 @@ async fn handle_subscription_deleted(
     .await
     .map_err(|e| format!("subscription delete error: {e}"))?
     .rows_affected();
-
-    sqlx::query(
-        "UPDATE users SET api_key = NULL WHERE id = (\
-         SELECT user_id FROM subscriptions WHERE stripe_subscription_id = $1)",
-    )
-    .bind(sub_id)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("user api_key clear error: {e}"))?;
 
     if rows == 0 {
         tracing::warn!("subscription.deleted: no matching subscription for {sub_id}");

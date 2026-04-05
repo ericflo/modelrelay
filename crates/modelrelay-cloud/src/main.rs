@@ -47,6 +47,28 @@ async fn main() {
         );
     }
 
+    // Parse admin emails from env var
+    let admin_emails = state::parse_admin_emails(
+        &std::env::var("ADMIN_EMAILS").unwrap_or_default(),
+    );
+    tracing::info!(admin_count = admin_emails.len(), "admin emails configured");
+
+    // Backfill admin flag for existing users (grant-only, never demote)
+    if !admin_emails.is_empty() {
+        if let Some(ref p) = pool {
+            match sqlx::query(
+                "UPDATE users SET is_admin = true WHERE lower(email) = ANY($1) AND is_admin = false",
+            )
+            .bind(&admin_emails)
+            .execute(p)
+            .await
+            {
+                Ok(r) => tracing::info!(promoted = r.rows_affected(), "admin backfill complete"),
+                Err(e) => tracing::error!("admin backfill failed: {e}"),
+            }
+        }
+    }
+
     // Set up session layer if we have a DB
     let session_layer = if let Some(ref p) = pool {
         let session_store = tower_sessions_sqlx_store::PostgresStore::new(p.clone());
@@ -71,6 +93,7 @@ async fn main() {
         webhook_secret,
         admin_url,
         admin_token,
+        admin_emails,
     });
 
     let mut app = Router::new()
