@@ -1196,6 +1196,30 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
 
     footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
     footer a {{ color: #8b949e; }}
+
+    /* Tablet */
+    @media (max-width: 768px) {{
+      .content {{ padding: 40px 0; }}
+      .content h1 {{ font-size: 1.6rem; }}
+      .card {{ padding: 24px; }}
+      .nav-links a {{ font-size: 0.8rem; margin-left: 12px; }}
+      .nav-links button {{ font-size: 0.8rem; margin-left: 12px; }}
+      .info-table td:first-child {{ width: 120px; }}
+    }}
+
+    /* Mobile */
+    @media (max-width: 480px) {{
+      .container {{ padding: 0 16px; }}
+      .content {{ padding: 32px 0; }}
+      .content h1 {{ font-size: 1.4rem; }}
+      .card {{ padding: 20px; }}
+      .btn {{ display: block; width: 100%; text-align: center; }}
+      .auth-form input {{ font-size: 1rem; padding: 12px; }}
+      .info-table td {{ display: block; padding: 4px 0; }}
+      .info-table td:first-child {{ width: auto; border-bottom: none; }}
+      .key-display {{ font-size: 0.85rem; padding: 10px 12px; }}
+      .nav-links .btn-signup {{ padding: 6px 12px; }}
+    }}
   </style>
 </head>
 <body>
