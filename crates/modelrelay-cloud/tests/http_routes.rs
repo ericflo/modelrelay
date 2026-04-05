@@ -175,7 +175,12 @@ async fn login_submit_without_db_returns_error() {
 #[tokio::test]
 async fn dashboard_without_session_redirects_to_login() {
     let resp = app()
-        .oneshot(Request::builder().uri("/dashboard").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/dashboard")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
