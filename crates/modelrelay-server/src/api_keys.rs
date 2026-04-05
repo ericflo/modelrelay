@@ -4,26 +4,13 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use rand::Rng;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
+pub use modelrelay_protocol::admin_api::ApiKeyMetadata;
+
 pub const API_KEY_PREFIX: &str = "mr_live_";
 pub const API_KEY_RANDOM_LEN: usize = 32;
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ApiKeyMetadata {
-    pub id: String,
-    pub name: String,
-    pub prefix: String,
-    pub created_at: u64,
-    pub last_used_at: Option<u64>,
-    pub revoked: bool,
-}
 
 /// Errors that an [`ApiKeyStore`] implementation may return.
 #[derive(Debug)]
