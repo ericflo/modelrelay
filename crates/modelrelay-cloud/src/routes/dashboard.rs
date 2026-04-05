@@ -567,6 +567,7 @@ fn status_badge(status: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> String {
     let email_escaped = html_escape(email);
 
@@ -629,6 +630,48 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> St
        </div>",
     );
 
+    // Live worker status card (polls /dashboard/workers via JS)
+    let workers_card = "\
+        <div class=\"card\">\
+          <h2>Workers</h2>\
+          <div id=\"admin-workers\">\
+            <p style=\"margin-top:8px;color:#8b949e;\">Loading worker status&hellip;</p>\
+          </div>\
+          <script>\
+            (function(){\
+              function poll(){\
+                fetch('/dashboard/workers',{credentials:'same-origin'})\
+                  .then(function(r){return r.json();})\
+                  .then(function(d){\
+                    var el=document.getElementById('admin-workers');\
+                    var ws=d.workers||[];\
+                    if(ws.length===0){\
+                      el.innerHTML='<p style=\"margin-top:8px;color:#8b949e;\">No workers connected. <a href=\"/setup\">Set up your first worker &rarr;</a></p>';\
+                      return;\
+                    }\
+                    var h='<table class=\"info-table\" style=\"margin-top:8px;\"><tr><th style=\"font-weight:600;color:#8b949e;border-bottom:1px solid #21262d;padding:8px 12px 8px 0;\">Name</th><th style=\"font-weight:600;color:#8b949e;border-bottom:1px solid #21262d;padding:8px 0;\">Models</th><th style=\"font-weight:600;color:#8b949e;border-bottom:1px solid #21262d;padding:8px 0;\">Load</th></tr>';\
+                    for(var i=0;i<ws.length;i++){\
+                      var w=ws[i];\
+                      var name=w.worker_name||w.worker_id||'worker';\
+                      var models=(w.models||[]).join(', ');\
+                      var load=w.in_flight_count+'/'+w.max_concurrent;\
+                      h+='<tr><td style=\"padding:8px 12px 8px 0;\">'+name+'</td><td style=\"padding:8px 0;font-family:monospace;font-size:0.85em;\">'+models+'</td><td style=\"padding:8px 0;\">'+load+'</td></tr>';\
+                    }\
+                    h+='</table>';\
+                    h+='<p style=\"margin-top:12px;\"><a href=\"/setup\" style=\"color:#7c3aed;font-size:0.9em;font-weight:600;\">+ Connect another machine</a></p>';\
+                    el.innerHTML=h;\
+                  })\
+                  .catch(function(){\
+                    document.getElementById('admin-workers').innerHTML=\
+                      '<p style=\"margin-top:8px;color:#8b949e;\">Could not load worker status.</p>';\
+                  });\
+              }\
+              poll();\
+              setInterval(poll,5000);\
+            })();\
+          </script>\
+        </div>";
+
     let onboarding_card = if keys.is_empty() {
         "<div class=\"card\" style=\"border-color:#7c3aed;\">\
            <h2>&#x1F680; Get Started</h2>\
@@ -637,15 +680,10 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> St
          </div>"
             .to_string()
     } else {
-        "<div class=\"card\" style=\"border-color:#7c3aed;\">\
-           <h2>&#x1F680; Connect a Worker Machine</h2>\
-           <p style=\"margin-top:8px;\">You have an API key &mdash; now connect a GPU machine to start serving inference requests through ModelRelay.</p>\
-           <p style=\"margin-top:16px;\"><a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a></p>\
-         </div>"
-            .to_string()
+        String::new() // Workers card above handles the "add machine" link
     };
 
-    format!("{header}\n{keys_html}\n{onboarding_card}")
+    format!("{header}\n{keys_html}\n{workers_card}\n{onboarding_card}")
 }
 
 #[allow(clippy::too_many_lines)]

@@ -489,6 +489,21 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     .platform-content { display:none; }
     .platform-content.active { display:block; }
 
+    .backend-content { display:none; }
+    .backend-content.active { display:block; }
+
+    .hint-box {
+      background:#1c1f26; border:1px solid #30363d; border-radius:8px;
+      padding:14px 16px; margin:12px 0; font-size:0.85rem; color:#8b949e;
+    }
+    .hint-box strong { color:#e6edf3; }
+
+    .skip-link {
+      display:none; margin-top:8px; color:#7c3aed; cursor:pointer;
+      font-size:0.85rem; background:none; border:none; font-family:inherit;
+    }
+    .skip-link:hover { text-decoration:underline; }
+
     .code-block {
       background:#0d1117; border:1px solid #30363d; border-radius:8px;
       padding:16px; font-family:'SFMono-Regular',Consolas,monospace;
@@ -560,16 +575,18 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
 
     let wizard_js = r#"
 (function() {
-  const STEPS = 7;
+  const STEPS = 8;
   let currentStep = 1;
   let detectedPlatform = 'linux';
+  let selectedBackend = 'lmstudio';
   let workerPollInterval = null;
+  let troubleshootTimer = null;
   let initialWorkerIds = new Set();
+  let detectedModels = [];
 
   const $ = s => document.querySelector(s);
   const $$ = s => document.querySelectorAll(s);
 
-  // Platform detection
   const ua = navigator.userAgent.toLowerCase();
   if (ua.includes('mac')) detectedPlatform = 'macos';
   else if (ua.includes('win')) detectedPlatform = 'windows';
@@ -577,7 +594,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   const cloudCfg = window.__mrCloudConfig || null;
 
   function getAdminToken() {
-    if (cloudCfg) return ''; // cloud uses session auth via proxy
+    if (cloudCfg) return '';
     return localStorage.getItem('mr_admin_token') || '';
   }
   function getServerUrl() {
@@ -594,7 +611,6 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     if (t) h['Authorization'] = 'Bearer ' + t;
     return h;
   }
-
   function escHtml(s) {
     const d = document.createElement('div');
     d.textContent = s;
@@ -612,7 +628,6 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
       if (i + 1 === n) el.classList.add('active');
       else if (i + 1 < n) el.classList.add('done');
     });
-    // Start/stop worker polling on step 6
     if (n === 6) startWorkerPoll();
     else stopWorkerPoll();
   }
@@ -623,13 +638,34 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   window.__wizPrev = prevStep;
   window.__wizGoTo = goToStep;
 
-  // Platform tab switching
+  // Platform tab switching (steps 1, 4)
   window.__setPlatform = function(p) {
     detectedPlatform = p;
-    $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.platform === p));
-    $$('.platform-content').forEach(el => el.classList.toggle('active', el.dataset.platform === p));
+    $$('.platform-tabs:not(.backend-tabs):not(.persist-tabs) .tab').forEach(t =>
+      t.classList.toggle('active', t.dataset.platform === p));
+    $$('.platform-content').forEach(el =>
+      el.classList.toggle('active', el.dataset.platform === p));
     updateDownloadLinks();
     updateConfigSnippet();
+    window.__setPersistPlatform(p);
+  };
+
+  // Backend tab switching (steps 2, 3)
+  window.__setBackend = function(b) {
+    selectedBackend = b;
+    $$('.backend-tabs .tab').forEach(t =>
+      t.classList.toggle('active', t.dataset.backend === b));
+    $$('.backend-content').forEach(el =>
+      el.classList.toggle('active', el.dataset.backend === b));
+    updateConfigSnippet();
+  };
+
+  // Persist platform tabs (step 8)
+  window.__setPersistPlatform = function(p) {
+    $$('.persist-content').forEach(el =>
+      el.style.display = el.dataset.platform === p ? 'block' : 'none');
+    $$('.persist-tabs .tab').forEach(t =>
+      t.classList.toggle('active', t.dataset.platform === p));
   };
 
   function updateDownloadLinks() {
@@ -650,17 +686,39 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     }
   }
 
+  function getBackendPort() {
+    return selectedBackend === 'lmstudio' ? '1234' : '8000';
+  }
+
   function updateConfigSnippet() {
     const serverUrl = $('#cfg-server-url') ? $('#cfg-server-url').value : getServerUrl();
     const secret = $('#cfg-worker-secret') ? $('#cfg-worker-secret').value : 'your-worker-secret';
+    const port = getBackendPort();
     const el = $('#config-toml');
     if (el) {
       el.textContent =
         'proxy_url = "' + serverUrl + '"\n' +
         'worker_secret = "' + secret + '"\n' +
         'worker_name = "my-gpu-box"\n' +
-        'backend_url = "http://localhost:1234"\n' +
+        'backend_url = "http://localhost:' + port + '"\n' +
         'models = ["*"]';
+    }
+    // Also update env var snippet
+    const envEl = $('#config-env');
+    if (envEl) {
+      envEl.textContent =
+        'export PROXY_URL="' + serverUrl + '"\n' +
+        'export WORKER_SECRET="' + secret + '"\n' +
+        'export WORKER_NAME="my-gpu-box"\n' +
+        'export BACKEND_URL="http://localhost:' + port + '"\n' +
+        'export MODELS="*"';
+    }
+    // Update curl test command
+    const curlEl = $('#curl-test');
+    if (curlEl) {
+      curlEl.textContent = 'curl -X POST ' + serverUrl + '/v1/chat/completions \\\n' +
+        '  -H "Content-Type: application/json" \\\n' +
+        '  -d \'{"model":"your-model","messages":[{"role":"user","content":"Hello!"}],"max_tokens":100}\'';
     }
   }
   window.__updateConfig = updateConfigSnippet;
@@ -680,11 +738,22 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   function startWorkerPoll() {
     stopWorkerPoll();
     snapshotWorkers();
-    const indicator = $('#worker-status');
     const pulse = $('#worker-pulse');
     const statusText = $('#worker-status-text');
-    if (pulse) { pulse.className = 'pulse searching'; }
-    if (statusText) { statusText.textContent = 'Waiting for worker to connect...'; }
+    const troubleshoot = $('#troubleshoot-hints');
+    const skipBtn = $('#skip-detect');
+    if (pulse) pulse.className = 'pulse searching';
+    if (statusText) statusText.textContent = 'Waiting for worker to connect...';
+    if (troubleshoot) troubleshoot.style.display = 'none';
+    if (skipBtn) skipBtn.style.display = 'none';
+
+    // Show troubleshooting after 15s, skip button after 30s
+    let elapsed = 0;
+    troubleshootTimer = setInterval(() => {
+      elapsed += 1;
+      if (elapsed >= 15 && troubleshoot) troubleshoot.style.display = 'block';
+      if (elapsed >= 30 && skipBtn) skipBtn.style.display = 'inline-block';
+    }, 1000);
 
     workerPollInterval = setInterval(async () => {
       try {
@@ -697,26 +766,31 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
         const newWorker = workers.find(w => !initialWorkerIds.has(w.worker_id));
         if (newWorker) {
           stopWorkerPoll();
-          if (pulse) { pulse.className = 'pulse connected'; }
+          if (pulse) pulse.className = 'pulse connected';
           if (statusText) {
             const name = newWorker.worker_name || newWorker.worker_id;
             const models = (newWorker.models || []).join(', ');
+            detectedModels = newWorker.models || [];
             statusText.innerHTML = '<span class="check-mark">&#10003;</span> Worker <strong>' + escHtml(name) + '</strong> connected!' +
               (models ? ' <span style="color:#8b949e;">(' + escHtml(models) + ')</span>' : '');
           }
-          // Enable next button
+          if (troubleshoot) troubleshoot.style.display = 'none';
+          if (skipBtn) skipBtn.style.display = 'none';
           const nextBtn = $('#step6-next');
           if (nextBtn) { nextBtn.disabled = false; nextBtn.style.opacity = '1'; }
+          // Pre-fill test model from detected models
+          const testModel = $('#test-model');
+          if (testModel && detectedModels.length > 0 && !testModel.value) {
+            testModel.value = detectedModels[0];
+          }
         }
       } catch(e) {}
     }, 3000);
   }
 
   function stopWorkerPoll() {
-    if (workerPollInterval) {
-      clearInterval(workerPollInterval);
-      workerPollInterval = null;
-    }
+    if (workerPollInterval) { clearInterval(workerPollInterval); workerPollInterval = null; }
+    if (troubleshootTimer) { clearInterval(troubleshootTimer); troubleshootTimer = null; }
   }
 
   // Step 7: test inference
@@ -751,8 +825,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
         try {
           const d = JSON.parse(text);
           const reply = d.choices && d.choices[0] && d.choices[0].message
-            ? d.choices[0].message.content
-            : text;
+            ? d.choices[0].message.content : text;
           resultEl.innerHTML = '<span class="check-mark">&#10003;</span> <strong>Success!</strong>\n\n'
             + 'Model: ' + escHtml(d.model || model) + '\n'
             + 'Response: ' + escHtml(reply);
@@ -777,16 +850,20 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   // Init
   goToStep(1);
   window.__setPlatform(detectedPlatform);
+  window.__setBackend('lmstudio');
+  window.__setPersistPlatform(detectedPlatform);
 
-  // Pre-fill config inputs from cloud config
+  // Pre-fill config inputs
   if (cloudCfg) {
     const urlInput = $('#cfg-server-url');
-    if (urlInput && cloudCfg.serverUrl) { urlInput.value = cloudCfg.serverUrl; }
+    if (urlInput && cloudCfg.serverUrl) urlInput.value = cloudCfg.serverUrl;
     const apiKeyInput = $('#test-api-key');
-    if (apiKeyInput && cloudCfg.apiKey) { apiKeyInput.value = cloudCfg.apiKey; }
+    if (apiKeyInput && cloudCfg.apiKey) apiKeyInput.value = cloudCfg.apiKey;
+  } else {
+    const urlInput = $('#cfg-server-url');
+    if (urlInput && !urlInput.value) urlInput.value = window.location.origin;
   }
 
-  // Reconfigure when config inputs change
   document.addEventListener('input', (e) => {
     if (e.target.id === 'cfg-server-url' || e.target.id === 'cfg-worker-secret') {
       updateConfigSnippet();
@@ -797,12 +874,13 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
 
     let step_labels = [
         "Platform",
-        "Install LM Studio",
-        "Load Model",
-        "Download Worker",
+        "Backend",
+        "Model",
+        "Download",
         "Configure",
         "Connect",
         "Test",
+        "Persist",
     ];
 
     let mut progress_html = String::from("<div class=\"wizard-progress\">");
@@ -815,25 +893,39 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     }
     progress_html.push_str("</div>");
 
-    let steps_html = r#"
-    <!-- Step 1: Platform Detection -->
+    let steps_html = r##"
+    <!-- Step 1: Platform -->
     <div class="wizard-step active" data-step="1">
       <div class="wizard-card">
         <h2><span class="step-num">1</span> Choose your platform</h2>
-        <p>ModelRelay workers run on your machine alongside your local model server. Select your operating system to get started.</p>
+        <p>Select the OS where you'll run inference. We'll tailor the next steps accordingly.</p>
         <div class="platform-tabs">
           <div class="tab" data-platform="macos" onclick="window.__setPlatform('macos')">macOS</div>
           <div class="tab" data-platform="windows" onclick="window.__setPlatform('windows')">Windows</div>
           <div class="tab" data-platform="linux" onclick="window.__setPlatform('linux')">Linux</div>
         </div>
         <div class="platform-content" data-platform="macos">
-          <p>Great — macOS with Apple Silicon is an excellent choice for running local models. You'll need a Mac with an M-series chip for best performance.</p>
+          <div class="hint-box">
+            <strong>Apple Silicon (M1/M2/M3/M4)</strong> — best experience. Models run on the unified GPU with no driver setup.<br>
+            <strong>Intel Macs</strong> — CPU-only inference works but is much slower.<br><br>
+            <strong>Check:</strong> 16 GB+ unified memory recommended. Open <em>About This Mac</em> to confirm your chip and RAM.
+          </div>
         </div>
         <div class="platform-content" data-platform="windows">
-          <p>Windows works well for local inference. You'll want a machine with an NVIDIA GPU for best performance.</p>
+          <div class="hint-box">
+            <strong>NVIDIA GPU</strong> — 8 GB+ VRAM recommended. Install the latest <a href="https://www.nvidia.com/drivers" target="_blank" style="color:#7c3aed;">NVIDIA driver</a> (CUDA is bundled).<br>
+            <strong>AMD GPU</strong> — supported by some backends (Ollama, vLLM with ROCm). Check your backend's compatibility.<br>
+            <strong>CPU-only</strong> — works but significantly slower.<br><br>
+            <strong>Check:</strong> Open Task Manager &rarr; Performance &rarr; GPU to see your GPU and VRAM.
+          </div>
         </div>
         <div class="platform-content" data-platform="linux">
-          <p>Linux is the most common choice for GPU inference servers. Works great with NVIDIA GPUs and CUDA.</p>
+          <div class="hint-box">
+            <strong>NVIDIA GPU</strong> — the standard choice. Install NVIDIA drivers + CUDA toolkit, then verify with <code>nvidia-smi</code>.<br>
+            <strong>AMD GPU</strong> — use ROCm. Supported by vLLM and Ollama on recent cards.<br>
+            <strong>CPU-only</strong> — fine for small models or testing.<br><br>
+            <strong>Check:</strong> Run <code>nvidia-smi</code> (NVIDIA) or <code>rocm-smi</code> (AMD) to confirm your GPU is visible.
+          </div>
         </div>
       </div>
       <div class="wizard-nav">
@@ -842,24 +934,56 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
       </div>
     </div>
 
-    <!-- Step 2: Install LM Studio -->
+    <!-- Step 2: Backend -->
     <div class="wizard-step" data-step="2">
       <div class="wizard-card">
-        <h2><span class="step-num">2</span> Install LM Studio</h2>
-        <p>LM Studio is a free desktop app for running local LLMs. It provides an OpenAI-compatible API server that ModelRelay workers connect to.</p>
-        <p style="margin:20px 0;">
-          <a href="https://lmstudio.ai" target="_blank" class="btn">Download LM Studio &rarr;</a>
-        </p>
-        <div class="platform-content active" data-platform="macos">
-          <p>Download the macOS DMG, drag LM Studio to your Applications folder, and launch it.</p>
+        <h2><span class="step-num">2</span> Set up your inference backend</h2>
+        <p>ModelRelay connects to any OpenAI-compatible server running on your machine. Pick whichever you prefer:</p>
+        <div class="platform-tabs backend-tabs" style="margin-top:16px;">
+          <div class="tab active" data-backend="lmstudio" onclick="window.__setBackend('lmstudio')">LM Studio</div>
+          <div class="tab" data-backend="ollama" onclick="window.__setBackend('ollama')">Ollama</div>
+          <div class="tab" data-backend="llamacpp" onclick="window.__setBackend('llamacpp')">llama.cpp</div>
+          <div class="tab" data-backend="vllm" onclick="window.__setBackend('vllm')">vLLM</div>
         </div>
-        <div class="platform-content" data-platform="windows">
-          <p>Download the Windows installer (.exe), run it, and launch LM Studio from the Start menu.</p>
+
+        <div class="backend-content active" data-backend="lmstudio">
+          <p><strong>Best for:</strong> beginners, desktop use, nice GUI for browsing models.</p>
+          <p style="margin:16px 0;">
+            <a href="https://lmstudio.ai" target="_blank" class="btn">Download LM Studio &rarr;</a>
+          </p>
+          <p style="color:#8b949e;font-size:0.85rem;">Install, launch, and head to the <strong style="color:#e6edf3;">Developer</strong> tab to start the local server. Runs on <code>http://localhost:1234</code> by default.</p>
         </div>
-        <div class="platform-content" data-platform="linux">
-          <p>Download the Linux AppImage, make it executable with <code>chmod +x</code>, and run it. Alternatively, if you prefer a headless setup, you can use <code>llama-server</code> or any OpenAI-compatible local server instead of LM Studio.</p>
+
+        <div class="backend-content" data-backend="ollama">
+          <p><strong>Best for:</strong> CLI users, quick model management, easy multi-model setups.</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('install-ollama')">Copy</button>
+            <code id="install-ollama">curl -fsSL https://ollama.ai/install.sh | sh</code>
+          </div>
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:8px;">On macOS, download from <a href="https://ollama.ai" target="_blank" style="color:#7c3aed;">ollama.ai</a>. On Windows, use the <a href="https://ollama.ai/download/windows" target="_blank" style="color:#7c3aed;">Windows installer</a>. Serves on <code>http://localhost:11434</code>.</p>
         </div>
-        <p style="color:#8b949e;font-size:0.85rem;margin-top:16px;">Already have LM Studio or another local model server? Skip ahead.</p>
+
+        <div class="backend-content" data-backend="llamacpp">
+          <p><strong>Best for:</strong> lightweight deployments, headless servers, GGUF models.</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('install-llamacpp')">Copy</button>
+            <code id="install-llamacpp"># Build from source (or download a release binary)
+git clone https://github.com/ggerganov/llama.cpp && cd llama.cpp
+cmake -B build && cmake --build build --config Release -t llama-server</code>
+          </div>
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:8px;">Pre-built binaries available on the <a href="https://github.com/ggerganov/llama.cpp/releases" target="_blank" style="color:#7c3aed;">llama.cpp releases page</a>. Serves on <code>http://localhost:8080</code> by default (use <code>--port 8000</code> to change).</p>
+        </div>
+
+        <div class="backend-content" data-backend="vllm">
+          <p><strong>Best for:</strong> production throughput, continuous batching, HuggingFace models.</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('install-vllm')">Copy</button>
+            <code id="install-vllm">pip install vllm</code>
+          </div>
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:8px;">Requires NVIDIA GPU with CUDA. Serves an OpenAI-compatible API on <code>http://localhost:8000</code>. See <a href="https://docs.vllm.ai" target="_blank" style="color:#7c3aed;">vLLM docs</a>.</p>
+        </div>
+
+        <p style="color:#8b949e;font-size:0.85rem;margin-top:16px;">Already have a running backend? <a href="#" onclick="event.preventDefault();window.__wizGoTo(4);" style="color:#7c3aed;">Skip to Download Worker &rarr;</a></p>
       </div>
       <div class="wizard-nav">
         <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
@@ -867,19 +991,58 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
       </div>
     </div>
 
-    <!-- Step 3: Configure a Model -->
+    <!-- Step 3: Model -->
     <div class="wizard-step" data-step="3">
       <div class="wizard-card">
         <h2><span class="step-num">3</span> Download and load a model</h2>
-        <p>In LM Studio:</p>
-        <ol style="color:#8b949e;margin:12px 0 12px 20px;line-height:2;">
-          <li>Open the <strong style="color:#e6edf3;">Discover</strong> tab and search for a model (e.g. <code>llama-3.2-3b</code>)</li>
-          <li>Click <strong style="color:#e6edf3;">Download</strong> and wait for it to complete</li>
-          <li>Go to the <strong style="color:#e6edf3;">Developer</strong> tab</li>
-          <li>Select your downloaded model and click <strong style="color:#e6edf3;">Start Server</strong></li>
-          <li>Confirm the server is running on <code>http://localhost:1234</code></li>
-        </ol>
-        <p style="color:#8b949e;font-size:0.85rem;">Using llama-server or another backend? Just make sure it's running and note the URL and port.</p>
+
+        <div class="backend-content active" data-backend="lmstudio">
+          <ol style="color:#8b949e;margin:12px 0 12px 20px;line-height:2;">
+            <li>Open the <strong style="color:#e6edf3;">Discover</strong> tab and search for a model (e.g. <code>llama-3.2-3b</code>)</li>
+            <li>Click <strong style="color:#e6edf3;">Download</strong> and wait for it to complete</li>
+            <li>Go to the <strong style="color:#e6edf3;">Developer</strong> tab</li>
+            <li>Select your model and click <strong style="color:#e6edf3;">Start Server</strong></li>
+            <li>Confirm the server is running on <code>http://localhost:1234</code></li>
+          </ol>
+        </div>
+
+        <div class="backend-content" data-backend="ollama">
+          <p>Pull a model and start serving:</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('model-ollama')">Copy</button>
+            <code id="model-ollama">ollama pull llama3.2:3b
+ollama serve</code>
+          </div>
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:8px;">Browse models at <a href="https://ollama.ai/library" target="_blank" style="color:#7c3aed;">ollama.ai/library</a>. The server runs on <code>http://localhost:11434</code>.</p>
+        </div>
+
+        <div class="backend-content" data-backend="llamacpp">
+          <p>Download a GGUF model and start the server:</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('model-llamacpp')">Copy</button>
+            <code id="model-llamacpp"># Download a GGUF model (example: Llama 3.2 3B)
+curl -L -o model.gguf https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
+
+# Start the server
+./build/bin/llama-server -m model.gguf --port 8000 --host 0.0.0.0</code>
+          </div>
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:8px;">Find GGUF models on <a href="https://huggingface.co/models?sort=trending&amp;search=gguf" target="_blank" style="color:#7c3aed;">HuggingFace</a>. The Q4_K_M quantization is a good balance of quality and speed.</p>
+        </div>
+
+        <div class="backend-content" data-backend="vllm">
+          <p>Start vLLM with a HuggingFace model:</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('model-vllm')">Copy</button>
+            <code id="model-vllm">vllm serve meta-llama/Llama-3.2-3B-Instruct \
+  --port 8000 \
+  --host 0.0.0.0</code>
+          </div>
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:8px;">vLLM downloads from HuggingFace automatically. You may need <code>huggingface-cli login</code> for gated models.</p>
+        </div>
+
+        <div class="hint-box" style="margin-top:16px;">
+          <strong>Verify it's running:</strong> <code>curl http://localhost:<span id="backend-port-hint">1234</span>/v1/models</code> should return a JSON list of available models.
+        </div>
       </div>
       <div class="wizard-nav">
         <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
@@ -890,15 +1053,14 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     <!-- Step 4: Download Worker -->
     <div class="wizard-step" data-step="4">
       <div class="wizard-card">
-        <h2><span class="step-num">4</span> Download the ModelRelay worker</h2>
-        <p>Download the <code>modelrelay-worker</code> binary for your platform:</p>
+        <h2><span class="step-num">4</span> Download the worker binary</h2>
+        <p>The ModelRelay worker runs alongside your model server and connects it to the relay.</p>
         <div class="code-block">
           <button class="copy-btn" onclick="window.__copyCode('download-cmd')">Copy</button>
           <code id="download-cmd">curl -L -o modelrelay-worker https://github.com/ericflo/modelrelay/releases/latest/download/modelrelay-worker-linux-amd64 &amp;&amp; chmod +x modelrelay-worker</code>
         </div>
         <p style="color:#8b949e;font-size:0.85rem;margin-top:12px;">
-          Or download directly from
-          <a href="https://github.com/ericflo/modelrelay/releases/latest" target="_blank">GitHub Releases</a>.
+          Or download from <a href="https://github.com/ericflo/modelrelay/releases/latest" target="_blank">GitHub Releases</a>. All platforms (Linux, macOS, Windows) and architectures (x86_64, arm64) are available.
         </p>
       </div>
       <div class="wizard-nav">
@@ -911,10 +1073,10 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     <div class="wizard-step" data-step="5">
       <div class="wizard-card">
         <h2><span class="step-num">5</span> Configure the worker</h2>
-        <p>Create a <code>config.toml</code> file next to the worker binary. Adjust the values below for your setup:</p>
+        <p>Create a <code>config.toml</code> next to the worker binary:</p>
         <div class="config-input">
           <label for="cfg-server-url">Server URL:</label>
-          <input id="cfg-server-url" type="text" placeholder="https://api.modelrelay.io">
+          <input id="cfg-server-url" type="text" placeholder="http://your-server:8080">
         </div>
         <div class="config-input">
           <label for="cfg-worker-secret">Worker Secret:</label>
@@ -928,11 +1090,22 @@ worker_name = "my-gpu-box"
 backend_url = "http://localhost:1234"
 models = ["*"]</code>
         </div>
-        <p style="color:#8b949e;font-size:0.85rem;margin-top:12px;">
-          The <code>worker_secret</code> must match the <code>WORKER_SECRET</code> configured on your ModelRelay server.
-          <code>models = ["*"]</code> advertises all models from your backend.
-          You can also pass these as CLI flags (e.g. <code>--proxy-url</code>, <code>--worker-secret</code>) or environment variables.
-        </p>
+        <div class="hint-box">
+          <strong>worker_secret</strong> — shared secret that must match the <code>WORKER_SECRET</code> on your ModelRelay server. It authenticates the worker connection.<br>
+          <strong>models = ["*"]</strong> — advertises all models from your backend. Replace with specific names to expose a subset.
+        </div>
+        <details style="margin-top:12px;">
+          <summary style="color:#7c3aed;cursor:pointer;font-size:0.9rem;font-weight:600;">Prefer environment variables?</summary>
+          <div class="code-block" style="margin-top:8px;">
+            <button class="copy-btn" onclick="window.__copyCode('config-env')">Copy</button>
+            <code id="config-env">export PROXY_URL=""
+export WORKER_SECRET="your-worker-secret"
+export WORKER_NAME="my-gpu-box"
+export BACKEND_URL="http://localhost:1234"
+export MODELS="*"</code>
+          </div>
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:4px;">CLI flags also work: <code>--proxy-url</code>, <code>--worker-secret</code>, <code>--backend-url</code>, <code>--models</code>.</p>
+        </details>
       </div>
       <div class="wizard-nav">
         <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
@@ -940,23 +1113,33 @@ models = ["*"]</code>
       </div>
     </div>
 
-    <!-- Step 6: Start Worker & Detect Connection -->
+    <!-- Step 6: Connect -->
     <div class="wizard-step" data-step="6">
       <div class="wizard-card">
         <h2><span class="step-num">6</span> Start the worker</h2>
-        <p>Run the worker from the directory containing your <code>config.toml</code>:</p>
+        <p>Run the worker from the directory with your <code>config.toml</code>:</p>
         <div class="code-block">
           <button class="copy-btn" onclick="window.__copyCode('run-cmd')">Copy</button>
           <code id="run-cmd">./modelrelay-worker --config config.toml</code>
         </div>
-        <p style="margin-top:16px;">Once started, the worker will connect to your ModelRelay server. We'll detect it automatically:</p>
+        <p style="margin-top:16px;">The worker will connect to your server over WebSocket. We'll detect it automatically:</p>
         <div class="status-indicator" id="worker-status">
           <div class="pulse" id="worker-pulse"></div>
           <span id="worker-status-text">Waiting for worker to connect...</span>
         </div>
+
+        <div id="troubleshoot-hints" style="display:none;" class="hint-box">
+          <strong>Taking a while?</strong> Common fixes:<br>
+          &bull; Check the worker terminal for error messages<br>
+          &bull; Verify <code>proxy_url</code> in config.toml points to this server<br>
+          &bull; Confirm <code>worker_secret</code> matches the server's <code>WORKER_SECRET</code><br>
+          &bull; If the server is remote, ensure port 8080 is reachable (no firewall blocking)
+        </div>
+
+        <button id="skip-detect" class="skip-link" onclick="window.__wizNext();">Skip detection &rarr; (worker may be on a different network)</button>
+
         <p style="color:#8b949e;font-size:0.85rem;margin-top:12px;">
-          Make sure your admin token is set on the
-          <a href="/dashboard">dashboard</a> so we can detect the connection. Polling every 3 seconds.
+          Admin token must be set on the <a href="/dashboard">dashboard</a> for live detection. Polling every 3 seconds.
         </p>
       </div>
       <div class="wizard-nav">
@@ -965,11 +1148,11 @@ models = ["*"]</code>
       </div>
     </div>
 
-    <!-- Step 7: Test Inference -->
+    <!-- Step 7: Test -->
     <div class="wizard-step" data-step="7">
       <div class="wizard-card">
         <h2><span class="step-num">7</span> Test inference</h2>
-        <p>Send a test request through ModelRelay to verify everything works end-to-end.</p>
+        <p>Send a request through the relay to verify the full pipeline works.</p>
         <div class="config-input">
           <label for="test-model">Model name:</label>
           <input id="test-model" type="text" placeholder="e.g. llama-3.2-3b-instruct" value="">
@@ -978,26 +1161,164 @@ models = ["*"]</code>
           <button class="btn" id="test-btn" onclick="window.__testInference()">Send Test Request</button>
         </p>
         <div id="test-result" class="test-result" style="display:none;"></div>
-        <p style="color:#8b949e;font-size:0.85rem;margin-top:16px;">
-          You can also test from the command line:
-        </p>
-        <div class="code-block">
-          <button class="copy-btn" onclick="window.__copyCode('curl-test')">Copy</button>
-          <code id="curl-test">curl -X POST http://localhost:8080/v1/chat/completions \
+        <details style="margin-top:16px;">
+          <summary style="color:#7c3aed;cursor:pointer;font-size:0.9rem;font-weight:600;">Test from the command line</summary>
+          <div class="code-block" style="margin-top:8px;">
+            <button class="copy-btn" onclick="window.__copyCode('curl-test')">Copy</button>
+            <code id="curl-test">curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"your-model","messages":[{"role":"user","content":"Hello!"}],"max_tokens":100}'</code>
+          </div>
+        </details>
+      </div>
+      <div class="wizard-nav">
+        <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
+        <button class="btn" onclick="window.__wizNext()">Next &rarr;</button>
+      </div>
+    </div>
+
+    <!-- Step 8: Persist -->
+    <div class="wizard-step" data-step="8">
+      <div class="wizard-card">
+        <h2><span class="step-num">8</span> Make it persistent</h2>
+        <p>Your worker is running — now set it up as a system service so it starts on boot and restarts on crash.</p>
+
+        <div class="platform-tabs persist-tabs" style="margin-top:20px;">
+          <div class="tab" data-platform="linux" onclick="window.__setPersistPlatform('linux')">Linux</div>
+          <div class="tab" data-platform="macos" onclick="window.__setPersistPlatform('macos')">macOS</div>
+          <div class="tab" data-platform="windows" onclick="window.__setPersistPlatform('windows')">Windows</div>
+        </div>
+
+        <div class="persist-content" data-platform="linux">
+          <p style="font-weight:600;color:#e6edf3;">systemd — supports multiple workers per machine</p>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">1. Install binary and create service user</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-linux-1')">Copy</button>
+            <code id="persist-linux-1">sudo install -m 755 modelrelay-worker /usr/local/bin/
+sudo useradd --system --no-create-home modelrelay
+sudo mkdir -p /var/lib/modelrelay /etc/modelrelay</code>
+          </div>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">2. Install the service file and configure</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-linux-2')">Copy</button>
+            <code id="persist-linux-2"># Download the template unit
+curl -L -o /tmp/modelrelay-worker@.service \
+  https://raw.githubusercontent.com/ericflo/modelrelay/main/extras/modelrelay-worker%40.service
+
+sudo cp /tmp/modelrelay-worker@.service /etc/systemd/system/
+
+# Create per-instance env file
+sudo tee /etc/modelrelay/worker-gpu0.env > /dev/null &lt;&lt;'EOF'
+PROXY_URL=http://your-proxy:8080
+WORKER_SECRET=your-secret
+BACKEND_URL=http://127.0.0.1:8000
+MODELS=llama3.2:3b
+EOF</code>
+          </div>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">3. Enable and start</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-linux-3')">Copy</button>
+            <code id="persist-linux-3">sudo systemctl daemon-reload
+sudo systemctl enable --now modelrelay-worker@gpu0</code>
+          </div>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">4. Verify</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-linux-4')">Copy</button>
+            <code id="persist-linux-4">systemctl status modelrelay-worker@gpu0
+journalctl -u modelrelay-worker@gpu0 -f</code>
+          </div>
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:8px;">Add more workers: <code>modelrelay-worker@gpu1</code>, <code>@gpu2</code>, etc. Each gets its own env file.</p>
+        </div>
+
+        <div class="persist-content" data-platform="macos" style="display:none;">
+          <p style="font-weight:600;color:#e6edf3;">launchd — starts on boot, restarts on crash</p>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">1. Create the plist</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-mac-1')">Copy</button>
+            <code id="persist-mac-1">sudo tee /Library/LaunchDaemons/io.modelrelay.worker.plist > /dev/null &lt;&lt;'EOF'
+&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;
+&lt;plist version="1.0"&gt;
+&lt;dict&gt;
+  &lt;key&gt;Label&lt;/key&gt;&lt;string&gt;io.modelrelay.worker&lt;/string&gt;
+  &lt;key&gt;ProgramArguments&lt;/key&gt;
+  &lt;array&gt;
+    &lt;string&gt;/usr/local/bin/modelrelay-worker&lt;/string&gt;
+    &lt;string&gt;--config&lt;/string&gt;
+    &lt;string&gt;/etc/modelrelay/config.toml&lt;/string&gt;
+  &lt;/array&gt;
+  &lt;key&gt;RunAtLoad&lt;/key&gt;&lt;true/&gt;
+  &lt;key&gt;KeepAlive&lt;/key&gt;&lt;true/&gt;
+  &lt;key&gt;StandardErrorPath&lt;/key&gt;
+  &lt;string&gt;/var/log/modelrelay-worker.log&lt;/string&gt;
+&lt;/dict&gt;
+&lt;/plist&gt;
+EOF</code>
+          </div>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">2. Install binary and config</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-mac-2')">Copy</button>
+            <code id="persist-mac-2">sudo cp modelrelay-worker /usr/local/bin/
+sudo mkdir -p /etc/modelrelay
+sudo cp config.toml /etc/modelrelay/config.toml</code>
+          </div>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">3. Load and start</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-mac-3')">Copy</button>
+            <code id="persist-mac-3">sudo launchctl load /Library/LaunchDaemons/io.modelrelay.worker.plist</code>
+          </div>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">4. Verify</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-mac-4')">Copy</button>
+            <code id="persist-mac-4">sudo launchctl list | grep modelrelay
+tail -f /var/log/modelrelay-worker.log</code>
+          </div>
+        </div>
+
+        <div class="persist-content" data-platform="windows" style="display:none;">
+          <p style="font-weight:600;color:#e6edf3;">Windows Service — run PowerShell as Administrator</p>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">1. Install the binary</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-win-1')">Copy</button>
+            <code id="persist-win-1">mkdir C:\ModelRelay
+copy modelrelay-worker.exe C:\ModelRelay\</code>
+          </div>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">2. Create the service</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-win-2')">Copy</button>
+            <code id="persist-win-2">sc.exe create ModelRelayWorker binPath= "C:\ModelRelay\modelrelay-worker.exe" start= auto</code>
+          </div>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">3. Set environment variables</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-win-3')">Copy</button>
+            <code id="persist-win-3">[Environment]::SetEnvironmentVariable("PROXY_URL", "http://your-proxy:8080", "Machine")
+[Environment]::SetEnvironmentVariable("WORKER_SECRET", "your-secret", "Machine")
+[Environment]::SetEnvironmentVariable("BACKEND_URL", "http://localhost:8000", "Machine")
+[Environment]::SetEnvironmentVariable("MODELS", "llama3.2:3b", "Machine")</code>
+          </div>
+          <p style="margin-top:12px;font-weight:600;color:#e6edf3;">4. Start and verify</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="window.__copyCode('persist-win-4')">Copy</button>
+            <code id="persist-win-4">Start-Service ModelRelayWorker
+Get-Service ModelRelayWorker</code>
+          </div>
+          <p style="color:#8b949e;font-size:0.85rem;margin-top:8px;">
+            For annotated scripts with error handling, see <a href="https://github.com/ericflo/modelrelay/blob/main/extras/install-windows-service-worker.ps1" target="_blank">extras/install-windows-service-worker.ps1</a>.
+          </p>
         </div>
       </div>
+
       <div class="wizard-card" style="text-align:center;">
         <h2 style="color:#34d399;">&#127881; Setup complete!</h2>
-        <p>Your worker is connected and serving inference requests through ModelRelay.</p>
+        <p>Your worker is connected, tested, and will start automatically on boot.</p>
         <p style="margin-top:16px;">
           <a href="/dashboard" class="btn">Go to Dashboard</a>
-          <a href="/setup" class="btn btn-back" style="margin-left:8px;" onclick="event.preventDefault();window.__wizGoTo(1);">Add another machine</a>
+          <a href="/setup" class="btn btn-back" style="margin-left:8px;" onclick="event.preventDefault();window.__wizGoTo(4);">Add another machine</a>
         </p>
       </div>
     </div>
-    "#;
+    "##;
 
     format!(
         r#"<!DOCTYPE html>

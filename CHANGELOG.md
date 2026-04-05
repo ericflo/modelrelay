@@ -7,19 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-05
+
 ### Added
 
+- Full setup wizard polish: 8-step flow with platform-aware hardware prereqs, multi-backend support (LM Studio, Ollama, llama.cpp, vLLM), backend-specific model loading instructions, env var alternative for config, troubleshooting hints with skip-detection on step 6, and persistence walkthrough (systemd/launchd/Windows Service) as step 8 (#235)
+- Live worker status card on cloud admin dashboard with auto-polling and "Connect another machine" link
+- "Make it persistent" section in README linking to systemd/launchd/Windows Service setup
 - Postgres-backed `ApiKeyStore` for multi-replica correctness — atomic `UPDATE...RETURNING`, trait-based store with in-memory and Postgres implementations (#215)
 - First-class admin users in modelrelay-cloud with proper `api_keys` association (#212)
 - Shared admin API types in `modelrelay-protocol` crate with contract tests to prevent server/cloud drift (#216)
 - Setup wizard integrated into cloud dashboard onboarding flow (#217)
 - HTTP integration tests for cloud route handlers (#219)
+- Integration tests for cloud checkout routes (#226)
 - One-shot reprovision tool for syncing cloud API keys into server database (#222)
 - `--config` flag support for worker binary, with corrected wizard instructions (#224)
 - Kubernetes deployment manifests for modelrelay-server at api.modelrelay.io (#209, #210)
+- Relay stats card on subscriber dashboard (#227)
+- "How It Works" section with code example on cloud landing page (#228)
+- SEO meta tags and favicon on cloud landing page (#229)
+- Responsive CSS breakpoints for mobile on cloud landing and pricing pages (#230)
+- Responsive CSS breakpoints for `page_shell` auth pages (#231)
+- Custom branded 404 page for cloud (#232)
+- CSRF protection on all cloud POST forms (#233)
 
 ### Changed
 
+- README: pre-built binaries are now the recommended (first-listed) installation method; Docker moved to second position
+- Setup wizard progress bar labels: "Platform | Backend | Model | Download | Configure | Connect | Test | Persist"
+- "Add another machine" flow skips to step 4 (Download) instead of resetting to step 1
 - Cloud checkout success template uses `include_str!` instead of runtime file read (#213)
 
 ### Fixed
@@ -156,7 +172,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform release binaries (Linux x86_64/aarch64, macOS x86_64/aarch64) via GitHub Actions.
 - CI pipeline with formatting, linting, and test checks.
 
-[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/ericflo/modelrelay/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ericflo/modelrelay/compare/v0.1.6...v0.2.0
 [0.1.6]: https://github.com/ericflo/modelrelay/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/ericflo/modelrelay/compare/v0.1.4...v0.1.5
