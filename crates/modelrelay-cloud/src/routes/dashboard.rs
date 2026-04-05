@@ -448,6 +448,49 @@ pub async fn workers(session: Session, State(state): State<Arc<CloudState>>) -> 
     }
 }
 
+// ─── GET /dashboard/stats ───────────────────────────────────────────────────
+//
+// Proxy endpoint: authenticated cloud users can poll relay stats via the
+// admin API without needing the raw admin token.
+
+/// GET /dashboard/stats — proxy to admin API `/admin/stats` for authenticated users.
+pub async fn stats(session: Session, State(state): State<Arc<CloudState>>) -> Response {
+    let _user_id = match require_user(&session).await {
+        Ok(id) => id,
+        Err(r) => return r,
+    };
+
+    let empty_stats = || serde_json::json!({"queue_depth": {}, "active_workers": 0});
+
+    let Some(ref admin_url) = state.admin_url else {
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(empty_stats())).into_response();
+    };
+    let Some(ref admin_token) = state.admin_token else {
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(empty_stats())).into_response();
+    };
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/admin/stats", admin_url.trim_end_matches('/'));
+    match client.get(&url).bearer_auth(admin_token).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => axum::Json(body).into_response(),
+            Err(e) => {
+                tracing::error!("stats proxy parse error: {e}");
+                axum::Json(empty_stats()).into_response()
+            }
+        },
+        Ok(resp) => {
+            let status = resp.status();
+            tracing::warn!("stats proxy upstream error: {status}");
+            axum::Json(empty_stats()).into_response()
+        }
+        Err(e) => {
+            tracing::error!("stats proxy request error: {e}");
+            axum::Json(empty_stats()).into_response()
+        }
+    }
+}
+
 // ─── GET /setup ─────────────────────────────────────────────────────────────
 
 /// GET /setup — serve the setup wizard with cloud context pre-filled for
@@ -711,7 +754,42 @@ fn subscriber_dashboard_html(
             .to_string()
     };
 
-    format!("{sub_card}\n{api_key_card}\n{onboarding_card}")
+    let stats_card = "\
+        <div class=\"card\">\
+          <h2>Relay Status</h2>\
+          <div id=\"relay-stats\">\
+            <p style=\"margin-top:8px;color:#8b949e;\">Loading relay stats&hellip;</p>\
+          </div>\
+          <script>\
+            (function(){\
+              fetch('/dashboard/stats',{credentials:'same-origin'})\
+                .then(function(r){return r.json();})\
+                .then(function(d){\
+                  var el=document.getElementById('relay-stats');\
+                  var qd=d.queue_depth||{};\
+                  var total=0;\
+                  for(var k in qd){if(qd.hasOwnProperty(k))total+=qd[k];}\
+                  var aw=d.active_workers||0;\
+                  el.innerHTML='<table class=\"info-table\" style=\"margin-top:8px;\">'\
+                    +'<tr><td>Active Workers</td><td>'+aw+'</td></tr>'\
+                    +'<tr><td>Queue Depth</td><td>'+total+'</td></tr>'\
+                    +'</table>';\
+                  if(Object.keys(qd).length>1){\
+                    var extra='<p style=\"margin-top:8px;color:#8b949e;font-size:0.9em;\">Per-model: ';\
+                    for(var m in qd){if(qd.hasOwnProperty(m))extra+=m+':&nbsp;'+qd[m]+'&ensp;';}\
+                    extra+='</p>';\
+                    el.innerHTML+=extra;\
+                  }\
+                })\
+                .catch(function(){\
+                  document.getElementById('relay-stats').innerHTML=\
+                    '<p style=\"margin-top:8px;color:#8b949e;\">Could not load relay stats.</p>';\
+                });\
+            })();\
+          </script>\
+        </div>";
+
+    format!("{sub_card}\n{api_key_card}\n{stats_card}\n{onboarding_card}")
 }
 
 /// Minimal HTML entity escaping for untrusted strings.
