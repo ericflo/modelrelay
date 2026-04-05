@@ -1109,7 +1109,7 @@ fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
 /// Shared HTML page shell used by the admin dashboard and commercial cloud routes.
 ///
 /// `logged_in` controls the nav links: when `true`, shows Dashboard + Pricing + Log out;
-/// when `false`, shows Dashboard + Pricing only (login/signup are reached via their own pages).
+/// when `false`, shows Pricing + Log in + Sign up + GitHub (matching the landing page nav).
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
@@ -1118,8 +1118,10 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
         <a href="/pricing">Pricing</a>
         <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
     } else {
-        r#"<a href="/dashboard">Dashboard</a>
-        <a href="/pricing">Pricing</a>"#
+        r#"<a href="/pricing">Pricing</a>
+        <a href="/login">Log in</a>
+        <a class="btn-signup" href="/signup">Sign up</a>
+        <a href="https://github.com/ericflo/modelrelay">GitHub</a>"#
     };
 
     format!(
@@ -1148,6 +1150,8 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     .nav-links form {{ display: inline; }}
     .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
     .nav-links button:hover {{ color: #e6edf3; }}
+    .nav-links .btn-signup {{ background: #7c3aed; color: #fff; padding: 6px 16px; border-radius: 6px; font-weight: 600; font-size: 0.9rem; }}
+    .nav-links .btn-signup:hover {{ background: #6d28d9; color: #fff; text-decoration: none; }}
 
     .content {{ padding: 60px 0; }}
     .content h1 {{ font-size: 2rem; margin-bottom: 24px; }}
