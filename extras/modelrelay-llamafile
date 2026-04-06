@@ -1,0 +1,664 @@
+#!/usr/bin/env bash
+# modelrelay-llamafile — Download, run, and relay llamafile models via ModelRelay
+# https://github.com/ericflo/modelrelay
+#
+# Usage:
+#   modelrelay-llamafile list                     List available models
+#   modelrelay-llamafile download <model>         Download a model
+#   modelrelay-llamafile run <model> [options]    Run a model locally
+#   modelrelay-llamafile serve <model> [options]  Run + connect to ModelRelay
+#   modelrelay-llamafile status                   Show running models
+#   modelrelay-llamafile stop [model|all]         Stop running model(s)
+#   modelrelay-llamafile rm <model>               Delete downloaded model
+#   modelrelay-llamafile doctor                   Check system readiness
+#
+# Environment:
+#   MODELRELAY_HOME     Base directory (default: ~/.modelrelay)
+#   PROXY_URL           ModelRelay proxy URL (for 'serve')
+#   WORKER_SECRET       ModelRelay shared secret (for 'serve')
+#   LLAMAFILE_PORT      Override default port (default: auto-assigned from 8200)
+
+set -euo pipefail
+
+VERSION="0.1.0"
+MODELRELAY_HOME="${MODELRELAY_HOME:-$HOME/.modelrelay}"
+LLAMAFILE_DIR="$MODELRELAY_HOME/llamafiles"
+BIN_DIR="$MODELRELAY_HOME/bin"
+PID_DIR="$MODELRELAY_HOME/run"
+LOG_DIR="$MODELRELAY_HOME/logs"
+MODELRELAY_RELEASE="v0.2.1"
+
+# --- Colors (disabled if not a terminal) ---
+if [ -t 1 ]; then
+  BOLD='\033[1m'    DIM='\033[2m'     RED='\033[0;31m'
+  GREEN='\033[0;32m' YELLOW='\033[0;33m' BLUE='\033[0;34m'
+  CYAN='\033[0;36m'  RESET='\033[0m'
+else
+  BOLD='' DIM='' RED='' GREEN='' YELLOW='' BLUE='' CYAN='' RESET=''
+fi
+
+# --- Model catalog ---
+# Scraped from https://mozilla-ai.github.io/llamafile/example_llamafiles/
+# Format: slug|display_name|size_bytes|size_human|license|filename|url
+read -r -d '' CATALOG <<'CATALOG_END' || true
+qwen3.5-0.8b|Qwen 3.5 0.8B Q8_0|1717986918|1.6 GB|Apache 2.0|Qwen3.5-0.8B-Q8_0.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/Qwen3.5-0.8B-Q8_0.llamafile
+qwen3.5-2b|Qwen 3.5 2B Q8_0|3435973837|3.2 GB|Apache 2.0|Qwen3.5-2B-Q8_0.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/Qwen3.5-2B-Q8_0.llamafile
+ministral-3b|Ministral 3 3B Instruct Q4_K_M|3650722202|3.4 GB|Apache 2.0|Ministral-3-3B-Instruct-2512-Q4_K_M.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/Ministral-3-3B-Instruct-2512-Q4_K_M.llamafile
+qwen3.5-4b|Qwen 3.5 4B Q5_K_S|4402341479|4.1 GB|Apache 2.0|Qwen3.5-4B-Q5_K_S.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/Qwen3.5-4B-Q5_K_S.llamafile
+llava-1.6-7b|LLaVA v1.6 Mistral 7B Q4_K_M|5691047117|5.3 GB|Apache 2.0|llava-v1.6-mistral-7b-Q4_K_M.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/llava-v1.6-mistral-7b-Q4_K_M.llamafile
+apertus-8b|Apertus 8B Instruct|6334130380|5.9 GB|Apache 2.0|Apertus-8B-Instruct-2509.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/Apertus-8B-Instruct-2509.llamafile
+qwen3.5-9b|Qwen 3.5 9B Q5_K_S|7945689498|7.4 GB|Apache 2.0|Qwen3.5-9B-Q5_K_S.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/Qwen3.5-9B-Q5_K_S.llamafile
+llava-1.6-7b-q8|LLaVA v1.6 Mistral 7B Q8_0|9019431322|8.4 GB|Apache 2.0|llava-v1.6-mistral-7b-Q8_0.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/llava-v1.6-mistral-7b-Q8_0.llamafile
+gpt-oss-20b-mxfp4|GPT-OSS 20B mxfp4|12884901888|12 GB|Apache 2.0|gpt-oss-20b-mxfp4.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/gpt-oss-20b-mxfp4.llamafile
+gpt-oss-20b|GPT-OSS 20B Q5_K_S|12884901888|12 GB|Apache 2.0|gpt-oss-20b-Q5_K_S.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/gpt-oss-20b-Q5_K_S.llamafile
+lfm2-24b|LFM2 24B A2B Q5_K_M|17179869184|16 GB|lfm1.0|LFM2-24B-A2B-Q5_K_M.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/LFM2-24B-A2B-Q5_K_M.llamafile
+qwen3.5-27b|Qwen 3.5 27B Q5_K_S|20401094656|19 GB|Apache 2.0|Qwen3.5-27B-Q5_K_S.llamafile|https://huggingface.co/mozilla-ai/llamafile_0.10.0/resolve/main/Qwen3.5-27B-Q5_K_S.llamafile
+llama-3.2-1b|LLaMA 3.2 1B Instruct Q6_K|1191182336|1.1 GB|LLaMA 3.2|Llama-3.2-1B-Instruct-Q6_K.llamafile|https://huggingface.co/Mozilla/Llama-3.2-1B-Instruct-llamafile/resolve/main/Llama-3.2-1B-Instruct-Q6_K.llamafile
+llama-3.2-3b|LLaMA 3.2 3B Instruct Q6_K|2812182938|2.6 GB|LLaMA 3.2|Llama-3.2-3B-Instruct.Q6_K.llamafile|https://huggingface.co/Mozilla/Llama-3.2-3B-Instruct-llamafile/resolve/main/Llama-3.2-3B-Instruct.Q6_K.llamafile
+llama-3.1-8b|LLaMA 3.1 8B Instruct Q4_K_M|5616050380|5.2 GB|LLaMA 3.1|Meta-Llama-3.1-8B-Instruct.Q4_K_M.llamafile|https://huggingface.co/Mozilla/Meta-Llama-3.1-8B-Instruct-llamafile/resolve/main/Meta-Llama-3.1-8B-Instruct.Q4_K_M.llamafile
+gemma-3-1b|Gemma 3 1B Instruct Q6_K|1417674752|1.3 GB|Gemma 3|google_gemma-3-1b-it-Q6_K.llamafile|https://huggingface.co/Mozilla/gemma-3-1b-it-llamafile/resolve/main/google_gemma-3-1b-it-Q6_K.llamafile
+gemma-3-4b|Gemma 3 4B Instruct Q6_K|3758096384|3.5 GB|Gemma 3|google_gemma-3-4b-it-Q6_K.llamafile|https://huggingface.co/Mozilla/gemma-3-4b-it-llamafile/resolve/main/google_gemma-3-4b-it-Q6_K.llamafile
+gemma-3-12b|Gemma 3 12B Instruct Q4_K_M|8170586112|7.6 GB|Gemma 3|google_gemma-3-12b-it-Q4_K_M.llamafile|https://huggingface.co/Mozilla/gemma-3-12b-it-llamafile/resolve/main/google_gemma-3-12b-it-Q4_K_M.llamafile
+qwq-32b|QwQ 32B Q4_K_M|8170586112|7.6 GB|Apache 2.0|Qwen_QwQ-32B-Q4_K_M.llamafile|https://huggingface.co/Mozilla/QwQ-32B-llamafile/resolve/main/Qwen_QwQ-32B-Q4_K_M.llamafile
+deepseek-r1-14b|DeepSeek R1 Distill Qwen 14B Q4_K_M|9986076262|9.3 GB|MIT|DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.llamafile|https://huggingface.co/Mozilla/DeepSeek-R1-Distill-Qwen-14B-llamafile/resolve/main/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.llamafile
+deepseek-r1-8b|DeepSeek R1 Distill LLaMA 8B Q4_K_M|5616050380|5.2 GB|MIT|DeepSeek-R1-Distill-Llama-8B-Q4_K_M.llamafile|https://huggingface.co/Mozilla/DeepSeek-R1-Distill-Llama-8B-llamafile/resolve/main/DeepSeek-R1-Distill-Llama-8B-Q4_K_M.llamafile
+llava-1.5-7b|LLaVA 1.5 7B Q4|4263510016|4.0 GB|LLaMA 2|llava-v1.5-7b-q4.llamafile|https://huggingface.co/Mozilla/llava-v1.5-7b-llamafile/resolve/main/llava-v1.5-7b-q4.llamafile
+mistral-7b|Mistral 7B Instruct v0.3 Q4_0|4746997350|4.4 GB|Apache 2.0|Mistral-7B-Instruct-v0.3.Q4_0.llamafile|https://huggingface.co/Mozilla/Mistral-7B-Instruct-v0.3-llamafile/resolve/main/Mistral-7B-Instruct-v0.3.Q4_0.llamafile
+granite-8b|Granite 3.2 8B Instruct Q4_K_M|5637144576|5.3 GB|Apache 2.0|granite-3.2-8b-instruct-Q4_K_M.llamafile|https://huggingface.co/Mozilla/granite-3.2-8b-instruct-llamafile/resolve/main/granite-3.2-8b-instruct-Q4_K_M.llamafile
+phi-3-mini|Phi-3 Mini 4K Instruct F16|8233369600|7.7 GB|Apache 2.0|Phi-3-mini-4k-instruct.F16.llamafile|https://huggingface.co/Mozilla/Phi-3-mini-4k-instruct-llamafile/resolve/main/Phi-3-mini-4k-instruct.F16.llamafile
+mixtral-8x7b|Mixtral 8x7B Instruct Q5_K_M|32244125491|30 GB|Apache 2.0|mixtral-8x7b-instruct-v0.1.Q5_K_M.llamafile|https://huggingface.co/Mozilla/Mixtral-8x7B-Instruct-v0.1-llamafile/resolve/main/mixtral-8x7b-instruct-v0.1.Q5_K_M.llamafile
+olmo-7b|OLMo 7B Q6_K|6098223104|5.7 GB|Apache 2.0|OLMo-7B-0424.Q6_K.llamafile|https://huggingface.co/Mozilla/OLMo-7B-0424-llamafile/resolve/main/OLMo-7B-0424.Q6_K.llamafile
+e5-mistral-7b|E5 Mistral 7B Instruct (Embedding)|5540192256|5.2 GB|MIT|e5-mistral-7b-instruct-Q5_K_M.llamafile|https://huggingface.co/Mozilla/e5-mistral-7b-instruct/resolve/main/e5-mistral-7b-instruct-Q5_K_M.llamafile
+mxbai-embed-large|mxbai Embed Large v1 F16 (Embedding)|751619276|0.7 GB|Apache 2.0|mxbai-embed-large-v1-f16.llamafile|https://huggingface.co/Mozilla/mxbai-embed-large-v1-llamafile/resolve/main/mxbai-embed-large-v1-f16.llamafile
+CATALOG_END
+
+# --- Helpers ---
+
+die() { echo -e "${RED}error:${RESET} $*" >&2; exit 1; }
+warn() { echo -e "${YELLOW}warning:${RESET} $*" >&2; }
+info() { echo -e "${BLUE}::${RESET} $*"; }
+ok() { echo -e "${GREEN}✓${RESET} $*"; }
+
+ensure_dirs() {
+  mkdir -p "$LLAMAFILE_DIR" "$BIN_DIR" "$PID_DIR" "$LOG_DIR"
+}
+
+# Look up a catalog entry by slug. Sets ENTRY_* variables.
+lookup_model() {
+  local slug="$1"
+  local line
+  line=$(echo "$CATALOG" | grep "^${slug}|" || true)
+  if [ -z "$line" ]; then
+    # Try fuzzy match
+    line=$(echo "$CATALOG" | grep -i "${slug}" | head -1 || true)
+  fi
+  if [ -z "$line" ]; then
+    die "Unknown model: ${slug}\nRun '$(basename "$0") list' to see available models."
+  fi
+  IFS='|' read -r ENTRY_SLUG ENTRY_NAME ENTRY_BYTES ENTRY_SIZE ENTRY_LICENSE ENTRY_FILENAME ENTRY_URL <<< "$line"
+}
+
+# Detect OS and arch for binary downloads
+detect_platform() {
+  local os arch
+  case "$(uname -s)" in
+    Linux*)  os=linux ;;
+    Darwin*) os=darwin ;;
+    MINGW*|MSYS*|CYGWIN*) os=windows ;;
+    *) die "Unsupported OS: $(uname -s)" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) die "Unsupported architecture: $(uname -m)" ;;
+  esac
+  PLATFORM_OS="$os"
+  PLATFORM_ARCH="$arch"
+}
+
+# Find a free port starting from a base
+find_free_port() {
+  local port="${1:-8200}"
+  while [ "$port" -lt 9000 ]; do
+    if ! (echo >/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+      echo "$port"
+      return
+    fi
+    port=$((port + 1))
+  done
+  die "No free ports found in range 8200-9000"
+}
+
+# Download with progress bar (curl with resume support)
+download_file() {
+  local url="$1" dest="$2" desc="$3"
+  local tmpfile="${dest}.part"
+
+  local resume_flag=""
+  if [ -f "$tmpfile" ]; then
+    local existing_size
+    existing_size=$(wc -c < "$tmpfile" 2>/dev/null || echo 0)
+    if [ "$existing_size" -gt 0 ]; then
+      info "Resuming download (${existing_size} bytes already downloaded)"
+      resume_flag="-C -"
+    fi
+  fi
+
+  echo -e "${CYAN}Downloading:${RESET} $desc"
+  if curl -L --fail --progress-bar $resume_flag -o "$tmpfile" "$url"; then
+    mv "$tmpfile" "$dest"
+    ok "Downloaded: $desc"
+  else
+    die "Download failed: $url"
+  fi
+}
+
+# Ensure modelrelay-worker binary is available
+ensure_worker_binary() {
+  local worker_bin="$BIN_DIR/modelrelay-worker"
+  if [ -x "$worker_bin" ]; then
+    return
+  fi
+
+  detect_platform
+  local asset_name="modelrelay-worker-${PLATFORM_OS}-${PLATFORM_ARCH}"
+  [ "$PLATFORM_OS" = "windows" ] && asset_name="${asset_name}.exe"
+  local url="https://github.com/ericflo/modelrelay/releases/download/${MODELRELAY_RELEASE}/${asset_name}"
+
+  info "Downloading modelrelay-worker ${MODELRELAY_RELEASE}..."
+  download_file "$url" "$worker_bin" "modelrelay-worker ${MODELRELAY_RELEASE} (${PLATFORM_OS}/${PLATFORM_ARCH})"
+  chmod +x "$worker_bin"
+}
+
+# Get PID file path for a model
+pid_file() { echo "$PID_DIR/${1}.pid"; }
+worker_pid_file() { echo "$PID_DIR/${1}-worker.pid"; }
+port_file() { echo "$PID_DIR/${1}.port"; }
+
+is_running() {
+  local pf
+  pf=$(pid_file "$1")
+  [ -f "$pf" ] && kill -0 "$(cat "$pf")" 2>/dev/null
+}
+
+wait_for_healthy() {
+  local port="$1" timeout="${2:-60}" slug="$3"
+  local elapsed=0
+  while [ "$elapsed" -lt "$timeout" ]; do
+    if curl -sf "http://127.0.0.1:${port}/health" >/dev/null 2>&1 || \
+       curl -sf "http://127.0.0.1:${port}/v1/models" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+    # Print a dot every 5 seconds
+    if [ $((elapsed % 5)) -eq 0 ]; then
+      printf "."
+    fi
+  done
+  echo
+  warn "Model $slug did not become healthy within ${timeout}s (may still be loading)"
+  return 1
+}
+
+# --- Commands ---
+
+cmd_list() {
+  local filter="${1:-}"
+  echo -e "${BOLD}Available llamafile models${RESET}"
+  echo -e "${DIM}Source: mozilla-ai.github.io/llamafile/example_llamafiles/${RESET}"
+  echo
+
+  printf "${BOLD}%-22s %-42s %8s  %-14s  %s${RESET}\n" "SLUG" "MODEL" "SIZE" "LICENSE" "STATUS"
+  echo "─────────────────────────────────────────────────────────────────────────────────────────────────────────"
+
+  while IFS='|' read -r slug name bytes size license filename url; do
+    [ -z "$slug" ] && continue
+    if [ -n "$filter" ] && ! echo "$slug $name" | grep -qi "$filter"; then
+      continue
+    fi
+
+    local status="${DIM}not downloaded${RESET}"
+    if [ -f "$LLAMAFILE_DIR/$filename" ]; then
+      if is_running "$slug"; then
+        local p
+        p=$(cat "$(port_file "$slug")" 2>/dev/null || echo "?")
+        status="${GREEN}● running :${p}${RESET}"
+      else
+        status="${CYAN}downloaded${RESET}"
+      fi
+    fi
+
+    printf "%-22s %-42s %8s  %-14s  %b\n" "$slug" "$name" "$size" "$license" "$status"
+  done <<< "$CATALOG"
+  echo
+  echo -e "${DIM}Usage: $(basename "$0") download <slug>    then    $(basename "$0") serve <slug>${RESET}"
+}
+
+cmd_download() {
+  [ -z "${1:-}" ] && die "Usage: $(basename "$0") download <model>"
+  ensure_dirs
+  lookup_model "$1"
+
+  local dest="$LLAMAFILE_DIR/$ENTRY_FILENAME"
+  if [ -f "$dest" ]; then
+    ok "$ENTRY_NAME is already downloaded"
+    echo -e "  ${DIM}${dest}${RESET}"
+    return
+  fi
+
+  download_file "$ENTRY_URL" "$dest" "$ENTRY_NAME ($ENTRY_SIZE)"
+  chmod +x "$dest"
+  ok "$ENTRY_NAME ready"
+}
+
+cmd_run() {
+  [ -z "${1:-}" ] && die "Usage: $(basename "$0") run <model> [--port PORT] [--gpu GPU_LAYERS] [--ctx CTX_SIZE] [-- extra_args...]"
+  ensure_dirs
+  local slug="$1"; shift
+  lookup_model "$slug"
+
+  if is_running "$ENTRY_SLUG"; then
+    local p
+    p=$(cat "$(port_file "$ENTRY_SLUG")" 2>/dev/null || echo "?")
+    ok "$ENTRY_NAME is already running on port $p"
+    return
+  fi
+
+  # Download if needed
+  local model_path="$LLAMAFILE_DIR/$ENTRY_FILENAME"
+  if [ ! -f "$model_path" ]; then
+    info "Model not downloaded yet, fetching..."
+    cmd_download "$ENTRY_SLUG"
+  fi
+
+  # Parse options
+  local port="" gpu_layers="999" ctx_size="4096" extra_args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --port) port="$2"; shift 2 ;;
+      --gpu)  gpu_layers="$2"; shift 2 ;;
+      --ctx)  ctx_size="$2"; shift 2 ;;
+      --)     shift; extra_args=("$@"); break ;;
+      *)      extra_args+=("$1"); shift ;;
+    esac
+  done
+
+  port="${port:-${LLAMAFILE_PORT:-$(find_free_port 8200)}}"
+
+  info "Starting $ENTRY_NAME on port $port..."
+  local logfile="$LOG_DIR/${ENTRY_SLUG}.log"
+
+  # llamafile flags: --server mode, no browser, set port, GPU layers, context
+  "$model_path" \
+    --server \
+    --nobrowser \
+    --port "$port" \
+    --host 0.0.0.0 \
+    -ngl "$gpu_layers" \
+    -c "$ctx_size" \
+    "${extra_args[@]}" \
+    > "$logfile" 2>&1 &
+
+  local llama_pid=$!
+  echo "$llama_pid" > "$(pid_file "$ENTRY_SLUG")"
+  echo "$port" > "$(port_file "$ENTRY_SLUG")"
+
+  # Wait for it to come up
+  printf "  Waiting for model to load"
+  if wait_for_healthy "$port" 120 "$ENTRY_SLUG"; then
+    echo
+    ok "$ENTRY_NAME running"
+    echo -e "  ${CYAN}API:${RESET}  http://127.0.0.1:${port}/v1/chat/completions"
+    echo -e "  ${CYAN}UI:${RESET}   http://127.0.0.1:${port}"
+    echo -e "  ${CYAN}Logs:${RESET} ${logfile}"
+    echo -e "  ${CYAN}PID:${RESET}  ${llama_pid}"
+  else
+    echo
+    warn "Model may still be loading. Check: tail -f $logfile"
+  fi
+}
+
+cmd_serve() {
+  [ -z "${1:-}" ] && die "Usage: $(basename "$0") serve <model> [--proxy-url URL] [--worker-secret SECRET] [--model-name NAME] [--concurrency N] [run options...]"
+  ensure_dirs
+  local slug="$1"; shift
+  lookup_model "$slug"
+
+  # Parse serve-specific options, pass rest through to run
+  local proxy_url="${PROXY_URL:-}" worker_secret="${WORKER_SECRET:-}"
+  local model_name="" concurrency="1" worker_name=""
+  local run_args=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --proxy-url)      proxy_url="$2"; shift 2 ;;
+      --worker-secret)  worker_secret="$2"; shift 2 ;;
+      --model-name)     model_name="$2"; shift 2 ;;
+      --concurrency)    concurrency="$2"; shift 2 ;;
+      --worker-name)    worker_name="$2"; shift 2 ;;
+      *)                run_args+=("$1"); shift ;;
+    esac
+  done
+
+  [ -z "$proxy_url" ] && die "Missing --proxy-url or PROXY_URL env var.\nThis is your ModelRelay proxy address (e.g. https://myrelay.example.com)"
+  [ -z "$worker_secret" ] && die "Missing --worker-secret or WORKER_SECRET env var.\nThis is the shared secret configured on your ModelRelay proxy."
+
+  model_name="${model_name:-$ENTRY_SLUG}"
+  worker_name="${worker_name:-llamafile-$(hostname -s 2>/dev/null || echo local)-${ENTRY_SLUG}}"
+
+  # Start the llamafile
+  cmd_run "$ENTRY_SLUG" "${run_args[@]}"
+  local port
+  port=$(cat "$(port_file "$ENTRY_SLUG")")
+
+  # Ensure we have the modelrelay-worker binary
+  ensure_worker_binary
+
+  # Start the worker
+  local worker_log="$LOG_DIR/${ENTRY_SLUG}-worker.log"
+  info "Connecting to ModelRelay at $proxy_url..."
+
+  "$BIN_DIR/modelrelay-worker" \
+    --proxy-url "$proxy_url" \
+    --worker-secret "$worker_secret" \
+    --backend-url "http://127.0.0.1:${port}" \
+    --models "$model_name" \
+    --worker-name "$worker_name" \
+    --max-concurrency "$concurrency" \
+    > "$worker_log" 2>&1 &
+
+  local worker_pid=$!
+  echo "$worker_pid" > "$(worker_pid_file "$ENTRY_SLUG")"
+
+  # Quick check that the worker didn't immediately exit
+  sleep 1
+  if kill -0 "$worker_pid" 2>/dev/null; then
+    echo
+    ok "Model relayed to $proxy_url"
+    echo -e "  ${CYAN}Model:${RESET}   $model_name"
+    echo -e "  ${CYAN}Worker:${RESET}  $worker_name"
+    echo -e "  ${CYAN}Local:${RESET}   http://127.0.0.1:${port}/v1/chat/completions"
+    echo -e "  ${CYAN}Remote:${RESET}  ${proxy_url}/v1/chat/completions (model: $model_name)"
+    echo -e "  ${CYAN}Logs:${RESET}   $worker_log"
+    echo
+    echo -e "  ${DIM}Test it:${RESET}"
+    echo -e "  curl ${proxy_url}/v1/chat/completions -H 'Content-Type: application/json' \\"
+    echo -e "    -d '{\"model\": \"${model_name}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}]}'"
+  else
+    warn "Worker exited immediately. Check: cat $worker_log"
+  fi
+}
+
+cmd_status() {
+  echo -e "${BOLD}Running models${RESET}"
+  echo
+
+  local found=false
+  for pf in "$PID_DIR"/*.pid; do
+    [ -f "$pf" ] || continue
+    local basename_pf
+    basename_pf=$(basename "$pf" .pid)
+    # Skip worker pids
+    [[ "$basename_pf" == *-worker ]] && continue
+
+    local slug="$basename_pf"
+    local pid
+    pid=$(cat "$pf")
+
+    if kill -0 "$pid" 2>/dev/null; then
+      found=true
+      local port
+      port=$(cat "$(port_file "$slug")" 2>/dev/null || echo "?")
+      lookup_model "$slug" 2>/dev/null || ENTRY_NAME="$slug"
+
+      local worker_status="${DIM}local only${RESET}"
+      local wpf
+      wpf=$(worker_pid_file "$slug")
+      if [ -f "$wpf" ] && kill -0 "$(cat "$wpf")" 2>/dev/null; then
+        worker_status="${GREEN}● relayed${RESET}"
+      fi
+
+      printf "  ${GREEN}●${RESET} %-22s  %-35s  port %-5s  pid %-7s  %b\n" "$slug" "$ENTRY_NAME" "$port" "$pid" "$worker_status"
+    else
+      # Stale PID file, clean up
+      rm -f "$pf" "$(port_file "$slug")" "$(worker_pid_file "$slug")"
+    fi
+  done
+
+  if ! $found; then
+    echo -e "  ${DIM}No models running.${RESET}"
+    echo -e "  ${DIM}Start one: $(basename "$0") run <model>${RESET}"
+  fi
+  echo
+
+  # Show disk usage
+  if [ -d "$LLAMAFILE_DIR" ]; then
+    local total
+    total=$(du -sh "$LLAMAFILE_DIR" 2>/dev/null | cut -f1)
+    local count
+    count=$(find "$LLAMAFILE_DIR" -name "*.llamafile" 2>/dev/null | wc -l)
+    echo -e "${DIM}Downloaded: ${count} models using ${total} in ${LLAMAFILE_DIR}${RESET}"
+  fi
+}
+
+cmd_stop() {
+  local target="${1:-}"
+  [ -z "$target" ] && die "Usage: $(basename "$0") stop <model|all>"
+
+  stop_one() {
+    local slug="$1"
+    # Stop worker first
+    local wpf
+    wpf=$(worker_pid_file "$slug")
+    if [ -f "$wpf" ]; then
+      local wpid
+      wpid=$(cat "$wpf")
+      if kill -0 "$wpid" 2>/dev/null; then
+        kill "$wpid" 2>/dev/null || true
+        info "Stopped worker for $slug (pid $wpid)"
+      fi
+      rm -f "$wpf"
+    fi
+
+    # Stop llamafile
+    local pf
+    pf=$(pid_file "$slug")
+    if [ -f "$pf" ]; then
+      local pid
+      pid=$(cat "$pf")
+      if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        # Give it a moment, then force if needed
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -9 "$pid" 2>/dev/null || true
+        fi
+        ok "Stopped $slug (pid $pid)"
+      fi
+      rm -f "$pf" "$(port_file "$slug")"
+    else
+      warn "No running instance of $slug found"
+    fi
+  }
+
+  if [ "$target" = "all" ]; then
+    for pf in "$PID_DIR"/*.pid; do
+      [ -f "$pf" ] || continue
+      local slug
+      slug=$(basename "$pf" .pid)
+      [[ "$slug" == *-worker ]] && continue
+      stop_one "$slug"
+    done
+  else
+    lookup_model "$target"
+    stop_one "$ENTRY_SLUG"
+  fi
+}
+
+cmd_rm() {
+  [ -z "${1:-}" ] && die "Usage: $(basename "$0") rm <model>"
+  lookup_model "$1"
+
+  if is_running "$ENTRY_SLUG"; then
+    info "Stopping running instance first..."
+    cmd_stop "$ENTRY_SLUG"
+  fi
+
+  local path="$LLAMAFILE_DIR/$ENTRY_FILENAME"
+  if [ -f "$path" ]; then
+    local size
+    size=$(du -h "$path" | cut -f1)
+    rm -f "$path"
+    ok "Deleted $ENTRY_NAME (freed $size)"
+  else
+    warn "$ENTRY_NAME is not downloaded"
+  fi
+}
+
+cmd_doctor() {
+  echo -e "${BOLD}System check${RESET}"
+  echo
+
+  # Check curl
+  if command -v curl >/dev/null 2>&1; then
+    ok "curl $(curl --version | head -1 | awk '{print $2}')"
+  else
+    echo -e "  ${RED}✗${RESET} curl not found (required for downloads)"
+  fi
+
+  # Check platform
+  detect_platform 2>/dev/null && ok "Platform: ${PLATFORM_OS}/${PLATFORM_ARCH}" || echo -e "  ${RED}✗${RESET} Unsupported platform"
+
+  # Check disk space
+  local avail
+  avail=$(df -h "$MODELRELAY_HOME" 2>/dev/null | tail -1 | awk '{print $4}')
+  ok "Disk available: ${avail:-unknown}"
+
+  # Check GPU
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local gpu_info
+    gpu_info=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)
+    ok "NVIDIA GPU: $gpu_info"
+  elif [ -d "/sys/class/drm" ] && ls /sys/class/drm/card*/device/vendor 2>/dev/null | head -1 | xargs cat 2>/dev/null | grep -q "0x1002"; then
+    ok "AMD GPU detected (ROCm support via llamafile)"
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    ok "Apple Silicon (Metal acceleration via llamafile)"
+  else
+    warn "No GPU detected — models will run on CPU (slower)"
+  fi
+
+  # Check modelrelay-worker
+  if [ -x "$BIN_DIR/modelrelay-worker" ]; then
+    ok "modelrelay-worker installed"
+  else
+    echo -e "  ${DIM}○${RESET} modelrelay-worker not yet downloaded (auto-downloaded on first 'serve')"
+  fi
+
+  # Check downloaded models
+  local count
+  count=$(find "$LLAMAFILE_DIR" -name "*.llamafile" 2>/dev/null | wc -l)
+  if [ "$count" -gt 0 ]; then
+    local total
+    total=$(du -sh "$LLAMAFILE_DIR" 2>/dev/null | cut -f1)
+    ok "$count model(s) downloaded ($total)"
+  else
+    echo -e "  ${DIM}○${RESET} No models downloaded yet"
+  fi
+
+  echo
+  echo -e "${DIM}Ready to go! Try: $(basename "$0") list${RESET}"
+}
+
+cmd_version() {
+  echo "modelrelay-llamafile ${VERSION}"
+  echo "ModelRelay worker:   ${MODELRELAY_RELEASE}"
+  echo "Catalog:             $(echo "$CATALOG" | wc -l | tr -d ' ') models"
+}
+
+cmd_help() {
+  cat <<EOF
+${BOLD}modelrelay-llamafile${RESET} — Run local AI models and relay them to ModelRelay
+
+${BOLD}USAGE${RESET}
+  $(basename "$0") <command> [options]
+
+${BOLD}COMMANDS${RESET}
+  list [filter]              List available models (optional text filter)
+  download <model>           Download a model
+  run <model> [options]      Start a model locally
+  serve <model> [options]    Start a model and connect it to ModelRelay
+  status                     Show running models
+  stop <model|all>           Stop running model(s)
+  rm <model>                 Delete a downloaded model
+  doctor                     Check system readiness
+  version                    Show version info
+
+${BOLD}RUN OPTIONS${RESET}
+  --port PORT                Override the listening port (default: auto)
+  --gpu LAYERS               GPU layers to offload (default: 999 = all)
+  --ctx SIZE                 Context window size (default: 4096)
+  -- [extra args]            Pass additional flags to llamafile
+
+${BOLD}SERVE OPTIONS${RESET} (in addition to run options)
+  --proxy-url URL            ModelRelay proxy URL (or set PROXY_URL)
+  --worker-secret SECRET     Shared secret (or set WORKER_SECRET)
+  --model-name NAME          Model name to advertise (default: slug)
+  --concurrency N            Max concurrent requests (default: 1)
+  --worker-name NAME         Worker instance name (default: auto)
+
+${BOLD}ENVIRONMENT${RESET}
+  MODELRELAY_HOME            Base directory (default: ~/.modelrelay)
+  PROXY_URL                  ModelRelay proxy URL
+  WORKER_SECRET              ModelRelay shared secret
+  LLAMAFILE_PORT             Default port for llamafile
+
+${BOLD}EXAMPLES${RESET}
+  # Browse models
+  $(basename "$0") list
+  $(basename "$0") list qwen
+
+  # Run locally
+  $(basename "$0") run llama-3.2-3b
+
+  # Serve through ModelRelay
+  export PROXY_URL=https://relay.example.com
+  export WORKER_SECRET=mysecret
+  $(basename "$0") serve qwen3.5-4b --model-name qwen3.5
+
+  # Run multiple models
+  $(basename "$0") serve llama-3.2-3b &
+  $(basename "$0") serve deepseek-r1-8b &
+  $(basename "$0") status
+
+${BOLD}HOW IT WORKS${RESET}
+  1. llamafile bundles model weights + inference engine in one executable
+  2. This script downloads and launches llamafiles as OpenAI-compatible servers
+  3. modelrelay-worker connects your local server to a ModelRelay proxy
+  4. Clients anywhere can now use your GPU through the proxy's stable API
+
+  Clients → ModelRelay Proxy ← worker ← llamafile (your machine)
+
+${BOLD}MORE INFO${RESET}
+  llamafile:   mozilla-ai.github.io/llamafile/
+  ModelRelay:  github.com/ericflo/modelrelay
+
+EOF
+}
+
+# --- Main dispatch ---
+ensure_dirs
+
+case "${1:-help}" in
+  list)     shift; cmd_list "${1:-}" ;;
+  download) shift; cmd_download "$@" ;;
+  run)      shift; cmd_run "$@" ;;
+  serve)    shift; cmd_serve "$@" ;;
+  status)   cmd_status ;;
+  stop)     shift; cmd_stop "$@" ;;
+  rm)       shift; cmd_rm "$@" ;;
+  doctor)   cmd_doctor ;;
+  version|-v|--version) cmd_version ;;
+  help|-h|--help) cmd_help ;;
+  *)        die "Unknown command: $1\nRun '$(basename "$0") help' for usage." ;;
+esac
