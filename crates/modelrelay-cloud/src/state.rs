@@ -30,7 +30,10 @@ impl RateLimiter {
     /// Returns `true` if the IP has exceeded the limit.
     pub fn is_limited(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
-        let mut map = self.attempts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self
+            .attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(timestamps) = map.get_mut(&ip) {
             timestamps.retain(|t| now.duration_since(*t) < self.window);
             timestamps.len() >= self.max_attempts
@@ -42,7 +45,10 @@ impl RateLimiter {
     /// Record an attempt for the given IP. Call this on *failed* auth attempts.
     pub fn record_attempt(&self, ip: IpAddr) {
         let now = Instant::now();
-        let mut map = self.attempts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self
+            .attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let timestamps = map.entry(ip).or_default();
         timestamps.retain(|t| now.duration_since(*t) < self.window);
         timestamps.push(now);
