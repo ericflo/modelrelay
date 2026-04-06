@@ -72,6 +72,7 @@ pub async fn signup_page(session: Session) -> Response {
 }
 
 /// POST /signup — create a new user account.
+#[allow(clippy::too_many_lines)]
 pub async fn signup_submit(
     headers: HeaderMap,
     session: Session,
