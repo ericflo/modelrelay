@@ -392,38 +392,26 @@ mod tests {
     fn client_ip_from_x_forwarded_for() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
-        assert_eq!(
-            client_ip(&headers),
-            "1.2.3.4".parse::<IpAddr>().unwrap()
-        );
+        assert_eq!(client_ip(&headers), "1.2.3.4".parse::<IpAddr>().unwrap());
     }
 
     #[test]
     fn client_ip_single_value() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
-        assert_eq!(
-            client_ip(&headers),
-            "10.0.0.1".parse::<IpAddr>().unwrap()
-        );
+        assert_eq!(client_ip(&headers), "10.0.0.1".parse::<IpAddr>().unwrap());
     }
 
     #[test]
     fn client_ip_missing_header_returns_localhost() {
         let headers = HeaderMap::new();
-        assert_eq!(
-            client_ip(&headers),
-            "127.0.0.1".parse::<IpAddr>().unwrap()
-        );
+        assert_eq!(client_ip(&headers), "127.0.0.1".parse::<IpAddr>().unwrap());
     }
 
     #[test]
     fn client_ip_invalid_value_returns_localhost() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
-        assert_eq!(
-            client_ip(&headers),
-            "127.0.0.1".parse::<IpAddr>().unwrap()
-        );
+        assert_eq!(client_ip(&headers), "127.0.0.1".parse::<IpAddr>().unwrap());
     }
 }
