@@ -212,10 +212,12 @@ The `extras/modelrelay-llamafile` script is a self-contained CLI for downloading
 # Browse models by category
 ./extras/modelrelay-llamafile list --tag reasoning
 
-# Download, run, and connect to your ModelRelay proxy
-./extras/modelrelay-llamafile serve qwen3.5-4b \
-  --proxy-url https://relay.example.com \
-  --worker-secret mysecret
+# Save your relay config once
+./extras/modelrelay-llamafile config set proxy-url https://relay.example.com
+./extras/modelrelay-llamafile config set worker-secret mysecret
+
+# Now just serve — no flags needed
+./extras/modelrelay-llamafile serve qwen3.5-4b
 
 # Verify it works end-to-end
 ./extras/modelrelay-llamafile test qwen3.5-4b

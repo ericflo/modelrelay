@@ -16,12 +16,13 @@
 #   modelrelay-llamafile import <path> [--slug NAME] Register a custom llamafile
 #   modelrelay-llamafile rm <model>                  Delete downloaded model
 #   modelrelay-llamafile update-catalog              Refresh model catalog from Mozilla
+#   modelrelay-llamafile config [set|get|unset|list]  Manage saved settings
 #   modelrelay-llamafile doctor                      Check system readiness
 #
 # Environment:
 #   MODELRELAY_HOME     Base directory (default: ~/.modelrelay)
-#   PROXY_URL           ModelRelay proxy URL (for 'serve')
-#   WORKER_SECRET       ModelRelay shared secret (for 'serve')
+#   PROXY_URL           ModelRelay proxy URL (for 'serve', overrides config)
+#   WORKER_SECRET       ModelRelay shared secret (for 'serve', overrides config)
 #   LLAMAFILE_PORT      Override default port (default: auto-assigned from 8200)
 
 set -euo pipefail
@@ -32,6 +33,7 @@ LLAMAFILE_DIR="$MODELRELAY_HOME/llamafiles"
 BIN_DIR="$MODELRELAY_HOME/bin"
 PID_DIR="$MODELRELAY_HOME/run"
 LOG_DIR="$MODELRELAY_HOME/logs"
+CONFIG_FILE="$MODELRELAY_HOME/config"
 CATALOG_FILE="$MODELRELAY_HOME/catalog.txt"
 CUSTOM_FILE="$MODELRELAY_HOME/custom.txt"
 MODELRELAY_RELEASE="v0.2.1"
@@ -88,6 +90,36 @@ ok() { echo -e "${GREEN}✓${RESET} $*"; }
 
 ensure_dirs() {
   mkdir -p "$LLAMAFILE_DIR" "$BIN_DIR" "$PID_DIR" "$LOG_DIR"
+}
+
+# --- Config persistence ---
+# Simple key=value file at $CONFIG_FILE. Keys use dot notation (e.g. proxy-url, worker-secret, port.MODEL).
+
+config_get() {
+  local key="$1"
+  if [ -f "$CONFIG_FILE" ]; then
+    sed -n "s/^${key}=//p" "$CONFIG_FILE" | tail -1
+  fi
+}
+
+config_set() {
+  local key="$1" value="$2"
+  ensure_dirs
+  if [ -f "$CONFIG_FILE" ] && grep -q "^${key}=" "$CONFIG_FILE"; then
+    # Update existing key (portable sed -i)
+    local tmp="${CONFIG_FILE}.tmp"
+    sed "s|^${key}=.*|${key}=${value}|" "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  else
+    echo "${key}=${value}" >> "$CONFIG_FILE"
+  fi
+}
+
+config_unset() {
+  local key="$1"
+  if [ -f "$CONFIG_FILE" ] && grep -q "^${key}=" "$CONFIG_FILE"; then
+    local tmp="${CONFIG_FILE}.tmp"
+    grep -v "^${key}=" "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  fi
 }
 
 # Load the active catalog: updated file if it exists, otherwise built-in
@@ -560,8 +592,10 @@ cmd_serve() {
   local slug="$1"; shift
   lookup_model "$slug"
 
-  local proxy_url="${PROXY_URL:-}" worker_secret="${WORKER_SECRET:-}"
-  local model_name="" concurrency="1" worker_name=""
+  local proxy_url="${PROXY_URL:-$(config_get proxy-url)}"
+  local worker_secret="${WORKER_SECRET:-$(config_get worker-secret)}"
+  local model_name="$(config_get model-name)" concurrency="${CONCURRENCY:-$(config_get concurrency)}" worker_name=""
+  concurrency="${concurrency:-1}"
   local run_args=()
 
   while [ $# -gt 0 ]; do
@@ -575,8 +609,8 @@ cmd_serve() {
     esac
   done
 
-  [ -z "$proxy_url" ] && die "Missing --proxy-url or PROXY_URL env var.\nThis is your ModelRelay proxy address (e.g. https://myrelay.example.com)"
-  [ -z "$worker_secret" ] && die "Missing --worker-secret or WORKER_SECRET env var.\nThis is the shared secret configured on your ModelRelay proxy."
+  [ -z "$proxy_url" ] && die "Missing --proxy-url, PROXY_URL env var, or config.\nSet once with: $(basename "$0") config set proxy-url https://myrelay.example.com"
+  [ -z "$worker_secret" ] && die "Missing --worker-secret, WORKER_SECRET env var, or config.\nSet once with: $(basename "$0") config set worker-secret YOUR_SECRET"
 
   model_name="${model_name:-$ENTRY_SLUG}"
   worker_name="${worker_name:-llamafile-$(hostname -s 2>/dev/null || echo local)-${ENTRY_SLUG}}"
@@ -1208,6 +1242,65 @@ cmd_version() {
   fi
 }
 
+cmd_config() {
+  local subcmd="${1:-}"
+  case "$subcmd" in
+    set)
+      [ -z "${2:-}" ] && die "Usage: $(basename "$0") config set <key> <value>\nKeys: proxy-url, worker-secret, model-name, concurrency, port.<model>"
+      [ -z "${3:-}" ] && die "Usage: $(basename "$0") config set $2 <value>"
+      config_set "$2" "$3"
+      ok "Set $2"
+      ;;
+    get)
+      [ -z "${2:-}" ] && die "Usage: $(basename "$0") config get <key>"
+      local val
+      val=$(config_get "$2")
+      if [ -n "$val" ]; then
+        echo "$val"
+      else
+        die "Key not set: $2"
+      fi
+      ;;
+    unset)
+      [ -z "${2:-}" ] && die "Usage: $(basename "$0") config unset <key>"
+      config_unset "$2"
+      ok "Unset $2"
+      ;;
+    list)
+      if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        echo -e "${BOLD}Config${RESET} ($CONFIG_FILE):"
+        while IFS='=' read -r key value; do
+          [ -z "$key" ] && continue
+          [[ "$key" == \#* ]] && continue
+          if [ "$key" = "worker-secret" ]; then
+            echo -e "  ${CYAN}${key}${RESET} = ${DIM}(hidden)${RESET}"
+          else
+            echo -e "  ${CYAN}${key}${RESET} = ${value}"
+          fi
+        done < "$CONFIG_FILE"
+      else
+        echo -e "${DIM}No config set. Use '$(basename "$0") config set <key> <value>' to save defaults.${RESET}"
+        echo
+        echo "Common keys:"
+        echo "  proxy-url        ModelRelay proxy URL"
+        echo "  worker-secret    Shared secret for your proxy"
+        echo "  model-name       Default model name to advertise"
+        echo "  concurrency      Default max concurrent requests"
+        echo "  port.<model>     Fixed port for a specific model (e.g. port.llama-3.2-3b)"
+      fi
+      ;;
+    path)
+      echo "$CONFIG_FILE"
+      ;;
+    "")
+      cmd_config list
+      ;;
+    *)
+      die "Unknown config subcommand: $subcmd\nUsage: $(basename "$0") config <set|get|unset|list|path>"
+      ;;
+  esac
+}
+
 cmd_help() {
   cat <<EOF
 ${BOLD}modelrelay-llamafile${RESET} — Run local AI models and relay them to ModelRelay
@@ -1234,6 +1327,12 @@ ${BOLD}COMMANDS${RESET}
     status                       Show running models
     logs <model> [-f] [--worker] View model or worker logs
 
+  ${BOLD}Configuration${RESET}
+    config                       Show saved settings
+    config set <key> <value>     Save a setting (proxy-url, worker-secret, etc.)
+    config get <key>             Read a setting
+    config unset <key>           Remove a setting
+
   ${BOLD}Extensibility${RESET}
     import <path> [--slug NAME]  Register a custom llamafile
     doctor                       Check system readiness
@@ -1246,16 +1345,19 @@ ${BOLD}RUN OPTIONS${RESET}
   -- [extra args]            Pass additional flags to llamafile
 
 ${BOLD}SERVE OPTIONS${RESET} (in addition to run options)
-  --proxy-url URL            ModelRelay proxy URL (or set PROXY_URL)
-  --worker-secret SECRET     Shared secret (or set WORKER_SECRET)
+  --proxy-url URL            ModelRelay proxy URL
+  --worker-secret SECRET     Shared secret
   --model-name NAME          Model name to advertise (default: slug)
   --concurrency N            Max concurrent requests (default: 1)
   --worker-name NAME         Worker instance name (default: auto)
 
+  Serve reads settings in order: flags > env vars > saved config.
+  Save defaults once with 'config set' and just run 'serve <model>'.
+
 ${BOLD}ENVIRONMENT${RESET}
   MODELRELAY_HOME            Base directory (default: ~/.modelrelay)
-  PROXY_URL                  ModelRelay proxy URL
-  WORKER_SECRET              ModelRelay shared secret
+  PROXY_URL                  ModelRelay proxy URL (overrides config)
+  WORKER_SECRET              ModelRelay shared secret (overrides config)
   LLAMAFILE_PORT             Default port for llamafile
 
 ${BOLD}TAGS${RESET}
@@ -1276,10 +1378,13 @@ ${BOLD}EXAMPLES${RESET}
   $(basename "$0") run llama-3.2-3b
   $(basename "$0") test llama-3.2-3b
 
-  # Serve through ModelRelay
-  export PROXY_URL=https://relay.example.com
-  export WORKER_SECRET=mysecret
+  # Save config once, serve forever
+  $(basename "$0") config set proxy-url https://relay.example.com
+  $(basename "$0") config set worker-secret mysecret
   $(basename "$0") serve qwen3.5-4b
+
+  # Or pass inline (flags override config)
+  $(basename "$0") serve qwen3.5-4b --proxy-url https://other.example.com
 
   # Run multiple models
   $(basename "$0") serve llama-3.2-3b &
@@ -1326,6 +1431,7 @@ case "${1:-help}" in
   rm|remove)       shift; cmd_rm "$@" ;;
   update-catalog)  cmd_update_catalog ;;
   doctor)          cmd_doctor ;;
+  config)          shift; cmd_config "$@" ;;
   version|-v|--version) cmd_version ;;
   help|-h|--help)  cmd_help ;;
   *)               die "Unknown command: $1\nRun '$(basename "$0") help' for usage." ;;
