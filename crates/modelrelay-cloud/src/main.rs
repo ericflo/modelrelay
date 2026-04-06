@@ -92,6 +92,10 @@ async fn main() {
         admin_url,
         admin_token,
         admin_emails,
+        rate_limiter: std::sync::Arc::new(crate::state::RateLimiter::new(
+            5,
+            std::time::Duration::from_secs(15 * 60),
+        )),
     });
 
     let mut app = Router::new()

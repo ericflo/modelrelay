@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use argon2::password_hash::SaltString;
@@ -5,6 +6,7 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::Form;
 use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use tower_sessions::Session;
@@ -12,6 +14,31 @@ use tower_sessions::Session;
 use crate::state::CloudState;
 
 use super::csrf;
+
+/// Extract the client IP from the `X-Forwarded-For` header (first entry),
+/// falling back to 127.0.0.1 if unavailable.
+fn client_ip(headers: &HeaderMap) -> IpAddr {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+}
+
+/// Render a 429 Too Many Requests page.
+fn rate_limit_response() -> Response {
+    let html = modelrelay_web::templates::page_shell(
+        "Too Many Requests",
+        r#"<div class="card">
+  <h2>Too Many Requests</h2>
+  <p>You've made too many login or sign-up attempts. Please wait 15 minutes and try again.</p>
+  <a href="/" class="btn">Back to Home</a>
+</div>"#,
+        false,
+    );
+    (StatusCode::TOO_MANY_REQUESTS, Html(html)).into_response()
+}
 
 #[derive(Deserialize)]
 pub struct SignupForm {
@@ -46,10 +73,16 @@ pub async fn signup_page(session: Session) -> Response {
 
 /// POST /signup — create a new user account.
 pub async fn signup_submit(
+    headers: HeaderMap,
     session: Session,
     State(state): State<Arc<CloudState>>,
     Form(form): Form<SignupForm>,
 ) -> Response {
+    let ip = client_ip(&headers);
+    if state.rate_limiter.is_limited(ip) {
+        return rate_limit_response();
+    }
+
     let csrf_field = csrf::hidden_field(&session).await;
 
     let Some(ref pool) = state.db else {
@@ -91,6 +124,7 @@ pub async fn signup_submit(
             .unwrap_or(None);
 
     if let Some((_, Some(_))) = existing {
+        state.rate_limiter.record_attempt(ip);
         return Html(modelrelay_web::templates::page_shell(
             "Sign Up",
             &signup_form_html(
@@ -181,10 +215,16 @@ pub async fn login_page(session: Session) -> Response {
 
 /// POST /login — verify credentials and set session.
 pub async fn login_submit(
+    headers: HeaderMap,
     session: Session,
     State(state): State<Arc<CloudState>>,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    let ip = client_ip(&headers);
+    if state.rate_limiter.is_limited(ip) {
+        return rate_limit_response();
+    }
+
     let csrf_field = csrf::hidden_field(&session).await;
 
     let Some(ref pool) = state.db else {
@@ -206,6 +246,7 @@ pub async fn login_submit(
             .unwrap_or(None);
 
     let Some((user_id, Some(stored_hash))) = row else {
+        state.rate_limiter.record_attempt(ip);
         return Html(modelrelay_web::templates::page_shell(
             "Log In",
             &login_form_html(Some("Invalid email or password."), &csrf_field),
@@ -215,6 +256,7 @@ pub async fn login_submit(
     };
 
     if !verify_password(&form.password, &stored_hash) {
+        state.rate_limiter.record_attempt(ip);
         return Html(modelrelay_web::templates::page_shell(
             "Log In",
             &login_form_html(Some("Invalid email or password."), &csrf_field),
@@ -344,5 +386,44 @@ mod tests {
         let hashed = hash_password("").expect("hash should succeed");
         assert!(verify_password("", &hashed));
         assert!(!verify_password("notempty", &hashed));
+    }
+
+    #[test]
+    fn client_ip_from_x_forwarded_for() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
+        assert_eq!(
+            client_ip(&headers),
+            "1.2.3.4".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn client_ip_single_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        assert_eq!(
+            client_ip(&headers),
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn client_ip_missing_header_returns_localhost() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            client_ip(&headers),
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn client_ip_invalid_value_returns_localhost() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        assert_eq!(
+            client_ip(&headers),
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        );
     }
 }
