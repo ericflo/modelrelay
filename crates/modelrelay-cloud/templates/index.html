@@ -93,6 +93,19 @@
     .code-example .comment { color: #484f58; }
     .code-example .highlight { color: #7c3aed; font-weight: 600; }
 
+    /* Code Tabs */
+    .code-tabs { display: flex; gap: 0; margin-bottom: -1px; position: relative; z-index: 1; }
+    .code-tab {
+      padding: 10px 20px; font-size: 0.85rem; font-weight: 600; color: #8b949e;
+      background: transparent; border: 1px solid transparent; border-bottom: none;
+      border-radius: 8px 8px 0 0; cursor: pointer; font-family: inherit;
+      transition: color 0.15s, background 0.15s;
+    }
+    .code-tab:hover { color: #e6edf3; }
+    .code-tab.active { color: #e6edf3; background: #161b22; border-color: #21262d; }
+    .code-panel { display: none; }
+    .code-panel.active { display: block; }
+
     /* Pricing */
     .pricing { padding: 80px 0; border-top: 1px solid #21262d; text-align: center; }
     .pricing h2 { font-size: 2rem; margin-bottom: 16px; }
@@ -198,8 +211,8 @@
         </div>
         <div class="step">
           <div class="step-number">2</div>
-          <h3>Connect Your GPU Worker</h3>
-          <p>Run the open-source worker on any machine with a GPU. It connects to ModelRelay via WebSocket &mdash; no inbound ports needed.</p>
+          <h3>Run a Model</h3>
+          <p>Use the <strong>llamafile CLI</strong> for zero-setup on any machine (no GPU required), or connect a <strong>GPU worker</strong> for maximum performance. Both connect via WebSocket &mdash; no inbound ports needed.</p>
         </div>
         <div class="step">
           <div class="step-number">3</div>
@@ -207,9 +220,25 @@
           <p>Change one line &mdash; set your <code style="color:#7c3aed">base_url</code> to ModelRelay. Every request is routed to your own workers.</p>
         </div>
       </div>
-      <div class="code-example">
-        <div class="code-label">Python &mdash; OpenAI SDK</div>
-        <pre><span class="comment"># Just change the base_url to your ModelRelay endpoint</span>
+      <div style="max-width: 680px; margin: 0 auto;">
+        <div class="code-tabs">
+          <button class="code-tab active" onclick="switchTab('llamafile')">llamafile CLI</button>
+          <button class="code-tab" onclick="switchTab('python')">Python SDK</button>
+        </div>
+        <div class="code-example" id="panel-llamafile" style="border-radius: 0 12px 12px 12px;">
+          <div class="code-label">Zero-setup &mdash; no GPU required</div>
+          <pre><span class="comment"># Install the CLI</span>
+curl -fsSL <span class="highlight">https://raw.githubusercontent.com/ericflo/modelrelay/main/extras/modelrelay-llamafile</span> \
+  -o modelrelay-llamafile &amp;&amp; chmod +x modelrelay-llamafile
+
+<span class="comment"># Download and serve a model through ModelRelay</span>
+./modelrelay-llamafile config set proxy_url <span class="highlight">https://api.modelrelay.io</span>
+./modelrelay-llamafile config set worker_secret <span class="highlight">your-worker-secret</span>
+./modelrelay-llamafile serve <span class="highlight">qwen3.5-2b</span></pre>
+        </div>
+        <div class="code-example code-panel" id="panel-python" style="border-radius: 0 12px 12px 12px;">
+          <div class="code-label">Python &mdash; OpenAI SDK</div>
+          <pre><span class="comment"># Just change the base_url to your ModelRelay endpoint</span>
 from openai import OpenAI
 
 client = OpenAI(
@@ -222,7 +251,20 @@ response = client.chat.completions.create(
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)</pre>
+        </div>
       </div>
+      <script>
+        function switchTab(tab) {
+          document.querySelectorAll('.code-tab').forEach(function(t) { t.classList.remove('active'); });
+          document.getElementById('panel-llamafile').style.display = 'none';
+          document.getElementById('panel-llamafile').classList.remove('active');
+          document.getElementById('panel-python').style.display = 'none';
+          document.getElementById('panel-python').classList.remove('active');
+          document.getElementById('panel-' + tab).style.display = 'block';
+          document.getElementById('panel-' + tab).classList.add('active');
+          event.currentTarget.classList.add('active');
+        }
+      </script>
     </div>
   </section>
 
