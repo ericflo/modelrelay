@@ -21,6 +21,10 @@ fn test_state() -> Arc<CloudState> {
         admin_url: None,
         admin_token: None,
         admin_emails: vec![],
+        rate_limiter: std::sync::Arc::new(modelrelay_cloud::state::RateLimiter::new(
+            5,
+            std::time::Duration::from_secs(15 * 60),
+        )),
     })
 }
 
@@ -337,6 +341,10 @@ async fn webhook_without_secret_configured_returns_500() {
         admin_url: None,
         admin_token: None,
         admin_emails: vec![],
+        rate_limiter: std::sync::Arc::new(modelrelay_cloud::state::RateLimiter::new(
+            5,
+            std::time::Duration::from_secs(15 * 60),
+        )),
     });
 
     let resp = routes::router(state)
