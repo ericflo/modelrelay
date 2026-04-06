@@ -206,20 +206,30 @@ The setup wizard at `/setup` in the web UI walks through this interactively with
 The `extras/modelrelay-llamafile` script is a self-contained CLI for downloading, running, and relaying [llamafile](https://mozilla-ai.github.io/llamafile/) models through ModelRelay. No dependencies beyond bash and curl.
 
 ```bash
-# Browse available models (29 curated from Mozilla's llamafile catalog)
-./extras/modelrelay-llamafile list
+# See what fits your hardware
+./extras/modelrelay-llamafile recommend
 
-# Download and run a model locally
-./extras/modelrelay-llamafile run llama-3.2-3b
+# Browse models by category
+./extras/modelrelay-llamafile list --tag reasoning
 
 # Download, run, and connect to your ModelRelay proxy
 ./extras/modelrelay-llamafile serve qwen3.5-4b \
   --proxy-url https://relay.example.com \
   --worker-secret mysecret
 
+# Verify it works end-to-end
+./extras/modelrelay-llamafile test qwen3.5-4b
+
 # Manage running models
 ./extras/modelrelay-llamafile status
+./extras/modelrelay-llamafile logs qwen3.5-4b -f
 ./extras/modelrelay-llamafile stop all
+
+# Import your own llamafiles
+./extras/modelrelay-llamafile import ./my-model.llamafile --slug my-model
+
+# Refresh catalog when Mozilla publishes new models
+./extras/modelrelay-llamafile update-catalog
 ```
 
 Run `./extras/modelrelay-llamafile help` for full usage, or `./extras/modelrelay-llamafile doctor` to check system readiness.
