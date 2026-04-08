@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-08
+
+### Fixed
+
+- Enable TLS for worker WebSocket connections — `tokio-tungstenite` was missing `rustls-tls-webpki-roots` feature, causing "TLS support not compiled in" errors when connecting to `wss://` proxy URLs (#242)
+
+### Changed
+
+- Rate limiting on auth endpoints (#238)
+- Add llamafile CLI quickstart to landing page (#240)
+- Add Docs link to landing page nav and footer (#241)
+
 ## [0.2.1] - 2026-04-05
 
 ### Added

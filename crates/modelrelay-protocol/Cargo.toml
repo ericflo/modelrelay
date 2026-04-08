@@ -1,6 +1,6 @@
 [package]
 name = "modelrelay-protocol"
-version = "0.2.1"
+version = "0.2.2"
 description = "WebSocket protocol types shared between the proxy server and worker daemon"
 keywords = ["llm", "protocol", "websocket", "proxy", "worker"]
 categories = ["network-programming", "encoding"]
