@@ -24,7 +24,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 subtle = "2.6"
 tokio = { version = "1.51", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "uuid", "chrono"] }
 async-trait = "0.1"
