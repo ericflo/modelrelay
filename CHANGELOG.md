@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-04-09
+
+### Added
+
+- Worker discovers backend models at startup instead of registering literal `*`
+- New `/integrate` page with copy-paste setup instructions for coding agents (Pi, Codex CLI, Aider, Continue.dev, Cursor) and SDKs (curl, Python, Node.js, Go)
+- Dynamic code snippets that update with user's server URL, API key, and model name
+
+### Fixed
+
+- `/v1/models` no longer returns `*` as a model ID
+- Server-side filtering of wildcard entries from models list
+
 ## [0.2.6] - 2026-04-09
 
 ### Added

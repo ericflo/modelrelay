@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-cloud"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "argon2",
  "axum",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-contract-tests"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "axum",
  "modelrelay-protocol",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-protocol"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-server"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-web"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "axum",
  "serde",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-worker"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "axum",
  "clap",
@@ -2405,9 +2405,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.51.0"
+version = "1.51.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bd1c4c0fc4a7ab90fc15ef6daaa3ec3b893f004f915f2392557ed23237820cd"
+checksum = "f66bf9585cda4b724d3e78ab34b73fb2bbaba9011b9bfdf69dc836382ea13b8c"
 dependencies = [
  "bytes",
  "libc",
