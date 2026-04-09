@@ -538,6 +538,47 @@ pub async fn setup(session: Session, State(state): State<Arc<CloudState>>) -> Re
     .into_response()
 }
 
+// ─── GET /integrate ──────────────────────────────────────────────────────────
+
+/// GET /integrate — show integration snippets for tools, agents, and SDKs.
+pub async fn integrate(session: Session, State(state): State<Arc<CloudState>>) -> Response {
+    // If the user is logged in, inject cloud config; otherwise serve the plain page.
+    let cloud_config = if let Ok(user_id) = require_user(&session).await {
+        let pool = state.db.as_ref();
+        let api_key: Option<String> = if let Some(pool) = pool {
+            sqlx::query_scalar(
+                "SELECT raw_key FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL \
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+
+        Some(modelrelay_web::templates::CloudWizardConfig {
+            server_url: state
+                .admin_url
+                .as_deref()
+                .unwrap_or("https://api.modelrelay.io")
+                .to_string(),
+            worker_secret: api_key.clone(),
+            api_key,
+            workers_poll_url: "/dashboard/workers".to_string(),
+        })
+    } else {
+        None
+    };
+
+    Html(modelrelay_web::templates::integrate_page_with_config(
+        cloud_config.as_ref(),
+    ))
+    .into_response()
+}
+
 // ─── HTML rendering ─────────────────────────────────────────────────────────
 
 fn error_page(message: &str) -> Html<String> {
