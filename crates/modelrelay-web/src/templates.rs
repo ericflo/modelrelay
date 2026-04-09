@@ -1527,6 +1527,42 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     }
     .hint-box strong { color:#e6edf3; }
 
+    .demo-card {
+      background:#161b22; border:1px solid #21262d; border-radius:12px;
+      padding:24px; margin-bottom:24px;
+    }
+    .demo-input-row {
+      display:flex; gap:8px; margin-bottom:16px;
+    }
+    .demo-input-row input {
+      flex:1; padding:10px 14px; background:#0d1117; border:1px solid #30363d;
+      border-radius:8px; color:#e6edf3; font-size:0.95rem; font-family:inherit;
+    }
+    .demo-input-row input:focus { outline:none; border-color:#7c3aed; }
+    .demo-btn { padding:10px 20px; font-size:0.9rem; white-space:nowrap; }
+    .demo-btn-stop { background:#dc2626; }
+    .demo-btn-stop:hover { background:#b91c1c; }
+    .demo-btn:disabled { opacity:0.5; cursor:not-allowed; }
+    .demo-output {
+      background:#0d1117; border:1px solid #30363d; border-radius:8px;
+      padding:16px; min-height:120px; max-height:400px; overflow-y:auto;
+      font-family:'SFMono-Regular',Consolas,monospace; font-size:0.88rem;
+      line-height:1.7; color:#e6edf3; white-space:pre-wrap; word-break:break-word;
+    }
+    .demo-placeholder { color:#484f58; font-style:italic; }
+    .demo-cursor {
+      display:inline-block; width:2px; height:1em; background:#7c3aed;
+      vertical-align:text-bottom; animation:blink 1s step-end infinite;
+    }
+    @keyframes blink { 50% { opacity:0; } }
+    .demo-meta {
+      display:flex; justify-content:space-between; align-items:center;
+      margin-top:8px; font-size:0.8rem; color:#8b949e;
+    }
+    .demo-toggle { display:flex; align-items:center; gap:6px; cursor:pointer; }
+    .demo-toggle input { accent-color:#7c3aed; }
+    .demo-status { font-family:'SFMono-Regular',Consolas,monospace; }
+
     @media (max-width:600px) {
       .integrate-inputs { flex-direction:column; }
       .integrate-inputs .field { min-width:100%; }
@@ -1534,6 +1570,7 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
       .int-tabs .tab { padding:6px 10px; font-size:0.78rem; }
       .ref-row { flex-direction:column; align-items:stretch; gap:4px; }
       .ref-row .ref-label { min-width:auto; }
+      .demo-input-row { flex-direction:column; }
     }
     ";
 
@@ -1633,6 +1670,135 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
   });
 
   updateSnippets();
+
+  // ── Live Demo ──
+  const demoPrompt = $('#demo-prompt');
+  const demoSend = $('#demo-send');
+  const demoStop = $('#demo-stop');
+  const demoOutput = $('#demo-output');
+  const demoStatus = $('#demo-status');
+  const demoStreamToggle = $('#demo-stream-toggle');
+  let demoAbort = null;
+
+  demoPrompt.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !demoSend.disabled) runDemo();
+  });
+  demoSend.addEventListener('click', runDemo);
+  demoStop.addEventListener('click', () => {
+    if (demoAbort) demoAbort.abort();
+  });
+
+  async function runDemo() {
+    const url = sv();
+    const key = ak();
+    const model = mn();
+    if (!key || key === 'your-api-key') {
+      demoOutput.innerHTML = '<span class="demo-placeholder">Please enter your API key above first.</span>';
+      return;
+    }
+    if (!model || model === 'your-model-name') {
+      demoOutput.innerHTML = '<span class="demo-placeholder">Please enter a model name above first.</span>';
+      return;
+    }
+    const prompt = demoPrompt.value.trim();
+    if (!prompt) return;
+
+    const streaming = demoStreamToggle.checked;
+    demoAbort = new AbortController();
+    demoSend.disabled = true;
+    demoSend.style.display = 'none';
+    demoStop.style.display = '';
+    demoOutput.textContent = '';
+    demoStatus.textContent = streaming ? 'Streaming...' : 'Waiting...';
+    const t0 = performance.now();
+
+    try {
+      const res = await fetch(url + '/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + key,
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [{ role: 'user', content: prompt }],
+          stream: streaming,
+        }),
+        signal: demoAbort.signal,
+      });
+
+      if (!res.ok) {
+        const err = await res.text();
+        demoOutput.textContent = 'Error ' + res.status + ': ' + err;
+        demoStatus.textContent = 'Error';
+        return;
+      }
+
+      if (!streaming) {
+        const data = await res.json();
+        const content = data.choices?.[0]?.message?.content || '(empty response)';
+        demoOutput.textContent = content;
+        const ms = Math.round(performance.now() - t0);
+        demoStatus.textContent = 'Done in ' + ms + 'ms';
+        return;
+      }
+
+      // SSE streaming
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let tokens = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            const chunk = JSON.parse(payload);
+            const delta = chunk.choices?.[0]?.delta?.content;
+            if (delta) {
+              tokens++;
+              // Remove cursor if present, add content, re-add cursor
+              const cursor = demoOutput.querySelector('.demo-cursor');
+              if (cursor) cursor.remove();
+              demoOutput.appendChild(document.createTextNode(delta));
+              const c = document.createElement('span');
+              c.className = 'demo-cursor';
+              demoOutput.appendChild(c);
+              demoOutput.scrollTop = demoOutput.scrollHeight;
+            }
+          } catch(_) {}
+        }
+        const ms = Math.round(performance.now() - t0);
+        demoStatus.textContent = tokens + ' chunks \u00b7 ' + ms + 'ms';
+      }
+      // Remove cursor when done
+      const cursor = demoOutput.querySelector('.demo-cursor');
+      if (cursor) cursor.remove();
+      const ms = Math.round(performance.now() - t0);
+      demoStatus.textContent = 'Done: ' + tokens + ' chunks in ' + ms + 'ms';
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        demoStatus.textContent = 'Stopped';
+        const cursor = demoOutput.querySelector('.demo-cursor');
+        if (cursor) cursor.remove();
+      } else {
+        demoOutput.textContent = 'Error: ' + e.message;
+        demoStatus.textContent = 'Error';
+      }
+    } finally {
+      demoSend.disabled = false;
+      demoSend.style.display = '';
+      demoStop.style.display = 'none';
+      demoAbort = null;
+    }
+  }
 })();
     "#;
 
@@ -1733,6 +1899,86 @@ func main() {
         },
     )
     fmt.Println(resp.Choices[0].Message.Content)
+}";
+
+    // ── Streaming snippet templates ──
+
+    let snippet_curl_stream = r"curl -N SERVER_URL/v1/chat/completions \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Authorization: Bearer API_KEY&quot; \
+  -d &#x27;{
+    &quot;model&quot;: &quot;MODEL_NAME&quot;,
+    &quot;stream&quot;: true,
+    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}]
+  }&#x27;";
+
+    let snippet_python_stream = r"from openai import OpenAI
+
+client = OpenAI(
+    base_url=&quot;SERVER_URL/v1&quot;,
+    api_key=&quot;API_KEY&quot;,
+)
+
+stream = client.chat.completions.create(
+    model=&quot;MODEL_NAME&quot;,
+    messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}],
+    stream=True,
+)
+for chunk in stream:
+    delta = chunk.choices[0].delta.content
+    if delta:
+        print(delta, end=&quot;&quot;, flush=True)
+print()";
+
+    let snippet_node_stream = r"import OpenAI from &quot;openai&quot;;
+
+const client = new OpenAI({
+  baseURL: &quot;SERVER_URL/v1&quot;,
+  apiKey: &quot;API_KEY&quot;,
+});
+
+const stream = await client.chat.completions.create({
+  model: &quot;MODEL_NAME&quot;,
+  messages: [{ role: &quot;user&quot;, content: &quot;Hello!&quot; }],
+  stream: true,
+});
+for await (const chunk of stream) {
+  const delta = chunk.choices?.[0]?.delta?.content;
+  if (delta) process.stdout.write(delta);
+}
+console.log();";
+
+    let snippet_go_stream = r"package main
+
+import (
+    &quot;context&quot;
+    &quot;fmt&quot;
+    &quot;io&quot;
+    openai &quot;github.com/sashabaranov/go-openai&quot;
+)
+
+func main() {
+    cfg := openai.DefaultConfig(&quot;API_KEY&quot;)
+    cfg.BaseURL = &quot;SERVER_URL/v1&quot;
+    client := openai.NewClientWithConfig(cfg)
+
+    stream, _ := client.CreateChatCompletionStream(
+        context.Background(),
+        openai.ChatCompletionRequest{
+            Model: &quot;MODEL_NAME&quot;,
+            Messages: []openai.ChatCompletionMessage{
+                {Role: &quot;user&quot;, Content: &quot;Hello!&quot;},
+            },
+        },
+    )
+    defer stream.Close()
+    for {
+        resp, err := stream.Recv()
+        if err == io.EOF { break }
+        if err != nil { break }
+        fmt.Print(resp.Choices[0].Delta.Content)
+    }
+    fmt.Println()
 }";
 
     format!(
@@ -1900,6 +2146,55 @@ func main() {
             <div class="code-block" data-snippet="{snippet_go}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
           </div>
 
+        </div>
+      </div>
+
+      <!-- ═══ Streaming ═══ -->
+      <div class="section-heading"><span class="icon">&#9889;</span> Streaming</div>
+      <div class="tab-section">
+        <div class="int-tabs">
+          <div class="tab active" data-tab="stream-curl">curl</div>
+          <div class="tab" data-tab="stream-python">Python</div>
+          <div class="tab" data-tab="stream-node">Node.js</div>
+          <div class="tab" data-tab="stream-go">Go</div>
+        </div>
+        <div class="int-panel">
+
+          <div class="int-content active" data-tab="stream-curl">
+            <h3>curl <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">with -N for unbuffered output</span></h3>
+            <div class="code-block" data-snippet="{snippet_curl_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <div class="int-content" data-tab="stream-python">
+            <h3>Python <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">pip install openai</span></h3>
+            <div class="code-block" data-snippet="{snippet_python_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <div class="int-content" data-tab="stream-node">
+            <h3>Node.js / TypeScript <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">npm install openai</span></h3>
+            <div class="code-block" data-snippet="{snippet_node_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <div class="int-content" data-tab="stream-go">
+            <h3>Go <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">github.com/sashabaranov/go-openai</span></h3>
+            <div class="code-block" data-snippet="{snippet_go_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ═══ Live Demo ═══ -->
+      <div class="section-heading"><span class="icon">&#128640;</span> Try It Live</div>
+      <div class="demo-card">
+        <div class="demo-input-row">
+          <input id="demo-prompt" type="text" placeholder="Type a message..." value="Say hello and tell me a fun fact.">
+          <button id="demo-send" class="btn demo-btn">Send</button>
+          <button id="demo-stop" class="btn demo-btn demo-btn-stop" style="display:none;">Stop</button>
+        </div>
+        <div id="demo-output" class="demo-output"><span class="demo-placeholder">Response will stream here&hellip;</span></div>
+        <div class="demo-meta">
+          <span id="demo-status" class="demo-status"></span>
+          <label class="demo-toggle"><input type="checkbox" id="demo-stream-toggle" checked> Stream</label>
         </div>
       </div>
 
