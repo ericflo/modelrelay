@@ -794,6 +794,7 @@ impl ProxyServerCore {
             .filter_map(|worker_id| self.workers.get(worker_id))
             .filter(|worker| worker.provider == provider)
             .flat_map(|worker| worker.models.iter())
+            .filter(|model| model.as_str() != "*")
             .filter(|model| seen.insert((*model).clone()))
             .cloned()
             .collect()
@@ -2021,5 +2022,23 @@ mod tests {
             core.submit_request("openai", "any-random-model"),
             SubmissionOutcome::Dispatched(_)
         ));
+    }
+
+    #[test]
+    fn provider_models_filters_out_wildcard() {
+        let mut core = ProxyServerCore::new();
+        core.register_worker(
+            "openai",
+            register_message("gpu-a", &["gpt-4", "*", "gpt-3.5"], 1, Some(0)),
+        );
+        core.register_worker("openai", register_message("gpu-b", &["gpt-4"], 1, Some(0)));
+
+        let models = core.provider_models("openai");
+        assert!(
+            !models.contains(&"*".to_string()),
+            "wildcard must be filtered out"
+        );
+        assert!(models.contains(&"gpt-4".to_string()));
+        assert!(models.contains(&"gpt-3.5".to_string()));
     }
 }

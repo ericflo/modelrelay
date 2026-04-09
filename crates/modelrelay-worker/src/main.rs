@@ -156,7 +156,7 @@ async fn main() {
         )
         .init();
 
-    let config = WorkerDaemonConfig {
+    let mut config = WorkerDaemonConfig {
         proxy_base_url: proxy_url.clone(),
         provider: provider.clone(),
         worker_secret: worker_secret.clone(),
@@ -166,11 +166,14 @@ async fn main() {
         backend_base_url: backend_url.clone(),
     };
 
+    // If configured with wildcard models, discover actual models from backend.
+    config.resolve_wildcard_models().await;
+
     tracing::info!(
         proxy = %proxy_url,
         provider = %provider,
         name = %worker_name,
-        models = %models.join(","),
+        models = %config.models.join(","),
         concurrency = max_concurrency,
         backend = %backend_url,
         "modelrelay-worker starting"

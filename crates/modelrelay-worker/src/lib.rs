@@ -40,6 +40,37 @@ pub struct WorkerDaemonConfig {
 }
 
 impl WorkerDaemonConfig {
+    /// If the configured models list contains `"*"`, queries the backend's
+    /// `/v1/models` endpoint and replaces the wildcard with the actual model
+    /// IDs reported by the backend.  Falls back to the original list when the
+    /// backend does not support the endpoint or returns an error.
+    pub async fn resolve_wildcard_models(&mut self) {
+        if !self.models.iter().any(|m| m.trim() == "*") {
+            return;
+        }
+
+        let client = reqwest::Client::new();
+        match discover_backend_models(&client, self).await {
+            Ok(discovered) if !discovered.is_empty() => {
+                tracing::info!(
+                    count = discovered.len(),
+                    models = %discovered.join(", "),
+                    "discovered models from backend /v1/models"
+                );
+                self.models = discovered;
+            }
+            Ok(_) => {
+                tracing::warn!("backend /v1/models returned no models, keeping wildcard");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to query backend /v1/models, keeping wildcard"
+                );
+            }
+        }
+    }
+
     #[must_use]
     pub fn websocket_url(&self) -> String {
         let base = self.proxy_base_url.trim_end_matches('/');
@@ -288,7 +319,7 @@ impl WorkerDaemon {
                 Ok(true)
             }
             ServerToWorkerMessage::ModelsRefresh(_) => {
-                let models = refresh_models(self.client.clone(), &self.config).await?;
+                let models = discover_backend_models(&self.client, &self.config).await?;
                 event_tx
                     .send(DaemonEvent::Outbound(WorkerToServerMessage::ModelsUpdate(
                         ModelsUpdateMessage {
@@ -415,8 +446,8 @@ fn subsecond_jitter_ms() -> u64 {
     )
 }
 
-async fn refresh_models(
-    client: reqwest::Client,
+async fn discover_backend_models(
+    client: &reqwest::Client,
     config: &WorkerDaemonConfig,
 ) -> Result<Vec<String>, BoxError> {
     let response = client.get(config.backend_url("/v1/models")).send().await?;
@@ -546,5 +577,23 @@ mod tests {
         // Ensure Debug is implemented (compilation check + format)
         let debug = format!("{cfg:?}");
         assert!(debug.contains("proxy_base_url"));
+    }
+
+    #[tokio::test]
+    async fn resolve_wildcard_models_skips_when_no_wildcard() {
+        let mut cfg = test_config("http://proxy.local", "http://backend:11434");
+        cfg.models = vec!["model-a".to_string(), "model-b".to_string()];
+        cfg.resolve_wildcard_models().await;
+        // Models should be unchanged when there's no wildcard
+        assert_eq!(cfg.models, vec!["model-a", "model-b"]);
+    }
+
+    #[tokio::test]
+    async fn resolve_wildcard_models_falls_back_on_unreachable_backend() {
+        let mut cfg = test_config("http://proxy.local", "http://127.0.0.1:1");
+        cfg.models = vec!["*".to_string()];
+        cfg.resolve_wildcard_models().await;
+        // Should keep wildcard when backend is unreachable
+        assert_eq!(cfg.models, vec!["*"]);
     }
 }
