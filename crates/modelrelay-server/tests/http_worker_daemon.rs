@@ -1801,11 +1801,8 @@ async fn worker_daemon_authenticates_with_api_key_instead_of_static_secret() {
     let store = Arc::new(modelrelay_server::InMemoryApiKeyStore::new());
     let (_meta, raw_key) = store.create_key("test-key".to_string()).await.unwrap();
 
-    let (proxy_addr, _core) = spawn_proxy_server_with_api_key_store(
-        "openai",
-        store as Arc<dyn ApiKeyStore>,
-    )
-    .await;
+    let (proxy_addr, _core) =
+        spawn_proxy_server_with_api_key_store("openai", store as Arc<dyn ApiKeyStore>).await;
     let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
 
     let daemon = WorkerDaemon::new(WorkerDaemonConfig {

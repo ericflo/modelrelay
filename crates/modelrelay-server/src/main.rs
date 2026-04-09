@@ -117,10 +117,8 @@ async fn main() {
         WorkerSocketApp::new(Arc::clone(&core)).with_api_key_store(Arc::clone(&api_key_store));
 
     if let Some(ref secret) = args.worker_secret {
-        worker_socket_app = worker_socket_app.with_provider(
-            &args.provider,
-            WorkerSocketProviderConfig::enabled(secret),
-        );
+        worker_socket_app = worker_socket_app
+            .with_provider(&args.provider, WorkerSocketProviderConfig::enabled(secret));
     }
 
     let http_app = ProxyHttpApp::new(Arc::clone(&core))
