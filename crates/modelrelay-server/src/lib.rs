@@ -908,21 +908,38 @@ impl ProxyServerCore {
     }
 
     fn dispatch_next_compatible(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
-        let (provider, models) = {
+        let models = {
             let worker = self.workers.get(worker_id)?;
-            (worker.provider.clone(), worker.models.clone())
+            worker.models.clone()
         };
 
         if !self.worker_has_capacity(worker_id) {
             return None;
         }
 
-        let queue = self.provider_queues.get_mut(&provider)?;
-        let queue_index = queue.iter().position(|request| {
-            models
-                .iter()
-                .any(|model| model == "*" || model == &request.model)
-        })?;
+        // Search all provider queues — not just the worker's own provider —
+        // so requests dispatched under a different provider name still get served.
+        let mut best_provider = None;
+        let mut best_index = None;
+        let mut best_queued_at = None;
+        for (queue_provider, queue) in &self.provider_queues {
+            if let Some(idx) = queue.iter().position(|request| {
+                models
+                    .iter()
+                    .any(|model| model == "*" || model == &request.model)
+            }) {
+                let queued_at = queue[idx].queued_at;
+                if best_queued_at.is_none_or(|best| queued_at < best) {
+                    best_provider = Some(queue_provider.clone());
+                    best_index = Some(idx);
+                    best_queued_at = Some(queued_at);
+                }
+            }
+        }
+
+        let provider_key = best_provider?;
+        let queue_index = best_index?;
+        let queue = self.provider_queues.get_mut(&provider_key)?;
         let request = queue.remove(queue_index)?;
 
         self.assign_to_worker(worker_id, request.clone());
