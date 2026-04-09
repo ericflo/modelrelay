@@ -4,7 +4,7 @@ metadata:
   name: server
   namespace: modelrelay
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: server
@@ -32,6 +32,10 @@ spec:
                 secretKeyRef:
                   name: modelrelay-cloud
                   key: WORKER_SECRET
+            - name: PROVIDER_NAME
+              value: "local"
+            - name: MODELRELAY_REQUIRE_API_KEYS
+              value: "true"
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
