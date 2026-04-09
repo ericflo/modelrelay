@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-04-09
+
+### Fixed
+
+- CORS headers on server — browser-based test inference from modelrelay.io now works (#245)
+- Missing favicon on all pages (#245)
+
+### Added
+
+- Setup wizard: clickable step indicators for free navigation between steps (#245)
+- Setup wizard: curl test command now includes `Authorization: Bearer` header (#245)
+- Setup wizard: worker name input field with dynamic config snippet (#245)
+- Setup wizard: Back button on final step (#245)
+
 ## [0.2.4] - 2026-04-09
 
 ### Fixed
