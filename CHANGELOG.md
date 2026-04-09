@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-04-09
+
+### Added
+
+- Per-user worker authentication via API keys — workers can now authenticate using any valid API key as their `worker_secret`, enabling multi-tenant hosted deployments (#243)
+- Cloud setup wizard pre-fills the worker secret field with the user's API key
+- New integration test for API-key-based worker authentication
+
+### Changed
+
+- `WORKER_SECRET` env var is now optional when `DATABASE_URL` is set
+
 ## [0.2.2] - 2026-04-08
 
 ### Fixed
