@@ -962,11 +962,7 @@ impl ProxyServerCore {
                 let provider_matches =
                     provider_filter.is_none_or(|provider| worker.provider == provider);
 
-                if provider_matches
-                    && supports_exact_model
-                    && has_capacity
-                    && !worker.is_draining
-                {
+                if provider_matches && supports_exact_model && has_capacity && !worker.is_draining {
                     Some((position, worker_id.clone(), selection_load))
                 } else {
                     None
