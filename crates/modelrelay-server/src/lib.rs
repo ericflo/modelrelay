@@ -786,7 +786,6 @@ impl ProxyServerCore {
     }
 
     #[must_use]
-    #[must_use]
     pub fn worker_debug_info(&self) -> Vec<(String, String, Vec<String>, usize, usize, bool)> {
         self.worker_order
             .iter()
