@@ -14,7 +14,11 @@ use tokio::{
 async fn spawn_server() -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let worker_socket_app = WorkerSocketApp::new(core.clone())
-        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
+        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"))
+        .with_heartbeat(
+            tokio::time::Duration::from_millis(100),
+            tokio::time::Duration::from_millis(300),
+        );
     let app = ProxyHttpApp::new(core.clone())
         .with_worker_socket_app(worker_socket_app)
         .router();

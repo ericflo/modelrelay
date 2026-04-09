@@ -36,7 +36,11 @@ async fn spawn_server(require_api_keys: bool, api_key_store: Arc<dyn ApiKeyStore
         );
     }
     let worker_socket_app = WorkerSocketApp::new(core.clone())
-        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
+        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"))
+        .with_heartbeat(
+            tokio::time::Duration::from_millis(100),
+            tokio::time::Duration::from_millis(300),
+        );
     let app = ProxyHttpApp::new(core)
         .with_worker_socket_app(worker_socket_app)
         .with_admin_token(Some("admin-secret".to_string()))

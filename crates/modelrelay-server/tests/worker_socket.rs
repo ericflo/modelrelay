@@ -33,6 +33,10 @@ async fn spawn_server_with_provider_config(
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
     let app = WorkerSocketApp::new(core.clone())
         .with_provider("openai", provider_config)
+        .with_heartbeat(
+            tokio::time::Duration::from_millis(100),
+            tokio::time::Duration::from_millis(300),
+        )
         .router();
 
     let listener = TcpListener::bind("127.0.0.1:0")

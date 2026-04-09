@@ -31,10 +31,15 @@ async fn spawn_server_with_core(
     core: Arc<Mutex<ProxyServerCore>>,
     provider_enabled: bool,
 ) -> SocketAddr {
-    let worker_socket_app = WorkerSocketApp::new(core.clone()).with_provider(
-        "anthropic",
-        WorkerSocketProviderConfig::enabled("top-secret"),
-    );
+    let worker_socket_app = WorkerSocketApp::new(core.clone())
+        .with_provider(
+            "anthropic",
+            WorkerSocketProviderConfig::enabled("top-secret"),
+        )
+        .with_heartbeat(
+            tokio::time::Duration::from_millis(100),
+            tokio::time::Duration::from_millis(300),
+        );
     let app = ProxyHttpApp::new(core)
         .with_models_provider("anthropic")
         .with_provider_enabled(provider_enabled)
