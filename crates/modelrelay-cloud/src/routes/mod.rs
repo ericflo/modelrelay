@@ -40,6 +40,7 @@ pub fn router(state: Arc<CloudState>) -> Router {
         .route("/dashboard/workers", get(dashboard::workers))
         .route("/dashboard/stats", get(dashboard::stats))
         .route("/setup", get(dashboard::setup))
+        .route("/integrate", get(dashboard::integrate))
         .route("/webhook/stripe", post(webhook::handle))
         .fallback(not_found)
         .layer(middleware::from_fn(csrf::csrf_middleware))

@@ -393,6 +393,7 @@ pub fn dashboard_page() -> String {
       <div class="nav-links">
         <a href="/dashboard">Dashboard</a>
         <a href="/setup">Setup</a>
+        <a href="/integrate">Integrate</a>
       </div>
     </div>
   </nav>
@@ -1407,6 +1408,7 @@ Get-Service ModelRelayWorker</code>
       <div class="nav-links">
         <a href="/dashboard">Dashboard</a>
         <a href="/setup">Setup</a>
+        <a href="/integrate">Integrate</a>
       </div>
     </div>
   </nav>
@@ -1428,6 +1430,507 @@ Get-Service ModelRelayWorker</code>
 
   {cloud_config_script}
   <script>{wizard_js}</script>
+</body>
+</html>"#,
+        cloud_config_script = cloud_config_script(cloud_config),
+    )
+}
+
+/// Build the integration snippets page (no cloud config).
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn integrate_page() -> String {
+    integrate_page_with_config(None)
+}
+
+/// Build the integration snippets page, optionally pre-configured for cloud users.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> String {
+    let integrate_css = r"
+    .integrate-inputs {
+      display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap;
+      margin-bottom:32px; padding:20px; background:#161b22;
+      border:1px solid #21262d; border-radius:12px;
+    }
+    .integrate-inputs .field { display:flex; flex-direction:column; flex:1; min-width:180px; }
+    .integrate-inputs label { font-size:0.78rem; color:#8b949e; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px; }
+    .integrate-inputs input {
+      padding:8px 12px; background:#0d1117; border:1px solid #30363d;
+      border-radius:8px; color:#e6edf3; font-size:0.9rem; font-family:'SFMono-Regular',Consolas,monospace;
+    }
+    .integrate-inputs input:focus { outline:none; border-color:#7c3aed; }
+
+    .section-heading {
+      font-size:1.2rem; font-weight:700; margin:32px 0 16px; display:flex;
+      align-items:center; gap:10px;
+    }
+    .section-heading .icon { font-size:1.4rem; }
+    .section-heading:first-of-type { margin-top:0; }
+
+    .int-tabs { display:flex; gap:6px; margin-bottom:0; flex-wrap:wrap; }
+    .int-tabs .tab {
+      padding:8px 16px; background:#0d1117; border:1px solid #30363d;
+      border-radius:8px 8px 0 0; color:#8b949e; cursor:pointer;
+      font-size:0.85rem; font-weight:600; transition:all 0.15s;
+      border-bottom:none; position:relative; top:1px;
+    }
+    .int-tabs .tab:hover { border-color:#7c3aed; color:#e6edf3; }
+    .int-tabs .tab.active { background:#161b22; border-color:#21262d; color:#7c3aed; }
+
+    .int-panel {
+      background:#161b22; border:1px solid #21262d; border-radius:0 12px 12px 12px;
+      padding:24px; margin-bottom:24px;
+    }
+    .int-panel p { color:#8b949e; margin-bottom:12px; line-height:1.7; font-size:0.92rem; }
+    .int-panel h3 { font-size:1rem; margin-bottom:8px; color:#e6edf3; }
+    .int-panel .step-label { color:#7c3aed; font-weight:600; font-size:0.85rem; margin-bottom:4px; }
+
+    .int-content { display:none; }
+    .int-content.active { display:block; }
+
+    .code-block {
+      background:#0d1117; border:1px solid #30363d; border-radius:8px;
+      padding:16px; font-family:'SFMono-Regular',Consolas,monospace;
+      font-size:0.82rem; color:#e6edf3; overflow-x:auto; position:relative;
+      line-height:1.7; margin:8px 0 16px; white-space:pre;
+    }
+    .code-block .copy-btn {
+      position:absolute; top:8px; right:8px; padding:4px 10px;
+      font-size:0.72rem; background:#30363d; color:#e6edf3;
+      border:none; border-radius:4px; cursor:pointer; z-index:1;
+    }
+    .code-block .copy-btn:hover { background:#484f58; }
+    .code-block .copy-btn.copied { background:#064e3b; color:#34d399; }
+
+    .ref-card {
+      background:#161b22; border:1px solid #21262d; border-radius:12px;
+      padding:20px; margin-bottom:16px;
+    }
+    .ref-card h3 { font-size:1rem; margin-bottom:8px; }
+    .ref-row { display:flex; align-items:center; gap:12px; margin-bottom:8px; }
+    .ref-row .ref-label { color:#8b949e; font-size:0.85rem; min-width:180px; }
+    .ref-row code {
+      flex:1; padding:6px 10px; background:#0d1117; border:1px solid #30363d;
+      border-radius:6px; font-size:0.85rem; color:#e6edf3; position:relative;
+      display:flex; align-items:center; justify-content:space-between;
+    }
+    .ref-row code .copy-btn {
+      padding:2px 8px; font-size:0.7rem; background:#30363d; color:#e6edf3;
+      border:none; border-radius:4px; cursor:pointer; margin-left:8px; flex-shrink:0;
+    }
+    .ref-row code .copy-btn:hover { background:#484f58; }
+
+    .hint-box {
+      background:#1c1f26; border:1px solid #30363d; border-radius:8px;
+      padding:12px 14px; margin:8px 0 16px; font-size:0.82rem; color:#8b949e;
+    }
+    .hint-box strong { color:#e6edf3; }
+
+    @media (max-width:600px) {
+      .integrate-inputs { flex-direction:column; }
+      .integrate-inputs .field { min-width:100%; }
+      .int-tabs { gap:4px; }
+      .int-tabs .tab { padding:6px 10px; font-size:0.78rem; }
+      .ref-row { flex-direction:column; align-items:stretch; gap:4px; }
+      .ref-row .ref-label { min-width:auto; }
+    }
+    ";
+
+    let integrate_js = r#"
+(function() {
+  const $ = s => document.querySelector(s);
+  const $$ = s => document.querySelectorAll(s);
+
+  const cloudCfg = window.__mrCloudConfig || null;
+
+  // ── Inputs ──
+  const urlInput = $('#int-server-url');
+  const keyInput = $('#int-api-key');
+  const modelInput = $('#int-model-name');
+
+  // Pre-fill from cloud config or localStorage
+  urlInput.value = (cloudCfg && cloudCfg.serverUrl) ? cloudCfg.serverUrl
+    : localStorage.getItem('mr_server_url') || window.location.origin;
+  keyInput.value = (cloudCfg && cloudCfg.apiKey) ? cloudCfg.apiKey
+    : localStorage.getItem('mr_test_api_key') || '';
+  modelInput.value = localStorage.getItem('mr_model_name') || '';
+
+  function sv() { return urlInput.value.trim().replace(/\/+$/, '') || 'https://your-server.example.com'; }
+  function ak() { return keyInput.value.trim() || 'your-api-key'; }
+  function mn() { return modelInput.value.trim() || 'your-model-name'; }
+
+  // ── Tab switching ──
+  function initTabs(section) {
+    const tabs = section.querySelectorAll('.int-tabs .tab');
+    const panels = section.querySelectorAll('.int-content');
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        tabs.forEach(t => t.classList.remove('active'));
+        panels.forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        const target = section.querySelector('.int-content[data-tab="' + tab.dataset.tab + '"]');
+        if (target) target.classList.add('active');
+        updateSnippets();
+      });
+    });
+  }
+  $$('.tab-section').forEach(initTabs);
+
+  // ── Copy button ──
+  document.addEventListener('click', e => {
+    const btn = e.target.closest('.copy-btn');
+    if (!btn) return;
+    const block = btn.closest('.code-block') || btn.closest('code');
+    if (!block) return;
+    // Get text content minus the button text
+    const clone = block.cloneNode(true);
+    clone.querySelectorAll('.copy-btn').forEach(b => b.remove());
+    const text = clone.textContent.trim();
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+    });
+  });
+
+  // ── Snippet updater ──
+  function updateSnippets() {
+    const s = sv(), a = ak(), m = mn();
+    // Agent snippets
+    $$('[data-snippet]').forEach(el => {
+      const tpl = el.getAttribute('data-snippet');
+      el.querySelector('.code-text').innerHTML = tpl
+        .replace(/SERVER_URL/g, escHtml(s))
+        .replace(/API_KEY/g, escHtml(a))
+        .replace(/MODEL_NAME/g, escHtml(m));
+    });
+    // Ref values
+    $$('[data-ref]').forEach(el => {
+      const tpl = el.getAttribute('data-ref');
+      const span = el.querySelector('.ref-val');
+      if (span) span.textContent = tpl.replace(/SERVER_URL/g, s).replace(/API_KEY/g, a);
+    });
+  }
+
+  function escHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  urlInput.addEventListener('input', () => {
+    localStorage.setItem('mr_server_url', urlInput.value.trim());
+    updateSnippets();
+  });
+  keyInput.addEventListener('input', () => {
+    localStorage.setItem('mr_test_api_key', keyInput.value.trim());
+    updateSnippets();
+  });
+  modelInput.addEventListener('input', () => {
+    localStorage.setItem('mr_model_name', modelInput.value.trim());
+    updateSnippets();
+  });
+
+  updateSnippets();
+})();
+    "#;
+
+    // ── Snippet templates (using SERVER_URL / API_KEY / MODEL_NAME placeholders) ──
+
+    let snippet_pi = r"{
+  &quot;providers&quot;: {
+    &quot;modelrelay&quot;: {
+      &quot;baseUrl&quot;: &quot;SERVER_URL/v1&quot;,
+      &quot;api&quot;: &quot;openai-completions&quot;,
+      &quot;apiKey&quot;: &quot;API_KEY&quot;,
+      &quot;compat&quot;: { &quot;supportsDeveloperRole&quot;: false, &quot;supportsReasoningEffort&quot;: false },
+      &quot;models&quot;: [{
+        &quot;id&quot;: &quot;MODEL_NAME&quot;,
+        &quot;name&quot;: &quot;My Model via ModelRelay&quot;,
+        &quot;input&quot;: [&quot;text&quot;],
+        &quot;contextWindow&quot;: 200000,
+        &quot;maxTokens&quot;: 16384
+      }]
+    }
+  }
+}";
+
+    let snippet_codex = r"model_provider = &quot;modelrelay&quot;
+model = &quot;MODEL_NAME&quot;
+
+[model_providers.modelrelay]
+name = &quot;ModelRelay&quot;
+base_url = &quot;SERVER_URL/v1&quot;
+env_key = &quot;MODELRELAY_API_KEY&quot;";
+
+    let snippet_codex_env = r"export MODELRELAY_API_KEY=API_KEY";
+
+    let snippet_aider = r"export OPENAI_API_BASE=SERVER_URL/v1
+export OPENAI_API_KEY=API_KEY
+aider --model openai/MODEL_NAME";
+
+    let snippet_continue = r"models:
+  - name: My Model via ModelRelay
+    provider: openai
+    model: MODEL_NAME
+    apiBase: SERVER_URL/v1
+    apiKey: API_KEY";
+
+    let snippet_curl = r"curl SERVER_URL/v1/chat/completions \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Authorization: Bearer API_KEY&quot; \
+  -d &#x27;{
+    &quot;model&quot;: &quot;MODEL_NAME&quot;,
+    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}]
+  }&#x27;";
+
+    let snippet_python = r"from openai import OpenAI
+
+client = OpenAI(
+    base_url=&quot;SERVER_URL/v1&quot;,
+    api_key=&quot;API_KEY&quot;,
+)
+
+response = client.chat.completions.create(
+    model=&quot;MODEL_NAME&quot;,
+    messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}],
+)
+print(response.choices[0].message.content)";
+
+    let snippet_node = r"import OpenAI from &quot;openai&quot;;
+
+const client = new OpenAI({
+  baseURL: &quot;SERVER_URL/v1&quot;,
+  apiKey: &quot;API_KEY&quot;,
+});
+
+const response = await client.chat.completions.create({
+  model: &quot;MODEL_NAME&quot;,
+  messages: [{ role: &quot;user&quot;, content: &quot;Hello!&quot; }],
+});
+console.log(response.choices[0].message.content);";
+
+    let snippet_go = r"package main
+
+import (
+    &quot;context&quot;
+    &quot;fmt&quot;
+    openai &quot;github.com/sashabaranov/go-openai&quot;
+)
+
+func main() {
+    cfg := openai.DefaultConfig(&quot;API_KEY&quot;)
+    cfg.BaseURL = &quot;SERVER_URL/v1&quot;
+    client := openai.NewClientWithConfig(cfg)
+
+    resp, _ := client.CreateChatCompletion(context.Background(),
+        openai.ChatCompletionRequest{
+            Model: &quot;MODEL_NAME&quot;,
+            Messages: []openai.ChatCompletionMessage{
+                {Role: &quot;user&quot;, Content: &quot;Hello!&quot;},
+            },
+        },
+    )
+    fmt.Println(resp.Choices[0].Message.Content)
+}";
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Integrate — ModelRelay</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0d1117; color: #e6edf3; line-height: 1.6;
+    }}
+    a {{ color: #7c3aed; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    .container {{ max-width: 900px; margin: 0 auto; padding: 0 24px; }}
+
+    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; }}
+    nav .container {{ display: flex; justify-content: space-between; align-items: center; }}
+    .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
+    .logo span {{ color: #7c3aed; }}
+    .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
+    .nav-links a:hover {{ color: #e6edf3; }}
+    .nav-links a.active {{ color: #7c3aed; }}
+
+    .content {{ padding: 32px 0; }}
+    .content h1 {{ font-size: 1.75rem; margin-bottom: 4px; }}
+    .subtitle {{ color: #8b949e; margin-bottom: 24px; font-size: 0.95rem; }}
+
+    footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
+    footer a {{ color: #8b949e; }}
+
+    code {{ font-family: "SFMono-Regular", Consolas, monospace; }}
+    {integrate_css}
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container">
+      <a href="/" class="logo">Model<span>Relay</span></a>
+      <div class="nav-links">
+        <a href="/dashboard">Dashboard</a>
+        <a href="/setup">Setup</a>
+        <a href="/integrate" class="active">Integrate</a>
+      </div>
+    </div>
+  </nav>
+
+  <section class="content">
+    <div class="container">
+      <h1>Integrate</h1>
+      <p class="subtitle">Copy-paste configuration for your favorite tools, agents, and languages.</p>
+
+      <!-- ── Inputs bar ── -->
+      <div class="integrate-inputs">
+        <div class="field">
+          <label for="int-server-url">Server URL</label>
+          <input id="int-server-url" type="text" placeholder="https://your-server.example.com">
+        </div>
+        <div class="field">
+          <label for="int-api-key">API Key</label>
+          <input id="int-api-key" type="text" placeholder="your-api-key">
+        </div>
+        <div class="field">
+          <label for="int-model-name">Model Name</label>
+          <input id="int-model-name" type="text" placeholder="your-model-name">
+        </div>
+      </div>
+
+      <!-- ═══ AI Coding Agents ═══ -->
+      <div class="section-heading"><span class="icon">&#129302;</span> AI Coding Agents</div>
+      <div class="tab-section">
+        <div class="int-tabs">
+          <div class="tab active" data-tab="pi">Pi</div>
+          <div class="tab" data-tab="codex">Codex CLI</div>
+          <div class="tab" data-tab="aider">Aider</div>
+          <div class="tab" data-tab="continue">Continue.dev</div>
+          <div class="tab" data-tab="cursor">Cursor</div>
+        </div>
+        <div class="int-panel">
+
+          <!-- Pi -->
+          <div class="int-content active" data-tab="pi">
+            <h3>Pi <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">by Mario Zechner</span></h3>
+            <p class="step-label">1. Install</p>
+            <div class="code-block"><button class="copy-btn">Copy</button><span class="code-text">npm install -g @mariozechner/pi-coding-agent</span></div>
+            <p class="step-label">2. Configure <code style="font-size:0.82rem;color:#8b949e;">~/.pi/agent/models.json</code></p>
+            <div class="code-block" data-snippet="{snippet_pi}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <!-- Codex CLI -->
+          <div class="int-content" data-tab="codex">
+            <h3>Codex CLI <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">by OpenAI</span></h3>
+            <p class="step-label">1. Set environment variable</p>
+            <div class="code-block" data-snippet="{snippet_codex_env}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+            <p class="step-label">2. Configure <code style="font-size:0.82rem;color:#8b949e;">~/.codex/config.toml</code></p>
+            <div class="code-block" data-snippet="{snippet_codex}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <!-- Aider -->
+          <div class="int-content" data-tab="aider">
+            <h3>Aider</h3>
+            <p class="step-label">Run with environment variables</p>
+            <div class="code-block" data-snippet="{snippet_aider}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <!-- Continue.dev -->
+          <div class="int-content" data-tab="continue">
+            <h3>Continue.dev <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">VS Code extension</span></h3>
+            <p class="step-label">Add to <code style="font-size:0.82rem;color:#8b949e;">~/.continue/config.yaml</code></p>
+            <div class="code-block" data-snippet="{snippet_continue}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <!-- Cursor -->
+          <div class="int-content" data-tab="cursor">
+            <h3>Cursor</h3>
+            <p>Configure via the Cursor settings UI:</p>
+            <div class="hint-box">
+              <strong>1.</strong> Open <strong>Settings &gt; Models</strong><br>
+              <strong>2.</strong> Set <strong>"Override OpenAI Base URL"</strong> to:<br>
+              <code style="color:#7c3aed;" class="cursor-url">SERVER_URL/v1</code><br>
+              <strong>3.</strong> Set <strong>"OpenAI API Key"</strong> to your API key<br>
+              <strong>4.</strong> Add your model name: <code style="color:#7c3aed;" class="cursor-model">MODEL_NAME</code>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ═══ Languages & SDKs ═══ -->
+      <div class="section-heading"><span class="icon">&#128187;</span> Languages &amp; SDKs</div>
+      <div class="tab-section">
+        <div class="int-tabs">
+          <div class="tab active" data-tab="curl">curl</div>
+          <div class="tab" data-tab="python">Python</div>
+          <div class="tab" data-tab="node">Node.js</div>
+          <div class="tab" data-tab="go">Go</div>
+        </div>
+        <div class="int-panel">
+
+          <!-- curl -->
+          <div class="int-content active" data-tab="curl">
+            <h3>curl</h3>
+            <div class="code-block" data-snippet="{snippet_curl}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <!-- Python -->
+          <div class="int-content" data-tab="python">
+            <h3>Python <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">pip install openai</span></h3>
+            <div class="code-block" data-snippet="{snippet_python}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <!-- Node.js -->
+          <div class="int-content" data-tab="node">
+            <h3>Node.js / TypeScript <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">npm install openai</span></h3>
+            <div class="code-block" data-snippet="{snippet_node}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <!-- Go -->
+          <div class="int-content" data-tab="go">
+            <h3>Go <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">github.com/sashabaranov/go-openai</span></h3>
+            <div class="code-block" data-snippet="{snippet_go}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ═══ Quick Reference ═══ -->
+      <div class="section-heading"><span class="icon">&#128218;</span> Quick Reference</div>
+      <div class="ref-card">
+        <div class="ref-row" data-ref="SERVER_URL/v1">
+          <span class="ref-label">API Base URL</span>
+          <code><span class="ref-val">SERVER_URL/v1</span><button class="copy-btn">Copy</button></code>
+        </div>
+        <div class="ref-row" data-ref="Bearer API_KEY">
+          <span class="ref-label">Authorization Header</span>
+          <code><span class="ref-val">Bearer API_KEY</span><button class="copy-btn">Copy</button></code>
+        </div>
+        <div class="ref-row">
+          <span class="ref-label">Supported Endpoints</span>
+          <code><span class="ref-val">/v1/chat/completions, /v1/models</span><button class="copy-btn">Copy</button></code>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+    </div>
+  </footer>
+
+  {cloud_config_script}
+  <script>{integrate_js}</script>
 </body>
 </html>"#,
         cloud_config_script = cloud_config_script(cloud_config),
@@ -1461,6 +1964,7 @@ fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
 pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     let nav_links = if logged_in {
         r#"<a href="/dashboard">Dashboard</a>
+        <a href="/integrate">Integrate</a>
         <a href="/pricing">Pricing</a>
         <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
     } else {
