@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-04-09
+
+### Fixed
+
+- Worker heartbeat timeout causing constant disconnect/reconnect flapping — interval bumped from 100ms to 30s, pong timeout from 300ms to 10s (#244)
+
+### Added
+
+- Worker name input field in setup wizard — users can now name their machines instead of getting the default "my-gpu-box" (#244)
+- Configurable heartbeat timing via `WorkerSocketApp::with_heartbeat()` for test environments
+
 ## [0.2.3] - 2026-04-09
 
 ### Added
