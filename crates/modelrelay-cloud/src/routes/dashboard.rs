@@ -524,6 +524,7 @@ pub async fn setup(session: Session, State(state): State<Arc<CloudState>>) -> Re
                 .as_deref()
                 .unwrap_or("https://api.modelrelay.io")
                 .to_string(),
+            worker_secret: api_key.clone(),
             api_key,
             workers_poll_url: "/dashboard/workers".to_string(),
         })

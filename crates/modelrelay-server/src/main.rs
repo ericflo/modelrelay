@@ -26,9 +26,10 @@ struct Args {
     #[arg(long, env = "PROVIDER_NAME", default_value = "local")]
     provider: String,
 
-    /// Secret that workers must present to authenticate (required)
+    /// Secret that workers must present to authenticate.
+    /// Optional when DATABASE_URL is set (workers can authenticate with API keys).
     #[arg(long, env = "WORKER_SECRET")]
-    worker_secret: String,
+    worker_secret: Option<String>,
 
     /// Maximum number of requests that may be queued (0 = unlimited)
     #[arg(long, env = "MAX_QUEUE_LEN", default_value = "100")]
@@ -112,10 +113,15 @@ async fn main() {
 
     let api_key_store = build_api_key_store(args.database_url.as_deref()).await;
 
-    let worker_socket_app = WorkerSocketApp::new(Arc::clone(&core)).with_provider(
-        &args.provider,
-        WorkerSocketProviderConfig::enabled(&args.worker_secret),
-    );
+    let mut worker_socket_app =
+        WorkerSocketApp::new(Arc::clone(&core)).with_api_key_store(Arc::clone(&api_key_store));
+
+    if let Some(ref secret) = args.worker_secret {
+        worker_socket_app = worker_socket_app.with_provider(
+            &args.provider,
+            WorkerSocketProviderConfig::enabled(secret),
+        );
+    }
 
     let http_app = ProxyHttpApp::new(Arc::clone(&core))
         .with_models_provider(&args.provider)

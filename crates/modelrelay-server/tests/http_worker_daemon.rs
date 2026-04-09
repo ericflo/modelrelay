@@ -10,7 +10,8 @@ use axum::{
 };
 use futures_util::stream;
 use modelrelay_server::{
-    ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp, WorkerSocketProviderConfig,
+    ApiKeyStore, ProxyHttpApp, ProxyServerCore, RequestState, WorkerSocketApp,
+    WorkerSocketProviderConfig,
 };
 use modelrelay_worker::{WorkerDaemon, WorkerDaemonConfig};
 use serde_json::{Value, json};
@@ -58,6 +59,31 @@ async fn spawn_proxy_server(models_provider: &str) -> (SocketAddr, Arc<Mutex<Pro
     let app = ProxyHttpApp::new(core.clone())
         .with_models_provider(models_provider)
         .with_worker_socket_app(worker_socket_app)
+        .router();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy listener");
+    let addr = listener.local_addr().expect("proxy listener local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve proxy app");
+    });
+
+    (addr, core)
+}
+
+async fn spawn_proxy_server_with_api_key_store(
+    models_provider: &str,
+    api_key_store: Arc<dyn ApiKeyStore>,
+) -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let worker_socket_app =
+        WorkerSocketApp::new(core.clone()).with_api_key_store(api_key_store.clone());
+    let app = ProxyHttpApp::new(core.clone())
+        .with_models_provider(models_provider)
+        .with_worker_socket_app(worker_socket_app)
+        .with_api_key_store(api_key_store)
         .router();
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -1766,6 +1792,49 @@ async fn worker_daemon_forwards_streaming_openai_responses_request_through_live_
     assert!(hel_index < lo_index);
     assert!(lo_index < done_index);
     assert!(full_response.ends_with("0\r\n\r\n"));
+
+    daemon_handle.abort();
+}
+
+#[tokio::test]
+async fn worker_daemon_authenticates_with_api_key_instead_of_static_secret() {
+    let store = Arc::new(modelrelay_server::InMemoryApiKeyStore::new());
+    let (_meta, raw_key) = store.create_key("test-key".to_string()).await.unwrap();
+
+    let (proxy_addr, _core) = spawn_proxy_server_with_api_key_store(
+        "openai",
+        store as Arc<dyn ApiKeyStore>,
+    )
+    .await;
+    let (backend_addr, observed_request_rx) = spawn_mock_backend().await;
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: raw_key,
+        worker_name: "apikey-worker".to_string(),
+        models: vec!["gpt-4.1-mini".to_string()],
+        max_concurrent: 1,
+        backend_base_url: format!("http://{backend_addr}"),
+    });
+
+    let daemon_handle = tokio::spawn(async move { daemon.run().await });
+
+    wait_for_registered_model(proxy_addr, "gpt-4.1-mini").await;
+
+    let request_body =
+        r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hello via api key"}]}"#;
+    let response = post_chat_completions(
+        proxy_addr,
+        request_body,
+        &[("Authorization", "Bearer client-token")],
+    )
+    .await;
+
+    assert!(!response.is_empty(), "expected non-empty proxy response");
+
+    let observed = observed_request_rx.await.expect("backend received request");
+    assert!(observed.body.contains("hello via api key"));
 
     daemon_handle.abort();
 }
