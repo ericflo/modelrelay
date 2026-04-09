@@ -903,9 +903,11 @@ impl ProxyServerCore {
         }
 
         let queue = self.provider_queues.get_mut(&provider)?;
-        let queue_index = queue
-            .iter()
-            .position(|request| models.iter().any(|model| model == "*" || model == &request.model))?;
+        let queue_index = queue.iter().position(|request| {
+            models
+                .iter()
+                .any(|model| model == "*" || model == &request.model)
+        })?;
         let request = queue.remove(queue_index)?;
 
         self.assign_to_worker(worker_id, request.clone());
@@ -989,7 +991,10 @@ impl ProxyServerCore {
         self.workers.values().any(|worker| {
             worker.provider == provider
                 && !worker.is_draining
-                && worker.models.iter().any(|supported| supported == "*" || supported == model)
+                && worker
+                    .models
+                    .iter()
+                    .any(|supported| supported == "*" || supported == model)
         })
     }
 
@@ -1962,10 +1967,7 @@ mod tests {
     fn wildcard_model_matches_any_requested_model() {
         let mut core = ProxyServerCore::new();
         let worker_id = core
-            .register_worker(
-                "openai",
-                register_message("gpu-a", &["*"], 2, Some(0)),
-            )
+            .register_worker("openai", register_message("gpu-a", &["*"], 2, Some(0)))
             .worker_id;
 
         // Direct dispatch should work for any model name
@@ -2010,10 +2012,7 @@ mod tests {
     fn wildcard_worker_is_recognized_as_compatible() {
         let mut core = ProxyServerCore::new();
         let _worker_id = core
-            .register_worker(
-                "openai",
-                register_message("gpu-a", &["*"], 1, Some(0)),
-            )
+            .register_worker("openai", register_message("gpu-a", &["*"], 1, Some(0)))
             .worker_id;
 
         // With a wildcard worker, submitting an unknown model should dispatch, not queue
