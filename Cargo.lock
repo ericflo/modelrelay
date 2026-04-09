@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-cloud"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "argon2",
  "axum",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-contract-tests"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "axum",
  "modelrelay-protocol",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-protocol"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-server"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-web"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "axum",
  "serde",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "modelrelay-worker"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "axum",
  "clap",

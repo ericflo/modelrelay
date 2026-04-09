@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-04-09
+
+### Added
+
+- Wildcard model matching: workers with `models=["*"]` now match any requested model instead of requiring exact string equality
+- Queue timeout tick loop: `expire_queue_timeouts()` is now driven by a background task every 1s — queued requests actually time out after the configured timeout
+- Dashboard UX: show "All models" instead of raw `*` tag for wildcard workers
+- Wizard UX: added API key input field on test inference step for self-hosted users with auth-required setups
+
+### Fixed
+
+- Requests no longer hang indefinitely when sent to workers registered with `models=["*"]`
+- Queue timeout is no longer silently inert — previously configured but never called
+
 ## [0.2.5] - 2026-04-09
 
 ### Fixed
