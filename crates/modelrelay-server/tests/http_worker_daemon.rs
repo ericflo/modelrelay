@@ -1488,7 +1488,7 @@ async fn worker_daemon_cancels_backend_request_when_http_client_disconnects() {
 }
 
 #[tokio::test]
-async fn worker_daemon_run_with_reconnect_exits_cleanly_after_proxy_graceful_shutdown() {
+async fn worker_daemon_run_with_reconnect_reconnects_after_proxy_graceful_shutdown() {
     let (proxy_addr, core) = spawn_proxy_server("openai").await;
 
     let (backend_addr, _backend_rx) = spawn_mock_backend().await;
@@ -1502,8 +1502,8 @@ async fn worker_daemon_run_with_reconnect_exits_cleanly_after_proxy_graceful_shu
         backend_base_url: format!("http://{backend_addr}"),
     });
 
-    // run_with_reconnect loops over run_session. If run_session returns Ok(true)
-    // (proxy sent GracefulShutdown before closing), it exits rather than reconnecting.
+    // run_with_reconnect loops over run_session. After graceful shutdown it should
+    // reconnect (not exit), because the server is being replaced during a rolling deploy.
     let daemon_handle = tokio::spawn(async move { daemon.run_with_reconnect().await });
 
     // Wait until the daemon has registered its model with the proxy.
@@ -1517,16 +1517,17 @@ async fn worker_daemon_run_with_reconnect_exits_cleanly_after_proxy_graceful_shu
         core.begin_graceful_shutdown(Some("test graceful shutdown"), Duration::from_secs(5));
     }
 
-    // run_with_reconnect must exit cleanly (Ok(())) within a short timeout, not loop forever.
-    let join_result = timeout(Duration::from_secs(5), daemon_handle)
-        .await
-        .expect("daemon task did not exit within 5 s after proxy graceful shutdown")
-        .expect("daemon task should not panic");
-
+    // The daemon should NOT exit — it should attempt to reconnect. Wait briefly for
+    // the graceful shutdown to complete and the reconnect cycle to start, then verify
+    // the daemon is still running (the task hasn't finished).
+    tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
-        join_result.is_ok(),
-        "run_with_reconnect should return Ok(()) after graceful shutdown, got: {join_result:?}"
+        !daemon_handle.is_finished(),
+        "run_with_reconnect should keep running after graceful shutdown, not exit"
     );
+
+    // Clean up — abort the reconnect loop.
+    daemon_handle.abort();
 }
 
 // ---- Responses API (OpenAI /v1/responses) live daemon tests ----
