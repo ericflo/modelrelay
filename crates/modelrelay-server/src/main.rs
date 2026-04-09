@@ -148,27 +148,8 @@ async fn main() {
         ));
     }
 
-    // Spawn a background task to expire queued requests that exceed the timeout.
-    // Without this, `expire_queue_timeouts` is never called and requests queue forever.
     if queue_timeout_ticks.is_some() {
-        let core_for_timeout = Arc::clone(&core);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                let failures = {
-                    let mut guard = core_for_timeout.lock().await;
-                    guard.expire_queue_timeouts(std::time::Instant::now())
-                };
-                for failure in &failures {
-                    tracing::debug!(
-                        request_id = %failure.request_id,
-                        "queued request timed out"
-                    );
-                }
-            }
-        });
+        spawn_queue_timeout_loop(Arc::clone(&core));
     }
 
     let listener = tokio::net::TcpListener::bind(&args.listen)
@@ -231,6 +212,28 @@ async fn build_api_key_store(database_url: Option<&str>) -> Arc<dyn ApiKeyStore>
             Arc::new(InMemoryApiKeyStore::new())
         }
     }
+}
+
+/// Spawn a background task to expire queued requests that exceed the timeout.
+/// Without this, `expire_queue_timeouts` is never called and requests queue forever.
+fn spawn_queue_timeout_loop(core: Arc<Mutex<ProxyServerCore>>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let failures = {
+                let mut guard = core.lock().await;
+                guard.expire_queue_timeouts(std::time::Instant::now())
+            };
+            for failure in &failures {
+                tracing::debug!(
+                    request_id = %failure.request_id,
+                    "queued request timed out"
+                );
+            }
+        }
+    });
 }
 
 async fn shutdown_signal() {
