@@ -29,6 +29,7 @@ sha2 = "0.10"
 sqlx = { workspace = true, optional = true }
 subtle.workspace = true
 tokio = { workspace = true, features = ["signal"] }
+tower-http = { version = "0.6", features = ["cors"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid = { version = "1", features = ["v4"] }

@@ -9,6 +9,7 @@ use modelrelay_server::{
     WorkerSocketApp, WorkerSocketProviderConfig,
 };
 use tokio::sync::Mutex;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_subscriber::EnvFilter;
 
 /// Remote LLM worker proxy server.
@@ -128,7 +129,12 @@ async fn main() {
         .with_require_api_keys(args.require_api_keys)
         .with_api_key_store(api_key_store);
 
-    let mut router = http_app.router();
+    let cors_layer = CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods(AllowMethods::any())
+        .allow_headers(AllowHeaders::any());
+
+    let mut router = http_app.router().layer(cors_layer);
 
     if args.request_timeout > 0 {
         let timeout = Duration::from_secs(args.request_timeout);
