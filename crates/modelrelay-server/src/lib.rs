@@ -786,6 +786,24 @@ impl ProxyServerCore {
     }
 
     #[must_use]
+    #[must_use]
+    pub fn worker_debug_info(&self) -> Vec<(String, String, Vec<String>, usize, usize, bool)> {
+        self.worker_order
+            .iter()
+            .filter_map(|worker_id| {
+                let worker = self.workers.get(worker_id)?;
+                Some((
+                    worker_id.clone(),
+                    worker.provider.clone(),
+                    worker.models.clone(),
+                    worker.in_flight_requests.len(),
+                    worker.max_concurrent,
+                    worker.is_draining,
+                ))
+            })
+            .collect()
+    }
+
     pub fn provider_models(&self, provider: &str) -> Vec<String> {
         let mut seen = HashSet::new();
 

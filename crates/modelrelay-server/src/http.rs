@@ -138,6 +138,19 @@ struct HealthResponse {
     workers_connected: usize,
     queue_depth: usize,
     uptime_secs: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    workers: Vec<WorkerHealthInfo>,
+    models_provider: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct WorkerHealthInfo {
+    id: String,
+    provider: String,
+    models: Vec<String>,
+    in_flight: usize,
+    max_concurrent: usize,
+    is_draining: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -161,9 +174,27 @@ struct ChatCompletionsRequest {
 }
 
 async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> {
-    let (workers_connected, queue_depth) = {
+    let (workers_connected, queue_depth, workers) = {
         let core = state.core.lock().await;
-        (core.connected_worker_count(), core.total_queue_depth())
+        let worker_infos: Vec<WorkerHealthInfo> = core
+            .worker_debug_info()
+            .into_iter()
+            .map(
+                |(id, provider, models, in_flight, max_concurrent, is_draining)| WorkerHealthInfo {
+                    id,
+                    provider,
+                    models,
+                    in_flight,
+                    max_concurrent,
+                    is_draining,
+                },
+            )
+            .collect();
+        (
+            core.connected_worker_count(),
+            core.total_queue_depth(),
+            worker_infos,
+        )
     };
 
     Json(HealthResponse {
@@ -172,6 +203,8 @@ async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> 
         workers_connected,
         queue_depth,
         uptime_secs: state.started_at.elapsed().as_secs_f64(),
+        workers,
+        models_provider: state.models_provider.clone(),
     })
 }
 
