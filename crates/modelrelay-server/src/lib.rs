@@ -803,6 +803,7 @@ impl ProxyServerCore {
             .collect()
     }
 
+    #[must_use]
     pub fn provider_models(&self, provider: &str) -> Vec<String> {
         let mut seen = HashSet::new();
 
