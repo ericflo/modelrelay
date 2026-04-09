@@ -27,7 +27,7 @@ struct Args {
     provider: String,
 
     /// Secret that workers must present to authenticate.
-    /// Optional when DATABASE_URL is set (workers can authenticate with API keys).
+    /// Optional when `DATABASE_URL` is set (workers can authenticate with API keys).
     #[arg(long, env = "WORKER_SECRET")]
     worker_secret: Option<String>,
 

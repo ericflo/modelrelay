@@ -200,30 +200,30 @@ async fn authenticate_connection(
     let provider = query.provider.as_deref().unwrap_or("local");
 
     // 1. Try static provider match (self-hosted / legacy mode)
-    if let Some(config) = state.providers.get(provider) {
-        if config.enabled {
-            let secret_matches: bool = presented_secret
-                .as_bytes()
-                .ct_eq(config.worker_secret.as_bytes())
-                .into();
-            if secret_matches {
-                clear_failed_auth(state, &client_identity).await;
-                return AuthOutcome::Authenticated {
-                    provider: provider.to_string(),
-                };
-            }
-        }
-    }
-
-    // 2. Try API key store (per-user auth for hosted mode).
-    // Any valid API key authenticates the worker under the requested provider.
-    if let Some(ref store) = state.api_key_store {
-        if let Ok(Some(_key_id)) = store.validate_key(&presented_secret).await {
+    if let Some(config) = state.providers.get(provider)
+        && config.enabled
+    {
+        let secret_matches: bool = presented_secret
+            .as_bytes()
+            .ct_eq(config.worker_secret.as_bytes())
+            .into();
+        if secret_matches {
             clear_failed_auth(state, &client_identity).await;
             return AuthOutcome::Authenticated {
                 provider: provider.to_string(),
             };
         }
+    }
+
+    // 2. Try API key store (per-user auth for hosted mode).
+    // Any valid API key authenticates the worker under the requested provider.
+    if let Some(ref store) = state.api_key_store
+        && let Ok(Some(_key_id)) = store.validate_key(&presented_secret).await
+    {
+        clear_failed_auth(state, &client_identity).await;
+        return AuthOutcome::Authenticated {
+            provider: provider.to_string(),
+        };
     }
 
     record_failed_auth(state, client_identity).await;
