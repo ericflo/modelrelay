@@ -358,6 +358,7 @@ pub fn dashboard_page() -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Dashboard — ModelRelay</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -458,7 +459,10 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     .wizard-progress .step-indicator {
       flex:1; text-align:center; padding:12px 4px; font-size:0.75rem;
       color:#484f58; border-bottom:3px solid #21262d; min-width:90px;
-      transition: color 0.2s, border-color 0.2s;
+      transition: color 0.2s, border-color 0.2s; cursor:pointer;
+    }
+    .wizard-progress .step-indicator:hover {
+      color:#c9d1d9;
     }
     .wizard-progress .step-indicator.active {
       color:#7c3aed; border-bottom-color:#7c3aed; font-weight:600;
@@ -695,13 +699,14 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   function updateConfigSnippet() {
     const serverUrl = $('#cfg-server-url') ? $('#cfg-server-url').value : getServerUrl();
     const secret = $('#cfg-worker-secret') ? $('#cfg-worker-secret').value : 'your-worker-secret';
+    const workerName = $('#cfg-worker-name') ? ($('#cfg-worker-name').value || 'my-gpu-box') : 'my-gpu-box';
     const port = getBackendPort();
     const el = $('#config-toml');
     if (el) {
       el.textContent =
         'proxy_url = "' + serverUrl + '"\n' +
         'worker_secret = "' + secret + '"\n' +
-        'worker_name = "my-gpu-box"\n' +
+        'worker_name = "' + workerName + '"\n' +
         'backend_url = "http://localhost:' + port + '"\n' +
         'models = ["*"]';
     }
@@ -711,16 +716,19 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
       envEl.textContent =
         'export PROXY_URL="' + serverUrl + '"\n' +
         'export WORKER_SECRET="' + secret + '"\n' +
-        'export WORKER_NAME="my-gpu-box"\n' +
+        'export WORKER_NAME="' + workerName + '"\n' +
         'export BACKEND_URL="http://localhost:' + port + '"\n' +
         'export MODELS="*"';
     }
     // Update curl test command
     const curlEl = $('#curl-test');
     if (curlEl) {
-      curlEl.textContent = 'curl -X POST ' + serverUrl + '/v1/chat/completions \\\n' +
-        '  -H "Content-Type: application/json" \\\n' +
-        '  -d \'{"model":"your-model","messages":[{"role":"user","content":"Hello!"}],"max_tokens":100}\'';
+      const apiKey = (cloudCfg && cloudCfg.apiKey) ? cloudCfg.apiKey : (localStorage.getItem('mr_test_api_key') || '');
+      let curlCmd = 'curl -X POST ' + serverUrl + '/v1/chat/completions \\\n' +
+        '  -H "Content-Type: application/json" \\\n';
+      if (apiKey) curlCmd += '  -H "Authorization: Bearer ' + apiKey + '" \\\n';
+      curlCmd += '  -d \'{"model":"your-model","messages":[{"role":"user","content":"Hello!"}],"max_tokens":100}\'';
+      curlEl.textContent = curlCmd;
     }
   }
   window.__updateConfig = updateConfigSnippet;
@@ -870,7 +878,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   }
 
   document.addEventListener('input', (e) => {
-    if (e.target.id === 'cfg-server-url' || e.target.id === 'cfg-worker-secret') {
+    if (e.target.id === 'cfg-server-url' || e.target.id === 'cfg-worker-secret' || e.target.id === 'cfg-worker-name') {
       updateConfigSnippet();
     }
   });
@@ -891,9 +899,10 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     let mut progress_html = String::from("<div class=\"wizard-progress\">");
     for (i, label) in step_labels.iter().enumerate() {
         let cls = if i == 0 { " active" } else { "" };
+        let step_num = i + 1;
         let _ = write!(
             progress_html,
-            "<div class=\"step-indicator{cls}\">{label}</div>"
+            "<div class=\"step-indicator{cls}\" onclick=\"window.__wizGoTo({step_num})\">{label}</div>"
         );
     }
     progress_html.push_str("</div>");
@@ -1087,6 +1096,10 @@ curl -L -o model.gguf https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGU
           <label for="cfg-worker-secret">Worker Secret:</label>
           <input id="cfg-worker-secret" type="text" placeholder="your-worker-secret">
         </div>
+        <div class="config-input">
+          <label for="cfg-worker-name">Worker Name:</label>
+          <input id="cfg-worker-name" type="text" placeholder="my-gpu-box">
+        </div>
         <div class="code-block">
           <button class="copy-btn" onclick="window.__copyCode('config-toml')">Copy</button>
           <code id="config-toml">proxy_url = ""
@@ -1097,6 +1110,7 @@ models = ["*"]</code>
         </div>
         <div class="hint-box">
           <strong>worker_secret</strong> — shared secret that must match the <code>WORKER_SECRET</code> on your ModelRelay server. It authenticates the worker connection.<br>
+          <strong>worker_name</strong> — a label for this machine (e.g. "strix-halo-lmstudio", "rtx4090-desktop").<br>
           <strong>models = ["*"]</strong> — advertises all models from your backend. Replace with specific names to expose a subset.
         </div>
         <details style="margin-top:12px;">
@@ -1314,6 +1328,10 @@ Get-Service ModelRelayWorker</code>
         </div>
       </div>
 
+      <div class="wizard-nav">
+        <button class="btn btn-back" onclick="window.__wizPrev()">&larr; Back</button>
+      </div>
+
       <div class="wizard-card" style="text-align:center;">
         <h2 style="color:#34d399;">&#127881; Setup complete!</h2>
         <p>Your worker is connected, tested, and will start automatically on boot.</p>
@@ -1332,6 +1350,7 @@ Get-Service ModelRelayWorker</code>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Setup — ModelRelay</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -1444,6 +1463,7 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{title} — ModelRelay</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
