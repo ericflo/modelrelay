@@ -428,6 +428,8 @@ pub struct CloudWizardConfig {
     pub server_url: String,
     /// The user's API key to pre-fill for the test inference step.
     pub api_key: Option<String>,
+    /// The user's worker secret (same as API key for hosted mode).
+    pub worker_secret: Option<String>,
     /// The proxy endpoint for polling worker status (e.g. `/dashboard/workers`).
     pub workers_poll_url: String,
 }
@@ -857,8 +859,11 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   if (cloudCfg) {
     const urlInput = $('#cfg-server-url');
     if (urlInput && cloudCfg.serverUrl) urlInput.value = cloudCfg.serverUrl;
+    const secretInput = $('#cfg-worker-secret');
+    if (secretInput && cloudCfg.workerSecret) secretInput.value = cloudCfg.workerSecret;
     const apiKeyInput = $('#test-api-key');
     if (apiKeyInput && cloudCfg.apiKey) apiKeyInput.value = cloudCfg.apiKey;
+    updateConfigSnippet();
   } else {
     const urlInput = $('#cfg-server-url');
     if (urlInput && !urlInput.value) urlInput.value = window.location.origin;
@@ -1400,21 +1405,17 @@ fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
     let Some(cfg) = config else {
         return String::new();
     };
-    let api_key_js = match &cfg.api_key {
-        Some(k) => {
-            // Escape any quotes/backslashes in the key for safe JS embedding
-            let escaped = k.replace('\\', "\\\\").replace('"', "\\\"");
-            format!("\"{escaped}\"")
-        }
+    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let opt_js = |o: &Option<String>| match o {
+        Some(k) => format!("\"{}\"", escape(k)),
         None => "null".to_string(),
     };
-    let server_url = cfg.server_url.replace('\\', "\\\\").replace('"', "\\\"");
-    let poll_url = cfg
-        .workers_poll_url
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let server_url = escape(&cfg.server_url);
+    let poll_url = escape(&cfg.workers_poll_url);
+    let api_key_js = opt_js(&cfg.api_key);
+    let worker_secret_js = opt_js(&cfg.worker_secret);
     format!(
-        "<script>window.__mrCloudConfig = {{ serverUrl: \"{server_url}\", apiKey: {api_key_js}, workersPollUrl: \"{poll_url}\" }};</script>"
+        "<script>window.__mrCloudConfig = {{ serverUrl: \"{server_url}\", apiKey: {api_key_js}, workerSecret: {worker_secret_js}, workersPollUrl: \"{poll_url}\" }};</script>"
     )
 }
 

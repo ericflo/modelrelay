@@ -22,8 +22,8 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 
 use crate::{
-    GracefulShutdownDisconnectReason, GracefulShutdownSignal, ProxyServerCore, WorkerCancelSignal,
-    WorkerModelsRefreshSignal,
+    ApiKeyStore, GracefulShutdownDisconnectReason, GracefulShutdownSignal, ProxyServerCore,
+    WorkerCancelSignal, WorkerModelsRefreshSignal,
 };
 
 const WORKER_SECRET_HEADER: &str = "x-worker-secret";
@@ -80,6 +80,7 @@ impl WorkerSocketApp {
             state: WorkerSocketState {
                 core,
                 providers: HashMap::new(),
+                api_key_store: None,
                 failed_auth_by_client: Arc::new(Mutex::new(HashMap::new())),
             },
         }
@@ -95,6 +96,17 @@ impl WorkerSocketApp {
         self
     }
 
+    /// Enable API-key-based worker authentication.
+    ///
+    /// When set, workers can authenticate with any valid (non-revoked) API key
+    /// as their `worker_secret`. The worker joins the provider specified in the
+    /// connection query string.
+    #[must_use]
+    pub fn with_api_key_store(mut self, store: Arc<dyn ApiKeyStore>) -> Self {
+        self.state.api_key_store = Some(store);
+        self
+    }
+
     pub fn router(self) -> Router {
         Router::new()
             .route(Self::ROUTE_PATH, get(worker_connect_handler))
@@ -106,6 +118,7 @@ impl WorkerSocketApp {
 struct WorkerSocketState {
     core: Arc<Mutex<ProxyServerCore>>,
     providers: HashMap<String, WorkerSocketProviderConfig>,
+    api_key_store: Option<Arc<dyn ApiKeyStore>>,
     failed_auth_by_client: Arc<Mutex<HashMap<String, FailedAuthState>>>,
 }
 
@@ -172,24 +185,6 @@ async fn authenticate_connection(
         };
     }
 
-    let Some(provider) = query.provider.as_deref() else {
-        return AuthOutcome::Rejected {
-            reason: CLOSE_REASON_AUTH_FAILED,
-        };
-    };
-
-    let Some(config) = state.providers.get(provider) else {
-        return AuthOutcome::Rejected {
-            reason: CLOSE_REASON_AUTH_FAILED,
-        };
-    };
-
-    if !config.enabled {
-        return AuthOutcome::Rejected {
-            reason: CLOSE_REASON_AUTH_FAILED,
-        };
-    }
-
     let presented_secret = headers
         .get(WORKER_SECRET_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -202,21 +197,38 @@ async fn authenticate_connection(
         };
     };
 
-    let secret_matches: bool = presented_secret
-        .as_bytes()
-        .ct_eq(config.worker_secret.as_bytes())
-        .into();
-    if !secret_matches {
-        record_failed_auth(state, client_identity).await;
-        return AuthOutcome::Rejected {
-            reason: CLOSE_REASON_AUTH_FAILED,
+    let provider = query.provider.as_deref().unwrap_or("local");
+
+    // 1. Try static provider match (self-hosted / legacy mode)
+    if let Some(config) = state.providers.get(provider)
+        && config.enabled
+    {
+        let secret_matches: bool = presented_secret
+            .as_bytes()
+            .ct_eq(config.worker_secret.as_bytes())
+            .into();
+        if secret_matches {
+            clear_failed_auth(state, &client_identity).await;
+            return AuthOutcome::Authenticated {
+                provider: provider.to_string(),
+            };
+        }
+    }
+
+    // 2. Try API key store (per-user auth for hosted mode).
+    // Any valid API key authenticates the worker under the requested provider.
+    if let Some(ref store) = state.api_key_store
+        && let Ok(Some(_key_id)) = store.validate_key(&presented_secret).await
+    {
+        clear_failed_auth(state, &client_identity).await;
+        return AuthOutcome::Authenticated {
+            provider: provider.to_string(),
         };
     }
 
-    clear_failed_auth(state, &client_identity).await;
-
-    AuthOutcome::Authenticated {
-        provider: provider.to_string(),
+    record_failed_auth(state, client_identity).await;
+    AuthOutcome::Rejected {
+        reason: CLOSE_REASON_AUTH_FAILED,
     }
 }
 
