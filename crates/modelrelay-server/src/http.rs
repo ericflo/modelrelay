@@ -25,7 +25,7 @@ use crate::{
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
-const MAX_STREAM_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_STREAM_RESPONSE_BYTES: usize = 10 * 1024 * 1024 * 1024; // 10 GB
 const OVERSIZED_STREAM_ERROR_SSE: &str = "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":\"stream exceeded size limit\"}}\n\n";
 
 #[derive(Clone)]

@@ -231,8 +231,19 @@ impl WorkerDaemon {
             let daemon = Self::new(config.clone());
             match daemon.run_session().await {
                 Ok(true) => {
-                    tracing::info!("graceful shutdown received, exiting");
-                    return Ok(());
+                    // Server sent a graceful shutdown — it's going away (e.g. rolling
+                    // deploy), not telling us to die. Reconnect to the replacement pod
+                    // after a short delay.
+                    attempt += 1;
+                    let jitter_ms = subsecond_jitter_ms();
+                    let delay_ms = 2_000 + jitter_ms;
+                    tracing::info!(
+                        attempt,
+                        delay_ms,
+                        "server sent graceful shutdown, reconnecting to new instance"
+                    );
+                    sleep(Duration::from_millis(delay_ms)).await;
+                    backoff_ms = 1_000; // reset backoff — this is expected
                 }
                 Ok(false) => {
                     attempt += 1;
