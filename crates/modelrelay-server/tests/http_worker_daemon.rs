@@ -55,7 +55,8 @@ async fn spawn_proxy_server(models_provider: &str) -> (SocketAddr, Arc<Mutex<Pro
             "anthropic",
             WorkerSocketProviderConfig::enabled("top-secret"),
         )
-        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
+        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"))
+        .with_heartbeat(Duration::from_millis(100), Duration::from_millis(300));
     let app = ProxyHttpApp::new(core.clone())
         .with_models_provider(models_provider)
         .with_worker_socket_app(worker_socket_app)
@@ -78,8 +79,9 @@ async fn spawn_proxy_server_with_api_key_store(
     api_key_store: Arc<dyn ApiKeyStore>,
 ) -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
     let core = Arc::new(Mutex::new(ProxyServerCore::new()));
-    let worker_socket_app =
-        WorkerSocketApp::new(core.clone()).with_api_key_store(api_key_store.clone());
+    let worker_socket_app = WorkerSocketApp::new(core.clone())
+        .with_api_key_store(api_key_store.clone())
+        .with_heartbeat(Duration::from_millis(100), Duration::from_millis(300));
     let app = ProxyHttpApp::new(core.clone())
         .with_models_provider(models_provider)
         .with_worker_socket_app(worker_socket_app)

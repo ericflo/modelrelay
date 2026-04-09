@@ -32,7 +32,11 @@ async fn spawn_server_with_core(
     provider_enabled: bool,
 ) -> SocketAddr {
     let worker_socket_app = WorkerSocketApp::new(core.clone())
-        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
+        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"))
+        .with_heartbeat(
+            tokio::time::Duration::from_millis(100),
+            tokio::time::Duration::from_millis(300),
+        );
     let app = ProxyHttpApp::new(core)
         .with_provider_enabled(provider_enabled)
         .with_worker_socket_app(worker_socket_app)

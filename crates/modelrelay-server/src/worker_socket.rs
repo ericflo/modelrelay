@@ -39,8 +39,8 @@ const CLOSE_CODE_PROTOCOL_ERROR: u16 = 1002;
 const CLOSE_CODE_NORMAL: u16 = 1000;
 const AUTH_FAILURE_THRESHOLD: u32 = 3;
 const AUTH_RATE_LIMIT_COOLDOWN: StdDuration = StdDuration::from_millis(250);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
-const HEARTBEAT_PONG_TIMEOUT: Duration = Duration::from_millis(300);
+const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_HEARTBEAT_PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSocketProviderConfig {
@@ -81,9 +81,19 @@ impl WorkerSocketApp {
                 core,
                 providers: HashMap::new(),
                 api_key_store: None,
+                heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+                heartbeat_pong_timeout: DEFAULT_HEARTBEAT_PONG_TIMEOUT,
                 failed_auth_by_client: Arc::new(Mutex::new(HashMap::new())),
             },
         }
+    }
+
+    /// Override heartbeat timing (for tests). Production uses 30s interval / 10s pong timeout.
+    #[must_use]
+    pub fn with_heartbeat(mut self, interval: Duration, pong_timeout: Duration) -> Self {
+        self.state.heartbeat_interval = interval;
+        self.state.heartbeat_pong_timeout = pong_timeout;
+        self
     }
 
     #[must_use]
@@ -119,6 +129,8 @@ struct WorkerSocketState {
     core: Arc<Mutex<ProxyServerCore>>,
     providers: HashMap<String, WorkerSocketProviderConfig>,
     api_key_store: Option<Arc<dyn ApiKeyStore>>,
+    heartbeat_interval: Duration,
+    heartbeat_pong_timeout: Duration,
     failed_auth_by_client: Arc<Mutex<HashMap<String, FailedAuthState>>>,
 }
 
@@ -374,7 +386,7 @@ async fn handle_authenticated_socket(
             }
             Err(_) => {
                 if awaiting_pong_since
-                    .is_some_and(|sent_at| sent_at.elapsed() >= HEARTBEAT_PONG_TIMEOUT)
+                    .is_some_and(|sent_at| sent_at.elapsed() >= state.heartbeat_pong_timeout)
                 {
                     disconnect_worker(&state, &worker_id).await;
                     close_socket(socket, CLOSE_CODE_NORMAL, CLOSE_REASON_STALE_HEARTBEAT).await;
@@ -382,7 +394,7 @@ async fn handle_authenticated_socket(
                 }
 
                 if awaiting_pong_since.is_none()
-                    && last_heartbeat_activity_at.elapsed() >= HEARTBEAT_INTERVAL
+                    && last_heartbeat_activity_at.elapsed() >= state.heartbeat_interval
                 {
                     if send_heartbeat_ping(&mut socket).await.is_err() {
                         disconnect_worker(&state, &worker_id).await;
