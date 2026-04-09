@@ -789,10 +789,24 @@ impl ProxyServerCore {
     pub fn provider_models(&self, provider: &str) -> Vec<String> {
         let mut seen = HashSet::new();
 
-        self.worker_order
+        // Try exact provider match first; fall back to all workers if none match.
+        let exact: Vec<String> = self
+            .worker_order
             .iter()
             .filter_map(|worker_id| self.workers.get(worker_id))
             .filter(|worker| worker.provider == provider)
+            .flat_map(|worker| worker.models.iter())
+            .filter(|model| model.as_str() != "*")
+            .filter(|model| seen.insert((*model).clone()))
+            .cloned()
+            .collect();
+        if !exact.is_empty() {
+            return exact;
+        }
+        // Fallback: return models from any provider
+        self.worker_order
+            .iter()
+            .filter_map(|worker_id| self.workers.get(worker_id))
             .flat_map(|worker| worker.models.iter())
             .filter(|model| model.as_str() != "*")
             .filter(|model| seen.insert((*model).clone()))
@@ -919,6 +933,20 @@ impl ProxyServerCore {
     }
 
     fn find_eligible_worker_id(&mut self, provider: &str, model: &str) -> Option<String> {
+        // Try exact provider match first, then fall back to any provider.
+        // The fallback handles single-tenant hosted setups where the server's
+        // configured provider name may not match the worker's.
+        if let Some(id) = self.find_eligible_worker_id_for_provider(Some(provider), model) {
+            return Some(id);
+        }
+        self.find_eligible_worker_id_for_provider(None, model)
+    }
+
+    fn find_eligible_worker_id_for_provider(
+        &mut self,
+        provider_filter: Option<&str>,
+        model: &str,
+    ) -> Option<String> {
         let eligible_workers = self
             .worker_order
             .iter()
@@ -931,12 +959,10 @@ impl ProxyServerCore {
                     .any(|worker_model| worker_model == "*" || worker_model == model);
                 let selection_load = worker.selection_load();
                 let has_capacity = selection_load < worker.max_concurrent;
+                let provider_matches =
+                    provider_filter.is_none_or(|provider| worker.provider == provider);
 
-                if worker.provider == provider
-                    && supports_exact_model
-                    && has_capacity
-                    && !worker.is_draining
-                {
+                if provider_matches && supports_exact_model && has_capacity && !worker.is_draining {
                     Some((position, worker_id.clone(), selection_load))
                 } else {
                     None
@@ -950,7 +976,9 @@ impl ProxyServerCore {
             .filter(|(_, _, load)| *load == lowest_load)
             .collect::<Vec<_>>();
 
-        let key = SelectionKey::new(provider, model);
+        // Use the actual provider for the selection key when falling back
+        let effective_provider = provider_filter.unwrap_or("_any");
+        let key = SelectionKey::new(effective_provider, model);
         let last_position = self.selection_cursors.get(&key).copied();
 
         let (position, worker_id, _) = tied_workers
@@ -988,10 +1016,10 @@ impl ProxyServerCore {
         })
     }
 
-    fn provider_has_compatible_worker(&self, provider: &str, model: &str) -> bool {
+    fn provider_has_compatible_worker(&self, _provider: &str, model: &str) -> bool {
+        // Check any provider — matches the fallback behavior in find_eligible_worker_id
         self.workers.values().any(|worker| {
-            worker.provider == provider
-                && !worker.is_draining
+            !worker.is_draining
                 && worker
                     .models
                     .iter()
