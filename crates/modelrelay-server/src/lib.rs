@@ -903,9 +903,11 @@ impl ProxyServerCore {
         }
 
         let queue = self.provider_queues.get_mut(&provider)?;
-        let queue_index = queue
-            .iter()
-            .position(|request| models.iter().any(|model| model == &request.model))?;
+        let queue_index = queue.iter().position(|request| {
+            models
+                .iter()
+                .any(|model| model == "*" || model == &request.model)
+        })?;
         let request = queue.remove(queue_index)?;
 
         self.assign_to_worker(worker_id, request.clone());
@@ -925,7 +927,7 @@ impl ProxyServerCore {
                 let supports_exact_model = worker
                     .models
                     .iter()
-                    .any(|worker_model| worker_model == model);
+                    .any(|worker_model| worker_model == "*" || worker_model == model);
                 let selection_load = worker.selection_load();
                 let has_capacity = selection_load < worker.max_concurrent;
 
@@ -989,7 +991,10 @@ impl ProxyServerCore {
         self.workers.values().any(|worker| {
             worker.provider == provider
                 && !worker.is_draining
-                && worker.models.iter().any(|supported| supported == model)
+                && worker
+                    .models
+                    .iter()
+                    .any(|supported| supported == "*" || supported == model)
         })
     }
 
@@ -1956,5 +1961,65 @@ mod tests {
         );
         assert_eq!(core.request_state("request-1"), None);
         assert!(core.queued_request_ids("openai").is_empty());
+    }
+
+    #[test]
+    fn wildcard_model_matches_any_requested_model() {
+        let mut core = ProxyServerCore::new();
+        let worker_id = core
+            .register_worker("openai", register_message("gpu-a", &["*"], 2, Some(0)))
+            .worker_id;
+
+        // Direct dispatch should work for any model name
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: worker_id.clone(),
+            })
+        );
+
+        assert_eq!(
+            core.submit_request("openai", "gpt-4o"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-2".to_string(),
+                worker_id: worker_id.clone(),
+            })
+        );
+
+        // Queue a request, then free capacity — wildcard worker should drain it
+        assert_eq!(
+            core.submit_request("openai", "mistral-large"),
+            SubmissionOutcome::Queued(QueuedAssignment {
+                request_id: "request-3".to_string(),
+                queue_len: 1,
+            })
+        );
+
+        // Finish a request to free capacity — dispatch_next_compatible runs inside
+        // finish_request, so the queued request-3 should be dispatched immediately.
+        let dispatched = core.finish_request(&worker_id, "request-1");
+        assert_eq!(
+            dispatched,
+            Some(DispatchAssignment {
+                request_id: "request-3".to_string(),
+                worker_id: worker_id.clone(),
+            })
+        );
+    }
+
+    #[test]
+    fn wildcard_worker_is_recognized_as_compatible() {
+        let mut core = ProxyServerCore::new();
+        let _worker_id = core
+            .register_worker("openai", register_message("gpu-a", &["*"], 1, Some(0)))
+            .worker_id;
+
+        // With a wildcard worker, submitting an unknown model should dispatch, not queue
+        // (provider_has_compatible_worker should return true)
+        assert!(matches!(
+            core.submit_request("openai", "any-random-model"),
+            SubmissionOutcome::Dispatched(_)
+        ));
     }
 }

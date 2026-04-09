@@ -179,7 +179,7 @@ pub fn dashboard_page() -> String {
       }
       let html = '<table class="data"><thead><tr><th>Worker</th><th>Models</th><th>Load</th><th>Status</th></tr></thead><tbody>';
       for (const w of workers) {
-        const models = (w.models||[]).map(m => '<span class="model-tag">' + escHtml(m) + '</span>').join('');
+        const models = (w.models||[]).map(m => '<span class="model-tag">' + (m === '*' ? 'All models' : escHtml(m)) + '</span>').join('');
         const load = w.in_flight_count + ' / ' + w.max_concurrent;
         const status = w.is_draining
           ? '<span class="badge badge-warn">Draining</span>'
@@ -723,11 +723,13 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     // Update curl test command
     const curlEl = $('#curl-test');
     if (curlEl) {
-      const apiKey = (cloudCfg && cloudCfg.apiKey) ? cloudCfg.apiKey : (localStorage.getItem('mr_test_api_key') || '');
+      const apiKeyInput = $('#test-api-key');
+      const apiKey = (cloudCfg && cloudCfg.apiKey) ? cloudCfg.apiKey : (apiKeyInput ? apiKeyInput.value.trim() : '') || (localStorage.getItem('mr_test_api_key') || '');
+      const testModel = ($('#test-model') && $('#test-model').value.trim()) || 'your-model';
       let curlCmd = 'curl -X POST ' + serverUrl + '/v1/chat/completions \\\n' +
         '  -H "Content-Type: application/json" \\\n';
       if (apiKey) curlCmd += '  -H "Authorization: Bearer ' + apiKey + '" \\\n';
-      curlCmd += '  -d \'{"model":"your-model","messages":[{"role":"user","content":"Hello!"}],"max_tokens":100}\'';
+      curlCmd += '  -d \'{"model":"' + testModel + '","messages":[{"role":"user","content":"Hello!"}],"max_tokens":100}\'';
       curlEl.textContent = curlCmd;
     }
   }
@@ -781,8 +783,9 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
             const name = newWorker.worker_name || newWorker.worker_id;
             const models = (newWorker.models || []).join(', ');
             detectedModels = newWorker.models || [];
+            const modelsDisplay = models === '*' ? 'all models' : models;
             statusText.innerHTML = '<span class="check-mark">&#10003;</span> Worker <strong>' + escHtml(name) + '</strong> connected!' +
-              (models ? ' <span style="color:#8b949e;">(' + escHtml(models) + ')</span>' : '');
+              (modelsDisplay ? ' <span style="color:#8b949e;">(' + escHtml(modelsDisplay) + ')</span>' : '');
           }
           if (troubleshoot) troubleshoot.style.display = 'none';
           if (skipBtn) skipBtn.style.display = 'none';
@@ -822,7 +825,11 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     };
 
     try {
-      const apiKey = (cloudCfg && cloudCfg.apiKey) ? cloudCfg.apiKey : (localStorage.getItem('mr_test_api_key') || '');
+      const apiKeyInput = $('#test-api-key');
+      let apiKey = (cloudCfg && cloudCfg.apiKey) ? cloudCfg.apiKey : '';
+      if (!apiKey && apiKeyInput) apiKey = apiKeyInput.value.trim();
+      if (!apiKey) apiKey = localStorage.getItem('mr_test_api_key') || '';
+      if (apiKey && apiKeyInput) localStorage.setItem('mr_test_api_key', apiKey);
       const headers = { 'Content-Type': 'application/json' };
       if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
       const r = await fetch(serverUrl + '/v1/chat/completions', {
@@ -875,10 +882,13 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   } else {
     const urlInput = $('#cfg-server-url');
     if (urlInput && !urlInput.value) urlInput.value = window.location.origin;
+    const savedApiKey = localStorage.getItem('mr_test_api_key');
+    const apiKeyInput = $('#test-api-key');
+    if (apiKeyInput && savedApiKey && !apiKeyInput.value) apiKeyInput.value = savedApiKey;
   }
 
   document.addEventListener('input', (e) => {
-    if (e.target.id === 'cfg-server-url' || e.target.id === 'cfg-worker-secret' || e.target.id === 'cfg-worker-name') {
+    if (e.target.id === 'cfg-server-url' || e.target.id === 'cfg-worker-secret' || e.target.id === 'cfg-worker-name' || e.target.id === 'test-api-key' || e.target.id === 'test-model') {
       updateConfigSnippet();
     }
   });
@@ -1175,6 +1185,10 @@ export MODELS="*"</code>
         <div class="config-input">
           <label for="test-model">Model name:</label>
           <input id="test-model" type="text" placeholder="e.g. llama-3.2-3b-instruct" value="">
+        </div>
+        <div class="config-input">
+          <label for="test-api-key">API key <span style="color:#484f58;">(optional, for auth-required setups)</span>:</label>
+          <input id="test-api-key" type="text" placeholder="mr_live_..." value="">
         </div>
         <p style="margin:16px 0;">
           <button class="btn" id="test-btn" onclick="window.__testInference()">Send Test Request</button>
