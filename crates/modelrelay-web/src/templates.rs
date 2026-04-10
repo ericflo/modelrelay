@@ -375,6 +375,7 @@ pub fn dashboard_page() -> String {
     .logo span {{ color: #7c3aed; }}
     .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
     .nav-links a:hover {{ color: #e6edf3; }}
+    .nav-links a.active {{ color: #7c3aed; }}
 
     .content {{ padding: 32px 0; }}
     .content h1 {{ font-size: 1.75rem; margin-bottom: 20px; }}
@@ -391,7 +392,7 @@ pub fn dashboard_page() -> String {
     <div class="container">
       <a href="/" class="logo">Model<span>Relay</span></a>
       <div class="nav-links">
-        <a href="/dashboard">Dashboard</a>
+        <a href="/dashboard" class="active">Dashboard</a>
         <a href="/setup">Setup</a>
         <a href="/integrate">Integrate</a>
       </div>
@@ -1358,6 +1359,19 @@ Get-Service ModelRelayWorker</code>
     </div>
     "##;
 
+    let logged_in = cloud_config.is_some();
+    let setup_nav_links = if logged_in {
+        r#"<a href="/dashboard">Dashboard</a>
+        <a href="/setup" class="active">Setup</a>
+        <a href="/integrate">Integrate</a>
+        <a href="/pricing">Pricing</a>
+        <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
+    } else {
+        r#"<a href="/dashboard">Dashboard</a>
+        <a href="/setup" class="active">Setup</a>
+        <a href="/integrate">Integrate</a>"#
+    };
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -1382,6 +1396,10 @@ Get-Service ModelRelayWorker</code>
     .logo span {{ color: #7c3aed; }}
     .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
     .nav-links a:hover {{ color: #e6edf3; }}
+    .nav-links a.active {{ color: #7c3aed; }}
+    .nav-links form {{ display: inline; }}
+    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
+    .nav-links button:hover {{ color: #e6edf3; }}
 
     .content {{ padding: 32px 0; }}
     .content h1 {{ font-size: 1.75rem; margin-bottom: 8px; }}
@@ -1406,9 +1424,7 @@ Get-Service ModelRelayWorker</code>
     <div class="container" style="max-width:960px;">
       <a href="/" class="logo">Model<span>Relay</span></a>
       <div class="nav-links">
-        <a href="/dashboard">Dashboard</a>
-        <a href="/setup">Setup</a>
-        <a href="/integrate">Integrate</a>
+        {setup_nav_links}
       </div>
     </div>
   </nav>
@@ -1593,6 +1609,12 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     : localStorage.getItem('mr_test_api_key') || '';
   modelInput.value = localStorage.getItem('mr_model_name') || '';
 
+  // Show cloud banner when logged in with pre-filled credentials
+  if (cloudCfg && cloudCfg.apiKey) {
+    const banner = $('#int-cloud-banner');
+    if (banner) banner.style.display = 'block';
+  }
+
   function sv() { return urlInput.value.trim().replace(/\/+$/, '') || 'https://your-server.example.com'; }
   function ak() { return keyInput.value.trim() || 'your-api-key'; }
   function mn() { return modelInput.value.trim() || 'your-model-name'; }
@@ -1692,12 +1714,16 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     const url = sv();
     const key = ak();
     const model = mn();
+    if (!url || url === 'https://your-server.example.com') {
+      demoOutput.innerHTML = '<span class="demo-placeholder">Enter your server URL above to try the live demo.</span>';
+      return;
+    }
     if (!key || key === 'your-api-key') {
-      demoOutput.innerHTML = '<span class="demo-placeholder">Please enter your API key above first.</span>';
+      demoOutput.innerHTML = '<span class="demo-placeholder">Enter your API key above to try the live demo.</span>';
       return;
     }
     if (!model || model === 'your-model-name') {
-      demoOutput.innerHTML = '<span class="demo-placeholder">Please enter a model name above first.</span>';
+      demoOutput.innerHTML = '<span class="demo-placeholder">Enter a model name above to try the live demo.</span>';
       return;
     }
     const prompt = demoPrompt.value.trim();
@@ -1709,7 +1735,7 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     demoSend.style.display = 'none';
     demoStop.style.display = '';
     demoOutput.textContent = '';
-    demoStatus.textContent = streaming ? 'Streaming...' : 'Waiting...';
+    demoStatus.textContent = streaming ? 'Streaming...' : 'Sending request...';
     const t0 = performance.now();
 
     try {
@@ -1728,9 +1754,13 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
       });
 
       if (!res.ok) {
-        const err = await res.text();
-        demoOutput.textContent = 'Error ' + res.status + ': ' + err;
-        demoStatus.textContent = 'Error';
+        const err = await res.text().catch(() => 'Unknown error');
+        const hint = res.status === 401 ? ' — check your API key'
+          : res.status === 404 ? ' — check your server URL'
+          : res.status === 503 ? ' — no workers available'
+          : '';
+        demoOutput.innerHTML = '<span class="demo-placeholder" style="color:#f87171;">HTTP ' + res.status + ': ' + escHtml(err) + hint + '</span>';
+        demoStatus.textContent = 'Error ' + res.status;
         return;
       }
 
@@ -1788,8 +1818,11 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
         demoStatus.textContent = 'Stopped';
         const cursor = demoOutput.querySelector('.demo-cursor');
         if (cursor) cursor.remove();
+      } else if (e.name === 'TypeError' && e.message.includes('Failed to fetch')) {
+        demoOutput.innerHTML = '<span class="demo-placeholder" style="color:#f87171;">Could not connect to the server. This is usually a CORS issue or the server is unreachable. Make sure your server URL is correct and accessible from your browser.</span>';
+        demoStatus.textContent = 'Connection failed';
       } else {
-        demoOutput.textContent = 'Error: ' + e.message;
+        demoOutput.innerHTML = '<span class="demo-placeholder" style="color:#f87171;">' + escHtml(e.message) + '</span>';
         demoStatus.textContent = 'Error';
       }
     } finally {
@@ -1981,6 +2014,18 @@ func main() {
     fmt.Println()
 }";
 
+    let logged_in = cloud_config.is_some();
+    let integrate_nav_links = if logged_in {
+        r#"<a href="/dashboard">Dashboard</a>
+        <a href="/integrate" class="active">Integrate</a>
+        <a href="/pricing">Pricing</a>
+        <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
+    } else {
+        r#"<a href="/dashboard">Dashboard</a>
+        <a href="/setup">Setup</a>
+        <a href="/integrate" class="active">Integrate</a>"#
+    };
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -2006,6 +2051,9 @@ func main() {
     .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
     .nav-links a:hover {{ color: #e6edf3; }}
     .nav-links a.active {{ color: #7c3aed; }}
+    .nav-links form {{ display: inline; }}
+    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
+    .nav-links button:hover {{ color: #e6edf3; }}
 
     .content {{ padding: 32px 0; }}
     .content h1 {{ font-size: 1.75rem; margin-bottom: 4px; }}
@@ -2023,9 +2071,7 @@ func main() {
     <div class="container">
       <a href="/" class="logo">Model<span>Relay</span></a>
       <div class="nav-links">
-        <a href="/dashboard">Dashboard</a>
-        <a href="/setup">Setup</a>
-        <a href="/integrate" class="active">Integrate</a>
+        {integrate_nav_links}
       </div>
     </div>
   </nav>
@@ -2034,6 +2080,10 @@ func main() {
     <div class="container">
       <h1>Integrate</h1>
       <p class="subtitle">Copy-paste configuration for your favorite tools, agents, and languages.</p>
+
+      <div id="int-cloud-banner" style="display:none;padding:10px 16px;background:#0b1d0b;border:1px solid #064e3b;border-radius:8px;margin-bottom:16px;font-size:0.9rem;color:#34d399;">
+        &#x2705; Logged in &mdash; your server URL and API key are pre-filled below.
+      </div>
 
       <!-- ── Inputs bar ── -->
       <div class="integrate-inputs">
@@ -2178,6 +2228,58 @@ func main() {
           <div class="int-content" data-tab="stream-go">
             <h3>Go <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">github.com/sashabaranov/go-openai</span></h3>
             <div class="code-block" data-snippet="{snippet_go_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ═══ Response Format ═══ -->
+      <div class="section-heading"><span class="icon">&#128196;</span> Response Format</div>
+      <div class="tab-section">
+        <div class="int-tabs">
+          <div class="tab active" data-tab="resp-non-stream">Non-Streaming</div>
+          <div class="tab" data-tab="resp-stream">Streaming (SSE)</div>
+        </div>
+        <div class="int-panel">
+
+          <div class="int-content active" data-tab="resp-non-stream">
+            <h3>Non-Streaming Response <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">OpenAI-compatible JSON</span></h3>
+            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">ModelRelay returns the standard OpenAI chat completions response format. Any SDK or tool that works with the OpenAI API works with ModelRelay.</p>
+            <div class="code-block"><button class="copy-btn">Copy</button><span class="code-text">{{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "your-model-name",
+  "choices": [
+    {{
+      "index": 0,
+      "message": {{
+        "role": "assistant",
+        "content": "Hello! Here's a fun fact: ..."
+      }},
+      "finish_reason": "stop"
+    }}
+  ],
+  "usage": {{
+    "prompt_tokens": 12,
+    "completion_tokens": 42,
+    "total_tokens": 54
+  }}
+}}</span></div>
+          </div>
+
+          <div class="int-content" data-tab="resp-stream">
+            <h3>Streaming Response <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">Server-Sent Events</span></h3>
+            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">When <code style="font-size:0.85rem;">stream: true</code>, ModelRelay returns SSE events. Each event contains a delta with partial content.</p>
+            <div class="code-block"><button class="copy-btn">Copy</button><span class="code-text">data: {{"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000000,"model":"your-model-name","choices":[{{"index":0,"delta":{{"role":"assistant","content":""}},"finish_reason":null}}]}}
+
+data: {{"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000000,"model":"your-model-name","choices":[{{"index":0,"delta":{{"content":"Hello"}},"finish_reason":null}}]}}
+
+data: {{"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000000,"model":"your-model-name","choices":[{{"index":0,"delta":{{"content":"!"}},"finish_reason":null}}]}}
+
+data: {{"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000000,"model":"your-model-name","choices":[{{"index":0,"delta":{{}},"finish_reason":"stop"}}]}}
+
+data: [DONE]</span></div>
           </div>
 
         </div>
