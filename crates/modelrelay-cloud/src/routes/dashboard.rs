@@ -738,153 +738,155 @@ fn subscriber_dashboard_html(
 ) -> String {
     let email_escaped = html_escape(email);
 
-    let sub_card = if let Some(s) = sub {
-        let badge = status_badge(&s.status);
-        let updated = s.updated_at.format("%B %d, %Y").to_string();
-        let billing_btn = if has_stripe_customer {
-            format!(
-                "<form method=\"POST\" action=\"/dashboard/billing-portal\" style=\"margin-top:16px;\">\
-                   {csrf_field}\
-                   <button type=\"submit\" class=\"btn\">Manage Billing &rarr;</button>\
-                 </form>"
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "<div class=\"card\">\
-               <h2>Subscription</h2>\
-               <p style=\"margin-top:8px;\">{badge}</p>\
-               <table class=\"info-table\">\
-                 <tr><td>Email</td><td>{email_escaped}</td></tr>\
-                 <tr><td>Status</td><td>{}</td></tr>\
-                 <tr><td>Last Updated</td><td>{updated}</td></tr>\
-               </table>\
-               {billing_btn}\
-             </div>",
-            html_escape(&s.status),
-        )
-    } else {
-        let billing_btn = if has_stripe_customer {
-            format!(
-                "<form method=\"POST\" action=\"/dashboard/billing-portal\" style=\"margin-top:16px;\">\
-                   {csrf_field}\
-                   <button type=\"submit\" class=\"btn\">Manage Billing &rarr;</button>\
-                 </form>"
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "<div class=\"card\">\
-               <h2>Subscription</h2>\
-               <p style=\"margin-top:8px;\"><span class=\"badge\">No Active Subscription</span></p>\
-               <p style=\"margin-top:12px;\">You don't have an active subscription. \
-                  <a href=\"/pricing\">View pricing</a> to get started.</p>\
-               {billing_btn}\
-             </div>"
-        )
-    };
+    // ── Welcome header ──
+    let welcome = format!(
+        "<div style=\"margin-bottom:24px;\">\
+           <p style=\"color:#8b949e;margin-top:4px;\">Signed in as <strong style=\"color:#e6edf3;\">{email_escaped}</strong></p>\
+         </div>"
+    );
 
+    // ── API Key card (prominent, with copy button) ──
     let api_key_card = if let Some(s) = sub {
         if let Some(key) = api_key {
             format!(
-                "<div class=\"card\">\
-                   <h2>API Key</h2>\
-                   <p style=\"margin-top:8px;\"><span class=\"badge badge-active\">Provisioned</span></p>\
-                   <div class=\"key-display\">\
-                     <code>{}</code>\
+                "<div class=\"card\" style=\"border-color:#7c3aed;\">\
+                   <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge badge-active\">Active</span></h2>\
+                   <div class=\"key-display\" style=\"position:relative;margin-top:12px;\">\
+                     <code id=\"api-key-value\">{}</code>\
+                     <button onclick=\"navigator.clipboard.writeText(document.getElementById('api-key-value').textContent).then(function(){{var b=this;this.textContent='Copied!';setTimeout(function(){{b.textContent='Copy';}},1500);}}.bind(this))\" \
+                       style=\"position:absolute;top:8px;right:8px;padding:4px 10px;font-size:0.75rem;background:#30363d;color:#e6edf3;border:none;border-radius:4px;cursor:pointer;\">Copy</button>\
                    </div>\
-                   <p style=\"margin-top:8px;color:#8b949e;\">Use this key in your <code>modelrelay-server</code> configuration.</p>\
+                   <div style=\"margin-top:12px;display:flex;gap:12px;flex-wrap:wrap;\">\
+                     <a href=\"/integrate\" style=\"color:#7c3aed;font-size:0.9rem;font-weight:600;\">View integration snippets &rarr;</a>\
+                     <a href=\"/setup\" style=\"color:#7c3aed;font-size:0.9rem;font-weight:600;\">Connect a worker &rarr;</a>\
+                   </div>\
                  </div>",
                 html_escape(key),
             )
         } else if s.api_key_id.is_some() {
             "<div class=\"card\">\
-               <h2>API Key</h2>\
-               <p style=\"margin-top:8px;\"><span class=\"badge badge-active\">Provisioned</span></p>\
+               <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge badge-active\">Provisioned</span></h2>\
                <p style=\"margin-top:12px;color:#8b949e;\">Your API key has been provisioned. \
                   The raw key was shown once at creation and is stored securely.</p>\
+               <p style=\"margin-top:12px;\"><a href=\"/integrate\" style=\"color:#7c3aed;font-size:0.9rem;font-weight:600;\">View integration snippets &rarr;</a></p>\
              </div>"
                 .to_string()
         } else if s.status == "active" {
             "<div class=\"card\">\
-               <h2>API Key</h2>\
-               <p style=\"margin-top:8px;\"><span class=\"badge\">Pending Provisioning</span></p>\
+               <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge\">Pending</span></h2>\
                <p style=\"margin-top:12px;color:#8b949e;\">Your subscription is active. \
                   Your API key is being provisioned and will appear here shortly.</p>\
              </div>"
                 .to_string()
         } else {
             "<div class=\"card\">\
-               <h2>API Key</h2>\
-               <p style=\"margin-top:8px;\"><span class=\"badge\">Unavailable</span></p>\
+               <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge\">Unavailable</span></h2>\
                <p style=\"margin-top:12px;color:#8b949e;\">An active subscription is required for API key access.</p>\
+               <p style=\"margin-top:12px;\"><a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a></p>\
              </div>"
                 .to_string()
         }
     } else {
         "<div class=\"card\">\
-           <h2>API Key</h2>\
-           <p style=\"margin-top:8px;\"><span class=\"badge\">Unavailable</span></p>\
-           <p style=\"margin-top:12px;color:#8b949e;\">Subscribe to receive your relay API key.</p>\
+           <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge\">Unavailable</span></h2>\
+           <p style=\"margin-top:12px;color:#8b949e;\">Subscribe to get your relay API key and start routing inference requests.</p>\
+           <p style=\"margin-top:12px;\"><a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a></p>\
          </div>"
             .to_string()
     };
 
-    let onboarding_card = if api_key.is_some() {
-        "<div class=\"card\" style=\"border-color:#7c3aed;\">\
-           <h2>&#x1F680; Connect a Worker Machine</h2>\
-           <p style=\"margin-top:8px;\">You have an API key &mdash; now connect a GPU machine to start serving inference requests through ModelRelay.</p>\
-           <p style=\"margin-top:8px;color:#8b949e;\">The setup wizard will walk you through downloading the worker binary, configuring it with your server URL and API key, and verifying the connection.</p>\
-           <p style=\"margin-top:16px;\"><a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a></p>\
+    // ── Relay status + Subscription in a 2-column grid ──
+    let sub_badge = if let Some(s) = sub {
+        format!(
+            "{}<table class=\"info-table\" style=\"margin-top:8px;\">\
+               <tr><td>Status</td><td>{}</td></tr>\
+               <tr><td>Updated</td><td>{}</td></tr>\
+             </table>",
+            status_badge(&s.status),
+            html_escape(&s.status),
+            s.updated_at.format("%B %d, %Y"),
+        )
+    } else {
+        "<span class=\"badge\">No Active Subscription</span>\
+         <p style=\"margin-top:8px;\"><a href=\"/pricing\">View pricing &rarr;</a></p>"
+            .to_string()
+    };
+    let billing_btn = if has_stripe_customer {
+        format!(
+            "<form method=\"POST\" action=\"/dashboard/billing-portal\" style=\"margin-top:12px;\">\
+               {csrf_field}\
+               <button type=\"submit\" style=\"background:none;border:none;color:#7c3aed;cursor:pointer;font-size:0.9rem;font-weight:600;font-family:inherit;padding:0;\">Manage billing &rarr;</button>\
+             </form>"
+        )
+    } else {
+        String::new()
+    };
+
+    let stats_and_sub = format!(
+        "<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px;\">\
+           <div class=\"card\" style=\"margin-bottom:0;\">\
+             <h2>Relay Status</h2>\
+             <div id=\"relay-stats\">\
+               <p style=\"margin-top:8px;color:#8b949e;\">Loading&hellip;</p>\
+             </div>\
+             <script>\
+               (function(){{\
+                 fetch('/dashboard/stats',{{credentials:'same-origin'}})\
+                   .then(function(r){{return r.json();}})\
+                   .then(function(d){{\
+                     var el=document.getElementById('relay-stats');\
+                     var qd=d.queue_depth||{{}};\
+                     var total=0;\
+                     for(var k in qd){{if(qd.hasOwnProperty(k))total+=qd[k];}}\
+                     var aw=d.active_workers||0;\
+                     el.innerHTML='<table class=\"info-table\" style=\"margin-top:8px;\">'\
+                       +'<tr><td>Workers</td><td>'+aw+'</td></tr>'\
+                       +'<tr><td>Queue Depth</td><td>'+total+'</td></tr>'\
+                       +'</table>';\
+                     if(Object.keys(qd).length>1){{\
+                       var extra='<p style=\"margin-top:8px;color:#8b949e;font-size:0.85em;\">Per-model: ';\
+                       for(var m in qd){{if(qd.hasOwnProperty(m))extra+=m+':&nbsp;'+qd[m]+'&ensp;';}}\
+                       extra+='</p>';\
+                       el.innerHTML+=extra;\
+                     }}\
+                   }})\
+                   .catch(function(){{\
+                     document.getElementById('relay-stats').innerHTML=\
+                       '<p style=\"margin-top:8px;color:#8b949e;\">Could not load stats.</p>';\
+                   }});\
+               }})();\
+             </script>\
+           </div>\
+           <div class=\"card\" style=\"margin-bottom:0;\">\
+             <h2>Subscription</h2>\
+             <p style=\"margin-top:8px;\">{sub_badge}</p>\
+             {billing_btn}\
+           </div>\
+         </div>"
+    );
+
+    // ── Quick start links (only when they have a key) ──
+    let quick_start = if api_key.is_some() {
+        "<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:24px;\">\
+           <a href=\"/setup\" class=\"card\" style=\"margin-bottom:0;text-decoration:none;transition:border-color 0.2s;\">\
+             <h2 style=\"font-size:1rem;\">&#x2699;&#xFE0F; Setup</h2>\
+             <p style=\"color:#8b949e;font-size:0.85rem;margin-top:4px;\">Connect a GPU worker machine</p>\
+           </a>\
+           <a href=\"/integrate\" class=\"card\" style=\"margin-bottom:0;text-decoration:none;transition:border-color 0.2s;\">\
+             <h2 style=\"font-size:1rem;\">&#x1F4CB; Integrate</h2>\
+             <p style=\"color:#8b949e;font-size:0.85rem;margin-top:4px;\">Code snippets for your favorite tools</p>\
+           </a>\
+           <a href=\"https://github.com/ericflo/modelrelay\" target=\"_blank\" class=\"card\" style=\"margin-bottom:0;text-decoration:none;transition:border-color 0.2s;\">\
+             <h2 style=\"font-size:1rem;\">&#x1F4D6; Docs</h2>\
+             <p style=\"color:#8b949e;font-size:0.85rem;margin-top:4px;\">GitHub README and examples</p>\
+           </a>\
          </div>"
             .to_string()
     } else {
-        "<div class=\"card\">\
-           <h2>Next Steps</h2>\
-           <p style=\"margin-top:8px;color:#8b949e;\">Once you have an active subscription and API key, you'll be able to connect worker machines and start serving inference requests.</p>\
-           <p style=\"margin-top:12px;\"><a href=\"/pricing\">View Pricing &rarr;</a></p>\
-         </div>"
-            .to_string()
+        String::new()
     };
 
-    let stats_card = "\
-        <div class=\"card\">\
-          <h2>Relay Status</h2>\
-          <div id=\"relay-stats\">\
-            <p style=\"margin-top:8px;color:#8b949e;\">Loading relay stats&hellip;</p>\
-          </div>\
-          <script>\
-            (function(){\
-              fetch('/dashboard/stats',{credentials:'same-origin'})\
-                .then(function(r){return r.json();})\
-                .then(function(d){\
-                  var el=document.getElementById('relay-stats');\
-                  var qd=d.queue_depth||{};\
-                  var total=0;\
-                  for(var k in qd){if(qd.hasOwnProperty(k))total+=qd[k];}\
-                  var aw=d.active_workers||0;\
-                  el.innerHTML='<table class=\"info-table\" style=\"margin-top:8px;\">'\
-                    +'<tr><td>Active Workers</td><td>'+aw+'</td></tr>'\
-                    +'<tr><td>Queue Depth</td><td>'+total+'</td></tr>'\
-                    +'</table>';\
-                  if(Object.keys(qd).length>1){\
-                    var extra='<p style=\"margin-top:8px;color:#8b949e;font-size:0.9em;\">Per-model: ';\
-                    for(var m in qd){if(qd.hasOwnProperty(m))extra+=m+':&nbsp;'+qd[m]+'&ensp;';}\
-                    extra+='</p>';\
-                    el.innerHTML+=extra;\
-                  }\
-                })\
-                .catch(function(){\
-                  document.getElementById('relay-stats').innerHTML=\
-                    '<p style=\"margin-top:8px;color:#8b949e;\">Could not load relay stats.</p>';\
-                });\
-            })();\
-          </script>\
-        </div>";
-
-    format!("{sub_card}\n{api_key_card}\n{stats_card}\n{onboarding_card}")
+    format!("{welcome}\n{api_key_card}\n{stats_and_sub}\n{quick_start}")
 }
 
 /// Minimal HTML entity escaping for untrusted strings.
