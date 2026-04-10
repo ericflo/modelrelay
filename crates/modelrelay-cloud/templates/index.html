@@ -5,17 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ModelRelay — Managed LLM Relay for Your AI Workers</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
-  <meta name="description" content="Run your local GPU workers behind a managed cloud relay. ModelRelay gives you a single API endpoint with automatic load balancing, failover, and zero DevOps.">
+  <meta name="description" content="Run your local GPU workers behind a managed cloud relay. OpenAI, Anthropic, and Responses API compatible. One endpoint, automatic load balancing, zero DevOps.">
   <link rel="canonical" href="https://modelrelay.io">
   <!-- Open Graph -->
   <meta property="og:title" content="ModelRelay — Managed LLM Relay for Your AI Workers">
-  <meta property="og:description" content="Run your local GPU workers behind a managed cloud relay. One API endpoint, automatic load balancing, zero DevOps.">
+  <meta property="og:description" content="Route inference to your own GPU workers through a secure relay. OpenAI, Anthropic, and Responses API compatible.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://modelrelay.io">
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="ModelRelay — Managed LLM Relay for Your AI Workers">
-  <meta name="twitter:description" content="Run your local GPU workers behind a managed cloud relay. One API endpoint, automatic load balancing, zero DevOps.">
+  <meta name="twitter:description" content="Route inference to your own GPU workers through a secure relay. OpenAI, Anthropic, and Responses API compatible.">
   <!-- Favicon -->
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%237c3aed'/%3E%3Cpath d='M8 10h4l4 6-4 6H8l4-6-4-6zm12 0h4l4 6-4 6h-4l4-6-4-6z' fill='white'/%3E%3C/svg%3E">
   <style>
@@ -32,7 +32,8 @@
     /* Nav */
     nav { padding: 20px 0; border-bottom: 1px solid #21262d; }
     nav .container { display: flex; justify-content: space-between; align-items: center; }
-    .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; }
+    .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; text-decoration: none; }
+    .logo:hover { text-decoration: none; }
     .logo span { color: #7c3aed; }
     .nav-links { display: flex; align-items: center; gap: 16px; }
     .nav-links a { color: #8b949e; font-size: 0.9rem; }
@@ -47,12 +48,24 @@
     .hero { text-align: center; padding: 100px 0 80px; }
     .hero h1 { font-size: 3rem; font-weight: 800; margin-bottom: 20px; line-height: 1.15; }
     .hero h1 span { color: #7c3aed; }
-    .hero p { font-size: 1.25rem; color: #8b949e; max-width: 640px; margin: 0 auto 40px; }
+    .hero p { font-size: 1.25rem; color: #8b949e; max-width: 680px; margin: 0 auto 16px; }
+    .hero .api-badges { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-bottom: 40px; }
+    .hero .api-badge {
+      display: inline-block; padding: 4px 14px; border-radius: 20px;
+      font-size: 0.85rem; font-weight: 600; background: #1c1f26; border: 1px solid #30363d; color: #8b949e;
+    }
     .btn {
       display: inline-block; padding: 14px 36px; background: #7c3aed; color: #fff;
       border-radius: 8px; font-size: 1.1rem; font-weight: 600; transition: background 0.2s;
     }
     .btn:hover { background: #6d28d9; text-decoration: none; }
+    .btn-outline {
+      display: inline-block; padding: 14px 36px; background: transparent; color: #8b949e;
+      border: 1px solid #30363d; border-radius: 8px; font-size: 1.1rem; font-weight: 600;
+      transition: border-color 0.2s, color 0.2s; margin-left: 12px;
+    }
+    .btn-outline:hover { border-color: #7c3aed; color: #e6edf3; text-decoration: none; }
+    .hero-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
 
     /* Features */
     .features { padding: 80px 0; border-top: 1px solid #21262d; }
@@ -107,21 +120,14 @@
     .code-panel { display: none; }
     .code-panel.active { display: block; }
 
-    /* Pricing */
-    .pricing { padding: 80px 0; border-top: 1px solid #21262d; text-align: center; }
-    .pricing h2 { font-size: 2rem; margin-bottom: 16px; }
-    .pricing .subtitle { color: #8b949e; margin-bottom: 40px; font-size: 1.1rem; }
-    .price-card {
-      display: inline-block; background: #161b22; border: 2px solid #7c3aed;
-      border-radius: 16px; padding: 48px; max-width: 440px; text-align: center;
-    }
-    .price-card .amount { font-size: 3.5rem; font-weight: 800; color: #e6edf3; }
-    .price-card .period { font-size: 1.1rem; color: #8b949e; }
-    .price-card ul {
-      list-style: none; margin: 24px 0 32px; text-align: left; color: #8b949e;
-    }
-    .price-card li { padding: 6px 0; }
-    .price-card li::before { content: "✓ "; color: #7c3aed; font-weight: 700; }
+    /* Pricing CTA */
+    .pricing-cta { padding: 80px 0; border-top: 1px solid #21262d; text-align: center; }
+    .pricing-cta h2 { font-size: 2rem; margin-bottom: 16px; }
+    .pricing-cta p { color: #8b949e; font-size: 1.1rem; margin-bottom: 12px; }
+    .pricing-cta .price-highlight { font-size: 2.5rem; font-weight: 800; color: #e6edf3; margin-bottom: 8px; }
+    .pricing-cta .price-detail { color: #8b949e; margin-bottom: 32px; font-size: 0.95rem; }
+    .pricing-cta .includes { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: center; margin-bottom: 32px; color: #8b949e; font-size: 0.9rem; }
+    .pricing-cta .includes span::before { content: "\2713 "; color: #7c3aed; font-weight: 700; }
 
     /* Footer */
     footer { padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }
@@ -132,14 +138,13 @@
       .hero { padding: 64px 0 48px; }
       .hero h1 { font-size: 2rem; }
       .hero p { font-size: 1.05rem; }
-      .features, .how-it-works, .pricing { padding: 48px 0; }
-      .features h2, .how-it-works h2, .pricing h2 { font-size: 1.6rem; margin-bottom: 32px; }
+      .features, .how-it-works, .pricing-cta { padding: 48px 0; }
+      .features h2, .how-it-works h2, .pricing-cta h2 { font-size: 1.6rem; margin-bottom: 32px; }
       .feature-grid, .steps { grid-template-columns: 1fr; }
       .code-example pre { font-size: 0.8rem; }
-      .price-card { padding: 32px; }
-      .price-card .amount { font-size: 2.8rem; }
       .nav-links { gap: 12px; }
       .nav-links a { font-size: 0.8rem; }
+      .btn-outline { margin-left: 0; }
     }
 
     /* Mobile */
@@ -147,15 +152,15 @@
       .container { padding: 0 16px; }
       .hero { padding: 48px 0 36px; }
       .hero h1 { font-size: 1.6rem; }
-      .hero p { font-size: 0.95rem; margin-bottom: 28px; }
-      .btn { display: block; width: 100%; text-align: center; padding: 14px 20px; }
-      .features, .how-it-works, .pricing { padding: 36px 0; }
-      .features h2, .how-it-works h2, .pricing h2 { font-size: 1.4rem; margin-bottom: 24px; }
+      .hero p { font-size: 0.95rem; margin-bottom: 12px; }
+      .hero-cta { flex-direction: column; }
+      .btn, .btn-outline { display: block; width: 100%; text-align: center; padding: 14px 20px; margin-left: 0; }
+      .features, .how-it-works, .pricing-cta { padding: 36px 0; }
+      .features h2, .how-it-works h2, .pricing-cta h2 { font-size: 1.4rem; margin-bottom: 24px; }
       .feature-card, .step { padding: 24px; }
       .code-example { padding: 16px; }
       .code-example pre { font-size: 0.75rem; }
-      .price-card { padding: 24px; max-width: 100%; }
-      .price-card .amount { font-size: 2.4rem; }
+      .pricing-cta .price-highlight { font-size: 2rem; }
       .nav-links .btn-signup { padding: 6px 12px; }
     }
   </style>
@@ -163,13 +168,13 @@
 <body>
   <nav>
     <div class="container">
-      <div class="logo">Model<span>Relay</span></div>
+      <a href="/" class="logo">Model<span>Relay</span></a>
       <div class="nav-links">
         <a href="/pricing">Pricing</a>
-        <a href="https://ericflo.github.io/modelrelay/">Docs</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
         <a href="/login">Log in</a>
         <a class="btn-signup" href="/signup">Sign up</a>
-        <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+        <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
       </div>
     </div>
   </nav>
@@ -178,7 +183,15 @@
     <div class="container">
       <h1>Managed LLM Relay for<br>Your <span>AI Workers</span></h1>
       <p>Route inference requests to your GPU workers through a secure, authenticated relay. Always-on queueing, streaming, and cancellation.</p>
-      <a class="btn" href="/pricing">Get Started &rarr;</a>
+      <div class="api-badges">
+        <span class="api-badge">OpenAI Chat Completions</span>
+        <span class="api-badge">Anthropic Messages</span>
+        <span class="api-badge">OpenAI Responses</span>
+      </div>
+      <div class="hero-cta">
+        <a class="btn" href="/signup">Get Started &rarr;</a>
+        <a class="btn-outline" href="/integrate">See Integration Guide</a>
+      </div>
     </div>
   </section>
 
@@ -191,8 +204,8 @@
           <p>Workers connect via authenticated WebSocket from anywhere &mdash; behind NAT, in the cloud, or on bare metal. No inbound ports required.</p>
         </div>
         <div class="feature-card">
-          <h3>OpenAI-Compatible API</h3>
-          <p>Drop-in replacement for any OpenAI client. Point your SDK at ModelRelay and your requests are routed to your own workers.</p>
+          <h3>Multi-API Compatible</h3>
+          <p>Supports OpenAI Chat Completions, Anthropic Messages, and the new OpenAI Responses API. Use any SDK &mdash; just point it at ModelRelay.</p>
         </div>
         <div class="feature-card">
           <h3>Managed Infrastructure</h3>
@@ -219,13 +232,14 @@
         <div class="step">
           <div class="step-number">3</div>
           <h3>Point Your SDK at ModelRelay</h3>
-          <p>Change one line &mdash; set your <code style="color:#7c3aed">base_url</code> to ModelRelay. Every request is routed to your own workers.</p>
+          <p>Change one line &mdash; set your <code style="color:#7c3aed">base_url</code> to ModelRelay. Works with OpenAI, Anthropic, and any compatible SDK.</p>
         </div>
       </div>
       <div style="max-width: 680px; margin: 0 auto;">
         <div class="code-tabs">
           <button class="code-tab active" onclick="switchTab('llamafile')">llamafile CLI</button>
-          <button class="code-tab" onclick="switchTab('python')">Python SDK</button>
+          <button class="code-tab" onclick="switchTab('python')">Python (OpenAI)</button>
+          <button class="code-tab" onclick="switchTab('anthropic')">Python (Anthropic)</button>
         </div>
         <div class="code-example" id="panel-llamafile" style="border-radius: 0 12px 12px 12px;">
           <div class="code-label">Zero-setup &mdash; no GPU required</div>
@@ -254,14 +268,31 @@ response = client.chat.completions.create(
 )
 print(response.choices[0].message.content)</pre>
         </div>
+        <div class="code-example code-panel" id="panel-anthropic" style="border-radius: 0 12px 12px 12px;">
+          <div class="code-label">Python &mdash; Anthropic SDK</div>
+          <pre><span class="comment"># Point the Anthropic SDK at your ModelRelay endpoint</span>
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url=<span class="highlight">"https://api.modelrelay.io"</span>,
+    api_key=<span class="highlight">"your-modelrelay-api-key"</span>,
+)
+
+message = client.messages.create(
+    model=<span class="highlight">"your-model"</span>,
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(message.content[0].text)</pre>
+        </div>
       </div>
       <script>
         function switchTab(tab) {
           document.querySelectorAll('.code-tab').forEach(function(t) { t.classList.remove('active'); });
-          document.getElementById('panel-llamafile').style.display = 'none';
-          document.getElementById('panel-llamafile').classList.remove('active');
-          document.getElementById('panel-python').style.display = 'none';
-          document.getElementById('panel-python').classList.remove('active');
+          ['llamafile', 'python', 'anthropic'].forEach(function(id) {
+            document.getElementById('panel-' + id).style.display = 'none';
+            document.getElementById('panel-' + id).classList.remove('active');
+          });
           document.getElementById('panel-' + tab).style.display = 'block';
           document.getElementById('panel-' + tab).classList.add('active');
           event.currentTarget.classList.add('active');
@@ -270,29 +301,25 @@ print(response.choices[0].message.content)</pre>
     </div>
   </section>
 
-  <section class="pricing">
+  <section class="pricing-cta">
     <div class="container">
-      <h2>Simple Pricing</h2>
-      <p class="subtitle">One plan. Everything included.</p>
-      <div class="price-card">
-        <div class="amount">$20</div>
-        <div class="period">per month</div>
-        <ul>
-          <li>One managed relay instance</li>
-          <li>Unlimited workers</li>
-          <li>Unlimited requests</li>
-          <li>WebSocket streaming</li>
-          <li>Request queueing &amp; cancellation</li>
-          <li>TLS &amp; authentication included</li>
-        </ul>
-        <a class="btn" href="/pricing">Get Started &rarr;</a>
+      <h2>Simple, Transparent Pricing</h2>
+      <p>One plan. Everything included. No per-request fees.</p>
+      <div class="price-highlight">$20<span style="font-size:1.1rem;font-weight:400;color:#8b949e;">/mo</span></div>
+      <div class="includes">
+        <span>Unlimited workers</span>
+        <span>Unlimited requests</span>
+        <span>WebSocket streaming</span>
+        <span>All three API formats</span>
+        <span>TLS &amp; auth included</span>
       </div>
+      <a class="btn" href="/pricing">View Pricing Details &rarr;</a>
     </div>
   </section>
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
     </div>
   </footer>
 </body>

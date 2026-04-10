@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pricing — ModelRelay</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -16,18 +17,20 @@
 
     nav { padding: 20px 0; border-bottom: 1px solid #21262d; }
     nav .container { display: flex; justify-content: space-between; align-items: center; }
-    .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; }
+    .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; text-decoration: none; }
+    .logo:hover { text-decoration: none; }
     .logo span { color: #7c3aed; }
     .nav-links { display: flex; align-items: center; gap: 16px; }
     .nav-links a { color: #8b949e; font-size: 0.9rem; }
     .nav-links a:hover { color: #e6edf3; text-decoration: none; }
+    .nav-links a.active { color: #7c3aed; }
     .nav-links .btn-signup {
       background: #7c3aed; color: #fff; padding: 6px 16px; border-radius: 6px;
       font-weight: 600; font-size: 0.9rem;
     }
     .nav-links .btn-signup:hover { background: #6d28d9; color: #fff; }
 
-    .pricing { padding: 100px 0; text-align: center; }
+    .pricing { padding: 80px 0; text-align: center; }
     .pricing h1 { font-size: 2.5rem; font-weight: 800; margin-bottom: 16px; }
     .pricing .subtitle { color: #8b949e; margin-bottom: 48px; font-size: 1.15rem; }
 
@@ -48,6 +51,18 @@
       cursor: pointer; transition: background 0.2s;
     }
     .btn:hover { background: #6d28d9; text-decoration: none; }
+
+    /* FAQ */
+    .faq { padding: 60px 0 80px; max-width: 680px; margin: 0 auto; }
+    .faq h2 { font-size: 1.6rem; margin-bottom: 32px; text-align: center; }
+    .faq-item { border-bottom: 1px solid #21262d; padding: 20px 0; }
+    .faq-item:first-of-type { border-top: 1px solid #21262d; }
+    .faq-item h3 { font-size: 1.05rem; color: #e6edf3; margin-bottom: 8px; font-weight: 600; }
+    .faq-item p { color: #8b949e; font-size: 0.95rem; }
+
+    /* Comparison */
+    .comparison { padding: 0 0 40px; text-align: center; }
+    .comparison p { color: #8b949e; font-size: 0.95rem; max-width: 600px; margin: 0 auto; }
 
     .back { display: block; margin-top: 32px; color: #8b949e; font-size: 0.9rem; }
 
@@ -82,10 +97,11 @@
     <div class="container">
       <a href="/" class="logo">Model<span>Relay</span></a>
       <div class="nav-links">
-        <a href="/pricing">Pricing</a>
+        <a href="/pricing" class="active">Pricing</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
         <a href="/login">Log in</a>
         <a class="btn-signup" href="/signup">Sign up</a>
-        <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+        <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
       </div>
     </div>
   </nav>
@@ -104,6 +120,7 @@
           <li>Unlimited requests</li>
           <li>WebSocket streaming</li>
           <li>Request queueing &amp; cancellation</li>
+          <li>All three API formats (OpenAI, Anthropic, Responses)</li>
           <li>TLS &amp; authentication included</li>
           <li>Priority support</li>
         </ul>
@@ -116,9 +133,31 @@
     </div>
   </section>
 
+  <div class="container comparison">
+    <p>Running your own relay means provisioning a server, configuring TLS, setting up auth, monitoring uptime, and keeping dependencies updated. ModelRelay handles all of that for less than the cost of a small VPS.</p>
+  </div>
+
+  <div class="container">
+    <section class="faq">
+      <h2>Frequently Asked Questions</h2>
+      <div class="faq-item">
+        <h3>What API formats does ModelRelay support?</h3>
+        <p>ModelRelay supports three API formats: OpenAI Chat Completions (<code>/v1/chat/completions</code>), Anthropic Messages (<code>/v1/messages</code>), and OpenAI Responses (<code>/v1/responses</code>). Use whichever SDK you prefer &mdash; they all route to your own workers.</p>
+      </div>
+      <div class="faq-item">
+        <h3>Are there any per-request or bandwidth fees?</h3>
+        <p>No. The $20/month plan includes unlimited requests and unlimited data transfer. You only pay the flat monthly fee regardless of usage.</p>
+      </div>
+      <div class="faq-item">
+        <h3>Can I connect multiple GPU machines?</h3>
+        <p>Yes. You can connect as many worker machines as you want. ModelRelay automatically load-balances requests across all connected workers and handles failover if one goes offline.</p>
+      </div>
+    </section>
+  </div>
+
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
     </div>
   </footer>
 </body>
