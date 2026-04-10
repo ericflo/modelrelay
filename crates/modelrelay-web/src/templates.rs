@@ -1700,6 +1700,7 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
   const demoOutput = $('#demo-output');
   const demoStatus = $('#demo-status');
   const demoStreamToggle = $('#demo-stream-toggle');
+  const demoApiFormat = $('#demo-api-format');
   let demoAbort = null;
 
   demoPrompt.addEventListener('keydown', e => {
@@ -1710,10 +1711,77 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     if (demoAbort) demoAbort.abort();
   });
 
+  function buildDemoRequest(format, url, key, model, prompt, streaming) {
+    if (format === 'messages') {
+      return {
+        endpoint: url + '/v1/messages',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+        },
+        body: { model: model, max_tokens: 1024, messages: [{ role: 'user', content: prompt }], stream: streaming },
+      };
+    } else if (format === 'responses') {
+      return {
+        endpoint: url + '/v1/responses',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+        body: { model: model, input: prompt, stream: streaming },
+      };
+    }
+    // default: chat completions
+    return {
+      endpoint: url + '/v1/chat/completions',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+      body: { model: model, messages: [{ role: 'user', content: prompt }], stream: streaming },
+    };
+  }
+
+  function extractNonStreamContent(format, data) {
+    if (format === 'messages') return data.content?.[0]?.text || '(empty response)';
+    if (format === 'responses') return data.output?.[0]?.content?.[0]?.text || data.output_text || '(empty response)';
+    return data.choices?.[0]?.message?.content || '(empty response)';
+  }
+
+  function extractStreamDelta(format, line) {
+    if (format === 'messages') {
+      // Anthropic SSE: look for content_block_delta events
+      if (!line.startsWith('data: ')) return null;
+      const payload = line.slice(6).trim();
+      if (payload === '[DONE]') return null;
+      try {
+        const chunk = JSON.parse(payload);
+        if (chunk.type === 'content_block_delta' && chunk.delta?.text) return chunk.delta.text;
+      } catch(_) {}
+      return null;
+    }
+    if (format === 'responses') {
+      // Responses API SSE: look for response.output_text.delta events
+      if (!line.startsWith('data: ')) return null;
+      const payload = line.slice(6).trim();
+      if (payload === '[DONE]') return null;
+      try {
+        const chunk = JSON.parse(payload);
+        if (chunk.type === 'response.output_text.delta' && chunk.delta) return chunk.delta;
+      } catch(_) {}
+      return null;
+    }
+    // Chat completions
+    if (!line.startsWith('data: ')) return null;
+    const payload = line.slice(6).trim();
+    if (payload === '[DONE]') return null;
+    try {
+      const chunk = JSON.parse(payload);
+      return chunk.choices?.[0]?.delta?.content || null;
+    } catch(_) {}
+    return null;
+  }
+
   async function runDemo() {
     const url = sv();
     const key = ak();
     const model = mn();
+    const format = demoApiFormat.value;
     if (!url || url === 'https://your-server.example.com') {
       demoOutput.innerHTML = '<span class="demo-placeholder">Enter your server URL above to try the live demo.</span>';
       return;
@@ -1738,18 +1806,13 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     demoStatus.textContent = streaming ? 'Streaming...' : 'Sending request...';
     const t0 = performance.now();
 
+    const req = buildDemoRequest(format, url, key, model, prompt, streaming);
+
     try {
-      const res = await fetch(url + '/v1/chat/completions', {
+      const res = await fetch(req.endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + key,
-        },
-        body: JSON.stringify({
-          model: model,
-          messages: [{ role: 'user', content: prompt }],
-          stream: streaming,
-        }),
+        headers: req.headers,
+        body: JSON.stringify(req.body),
         signal: demoAbort.signal,
       });
 
@@ -1766,7 +1829,7 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
 
       if (!streaming) {
         const data = await res.json();
-        const content = data.choices?.[0]?.message?.content || '(empty response)';
+        const content = extractNonStreamContent(format, data);
         demoOutput.textContent = content;
         const ms = Math.round(performance.now() - t0);
         demoStatus.textContent = 'Done in ' + ms + 'ms';
@@ -1786,24 +1849,17 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
         const lines = buf.split('\n');
         buf = lines.pop() || '';
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const payload = line.slice(6).trim();
-          if (payload === '[DONE]') continue;
-          try {
-            const chunk = JSON.parse(payload);
-            const delta = chunk.choices?.[0]?.delta?.content;
-            if (delta) {
-              tokens++;
-              // Remove cursor if present, add content, re-add cursor
-              const cursor = demoOutput.querySelector('.demo-cursor');
-              if (cursor) cursor.remove();
-              demoOutput.appendChild(document.createTextNode(delta));
-              const c = document.createElement('span');
-              c.className = 'demo-cursor';
-              demoOutput.appendChild(c);
-              demoOutput.scrollTop = demoOutput.scrollHeight;
-            }
-          } catch(_) {}
+          const delta = extractStreamDelta(format, line);
+          if (delta) {
+            tokens++;
+            const cursor = demoOutput.querySelector('.demo-cursor');
+            if (cursor) cursor.remove();
+            demoOutput.appendChild(document.createTextNode(delta));
+            const c = document.createElement('span');
+            c.className = 'demo-cursor';
+            demoOutput.appendChild(c);
+            demoOutput.scrollTop = demoOutput.scrollHeight;
+          }
         }
         const ms = Math.round(performance.now() - t0);
         demoStatus.textContent = tokens + ' chunks \u00b7 ' + ms + 'ms';
@@ -1933,6 +1989,108 @@ func main() {
     )
     fmt.Println(resp.Choices[0].Message.Content)
 }";
+
+    // ── Anthropic Messages API snippet templates ──
+
+    let snippet_anthropic_curl = r"curl SERVER_URL/v1/messages \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;x-api-key: API_KEY&quot; \
+  -H &quot;anthropic-version: 2023-06-01&quot; \
+  -d &#x27;{
+    &quot;model&quot;: &quot;MODEL_NAME&quot;,
+    &quot;max_tokens&quot;: 1024,
+    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}]
+  }&#x27;";
+
+    let snippet_anthropic_python = r"from anthropic import Anthropic
+
+client = Anthropic(
+    base_url=&quot;SERVER_URL/v1&quot;,
+    api_key=&quot;API_KEY&quot;,
+)
+
+message = client.messages.create(
+    model=&quot;MODEL_NAME&quot;,
+    max_tokens=1024,
+    messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}],
+)
+print(message.content[0].text)";
+
+    let snippet_anthropic_curl_stream = r"curl -N SERVER_URL/v1/messages \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;x-api-key: API_KEY&quot; \
+  -H &quot;anthropic-version: 2023-06-01&quot; \
+  -d &#x27;{
+    &quot;model&quot;: &quot;MODEL_NAME&quot;,
+    &quot;max_tokens&quot;: 1024,
+    &quot;stream&quot;: true,
+    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}]
+  }&#x27;";
+
+    let snippet_anthropic_python_stream = r"from anthropic import Anthropic
+
+client = Anthropic(
+    base_url=&quot;SERVER_URL/v1&quot;,
+    api_key=&quot;API_KEY&quot;,
+)
+
+with client.messages.stream(
+    model=&quot;MODEL_NAME&quot;,
+    max_tokens=1024,
+    messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello!&quot;}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end=&quot;&quot;, flush=True)
+print()";
+
+    // ── OpenAI Responses API snippet templates ──
+
+    let snippet_responses_curl = r"curl SERVER_URL/v1/responses \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Authorization: Bearer API_KEY&quot; \
+  -d &#x27;{
+    &quot;model&quot;: &quot;MODEL_NAME&quot;,
+    &quot;input&quot;: &quot;Hello!&quot;
+  }&#x27;";
+
+    let snippet_responses_python = r"from openai import OpenAI
+
+client = OpenAI(
+    base_url=&quot;SERVER_URL/v1&quot;,
+    api_key=&quot;API_KEY&quot;,
+)
+
+response = client.responses.create(
+    model=&quot;MODEL_NAME&quot;,
+    input=&quot;Hello!&quot;,
+)
+print(response.output_text)";
+
+    let snippet_responses_curl_stream = r"curl -N SERVER_URL/v1/responses \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Authorization: Bearer API_KEY&quot; \
+  -d &#x27;{
+    &quot;model&quot;: &quot;MODEL_NAME&quot;,
+    &quot;input&quot;: &quot;Hello!&quot;,
+    &quot;stream&quot;: true
+  }&#x27;";
+
+    let snippet_responses_python_stream = r"from openai import OpenAI
+
+client = OpenAI(
+    base_url=&quot;SERVER_URL/v1&quot;,
+    api_key=&quot;API_KEY&quot;,
+)
+
+stream = client.responses.create(
+    model=&quot;MODEL_NAME&quot;,
+    input=&quot;Hello!&quot;,
+    stream=True,
+)
+for event in stream:
+    if event.type == &quot;response.output_text.delta&quot;:
+        print(event.delta, end=&quot;&quot;, flush=True)
+print()";
 
     // ── Streaming snippet templates ──
 
@@ -2161,14 +2319,18 @@ func main() {
         </div>
       </div>
 
-      <!-- ═══ Languages & SDKs ═══ -->
-      <div class="section-heading"><span class="icon">&#128187;</span> Languages &amp; SDKs</div>
+      <!-- ═══ OpenAI Chat Completions ═══ -->
+      <div class="section-heading"><span class="icon">&#128187;</span> OpenAI Chat Completions <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">/v1/chat/completions</span></div>
       <div class="tab-section">
         <div class="int-tabs">
           <div class="tab active" data-tab="curl">curl</div>
           <div class="tab" data-tab="python">Python</div>
           <div class="tab" data-tab="node">Node.js</div>
           <div class="tab" data-tab="go">Go</div>
+          <div class="tab" data-tab="stream-curl">curl (stream)</div>
+          <div class="tab" data-tab="stream-python">Python (stream)</div>
+          <div class="tab" data-tab="stream-node">Node.js (stream)</div>
+          <div class="tab" data-tab="stream-go">Go (stream)</div>
         </div>
         <div class="int-panel">
 
@@ -2196,21 +2358,7 @@ func main() {
             <div class="code-block" data-snippet="{snippet_go}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
           </div>
 
-        </div>
-      </div>
-
-      <!-- ═══ Streaming ═══ -->
-      <div class="section-heading"><span class="icon">&#9889;</span> Streaming</div>
-      <div class="tab-section">
-        <div class="int-tabs">
-          <div class="tab active" data-tab="stream-curl">curl</div>
-          <div class="tab" data-tab="stream-python">Python</div>
-          <div class="tab" data-tab="stream-node">Node.js</div>
-          <div class="tab" data-tab="stream-go">Go</div>
-        </div>
-        <div class="int-panel">
-
-          <div class="int-content active" data-tab="stream-curl">
+          <div class="int-content" data-tab="stream-curl">
             <h3>curl <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">with -N for unbuffered output</span></h3>
             <div class="code-block" data-snippet="{snippet_curl_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
           </div>
@@ -2233,18 +2381,92 @@ func main() {
         </div>
       </div>
 
-      <!-- ═══ Response Format ═══ -->
-      <div class="section-heading"><span class="icon">&#128196;</span> Response Format</div>
+      <!-- ═══ Anthropic Messages API ═══ -->
+      <div class="section-heading"><span class="icon">&#129504;</span> Anthropic Messages API <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">/v1/messages</span></div>
       <div class="tab-section">
         <div class="int-tabs">
-          <div class="tab active" data-tab="resp-non-stream">Non-Streaming</div>
-          <div class="tab" data-tab="resp-stream">Streaming (SSE)</div>
+          <div class="tab active" data-tab="anth-curl">curl</div>
+          <div class="tab" data-tab="anth-python">Python</div>
+          <div class="tab" data-tab="anth-curl-stream">curl (stream)</div>
+          <div class="tab" data-tab="anth-python-stream">Python (stream)</div>
         </div>
         <div class="int-panel">
 
-          <div class="int-content active" data-tab="resp-non-stream">
-            <h3>Non-Streaming Response <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">OpenAI-compatible JSON</span></h3>
-            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">ModelRelay returns the standard OpenAI chat completions response format. Any SDK or tool that works with the OpenAI API works with ModelRelay.</p>
+          <div class="int-content active" data-tab="anth-curl">
+            <h3>curl</h3>
+            <p>Uses the Anthropic <code style="font-size:0.85rem;">x-api-key</code> header and <code style="font-size:0.85rem;">anthropic-version</code> header.</p>
+            <div class="code-block" data-snippet="{snippet_anthropic_curl}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <div class="int-content" data-tab="anth-python">
+            <h3>Python <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">pip install anthropic</span></h3>
+            <div class="code-block" data-snippet="{snippet_anthropic_python}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <div class="int-content" data-tab="anth-curl-stream">
+            <h3>curl <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">streaming with -N</span></h3>
+            <div class="code-block" data-snippet="{snippet_anthropic_curl_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <div class="int-content" data-tab="anth-python-stream">
+            <h3>Python <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">pip install anthropic</span></h3>
+            <div class="code-block" data-snippet="{snippet_anthropic_python_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ═══ OpenAI Responses API ═══ -->
+      <div class="section-heading"><span class="icon">&#128301;</span> OpenAI Responses API <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">/v1/responses</span></div>
+      <div class="tab-section">
+        <div class="int-tabs">
+          <div class="tab active" data-tab="resp-api-curl">curl</div>
+          <div class="tab" data-tab="resp-api-python">Python</div>
+          <div class="tab" data-tab="resp-api-curl-stream">curl (stream)</div>
+          <div class="tab" data-tab="resp-api-python-stream">Python (stream)</div>
+        </div>
+        <div class="int-panel">
+
+          <div class="int-content active" data-tab="resp-api-curl">
+            <h3>curl</h3>
+            <p>The newer OpenAI Responses API uses a simpler <code style="font-size:0.85rem;">input</code> field instead of a messages array.</p>
+            <div class="code-block" data-snippet="{snippet_responses_curl}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <div class="int-content" data-tab="resp-api-python">
+            <h3>Python <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">pip install openai</span></h3>
+            <div class="code-block" data-snippet="{snippet_responses_python}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <div class="int-content" data-tab="resp-api-curl-stream">
+            <h3>curl <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">streaming with -N</span></h3>
+            <div class="code-block" data-snippet="{snippet_responses_curl_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+          <div class="int-content" data-tab="resp-api-python-stream">
+            <h3>Python <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">pip install openai</span></h3>
+            <div class="code-block" data-snippet="{snippet_responses_python_stream}"><button class="copy-btn">Copy</button><span class="code-text"></span></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ═══ Response Format ═══ -->
+      <div class="section-heading"><span class="icon">&#128196;</span> Response Formats</div>
+      <div class="tab-section">
+        <div class="int-tabs">
+          <div class="tab active" data-tab="resp-chat">Chat Completions</div>
+          <div class="tab" data-tab="resp-chat-stream">Chat Completions (SSE)</div>
+          <div class="tab" data-tab="resp-messages">Messages API</div>
+          <div class="tab" data-tab="resp-messages-stream">Messages API (SSE)</div>
+          <div class="tab" data-tab="resp-responses">Responses API</div>
+          <div class="tab" data-tab="resp-responses-stream">Responses API (SSE)</div>
+        </div>
+        <div class="int-panel">
+
+          <div class="int-content active" data-tab="resp-chat">
+            <h3>Chat Completions <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">/v1/chat/completions</span></h3>
+            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">Standard OpenAI chat completions response format.</p>
             <div class="code-block"><button class="copy-btn">Copy</button><span class="code-text">{{
   "id": "chatcmpl-abc123",
   "object": "chat.completion",
@@ -2268,9 +2490,9 @@ func main() {
 }}</span></div>
           </div>
 
-          <div class="int-content" data-tab="resp-stream">
-            <h3>Streaming Response <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">Server-Sent Events</span></h3>
-            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">When <code style="font-size:0.85rem;">stream: true</code>, ModelRelay returns SSE events. Each event contains a delta with partial content.</p>
+          <div class="int-content" data-tab="resp-chat-stream">
+            <h3>Chat Completions Streaming <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">Server-Sent Events</span></h3>
+            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">When <code style="font-size:0.85rem;">stream: true</code>, returns SSE events with delta content.</p>
             <div class="code-block"><button class="copy-btn">Copy</button><span class="code-text">data: {{"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000000,"model":"your-model-name","choices":[{{"index":0,"delta":{{"role":"assistant","content":""}},"finish_reason":null}}]}}
 
 data: {{"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000000,"model":"your-model-name","choices":[{{"index":0,"delta":{{"content":"Hello"}},"finish_reason":null}}]}}
@@ -2282,12 +2504,111 @@ data: {{"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":170000
 data: [DONE]</span></div>
           </div>
 
+          <div class="int-content" data-tab="resp-messages">
+            <h3>Anthropic Messages <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">/v1/messages</span></h3>
+            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">Standard Anthropic Messages API response format.</p>
+            <div class="code-block"><button class="copy-btn">Copy</button><span class="code-text">{{
+  "id": "msg_abc123",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {{
+      "type": "text",
+      "text": "Hello! Here's a fun fact: ..."
+    }}
+  ],
+  "model": "your-model-name",
+  "stop_reason": "end_turn",
+  "usage": {{
+    "input_tokens": 10,
+    "output_tokens": 42
+  }}
+}}</span></div>
+          </div>
+
+          <div class="int-content" data-tab="resp-messages-stream">
+            <h3>Anthropic Messages Streaming <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">Server-Sent Events</span></h3>
+            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">When <code style="font-size:0.85rem;">stream: true</code>, returns named SSE events with content deltas.</p>
+            <div class="code-block"><button class="copy-btn">Copy</button><span class="code-text">event: message_start
+data: {{"type":"message_start","message":{{"id":"msg_abc123","type":"message","role":"assistant","content":[],"model":"your-model-name"}}}}
+
+event: content_block_start
+data: {{"type":"content_block_start","index":0,"content_block":{{"type":"text","text":""}}}}
+
+event: content_block_delta
+data: {{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"Hello!"}}}}
+
+event: content_block_stop
+data: {{"type":"content_block_stop","index":0}}
+
+event: message_delta
+data: {{"type":"message_delta","delta":{{"stop_reason":"end_turn"}},"usage":{{"output_tokens":42}}}}
+
+event: message_stop
+data: {{"type":"message_stop"}}</span></div>
+          </div>
+
+          <div class="int-content" data-tab="resp-responses">
+            <h3>OpenAI Responses <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">/v1/responses</span></h3>
+            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">Newer OpenAI Responses API format.</p>
+            <div class="code-block"><button class="copy-btn">Copy</button><span class="code-text">{{
+  "id": "resp_abc123",
+  "object": "response",
+  "created_at": 1700000000,
+  "model": "your-model-name",
+  "output": [
+    {{
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {{
+          "type": "output_text",
+          "text": "Hello! Here's a fun fact: ..."
+        }}
+      ]
+    }}
+  ],
+  "usage": {{
+    "input_tokens": 10,
+    "output_tokens": 42,
+    "total_tokens": 52
+  }}
+}}</span></div>
+          </div>
+
+          <div class="int-content" data-tab="resp-responses-stream">
+            <h3>Responses API Streaming <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">Server-Sent Events</span></h3>
+            <p style="color:#8b949e;font-size:0.9rem;margin-bottom:12px;">When <code style="font-size:0.85rem;">stream: true</code>, returns named SSE events.</p>
+            <div class="code-block"><button class="copy-btn">Copy</button><span class="code-text">event: response.created
+data: {{"type":"response.created","response":{{"id":"resp_abc123","object":"response","status":"in_progress"}}}}
+
+event: response.output_text.delta
+data: {{"type":"response.output_text.delta","delta":"Hello"}}
+
+event: response.output_text.delta
+data: {{"type":"response.output_text.delta","delta":"!"}}
+
+event: response.output_text.done
+data: {{"type":"response.output_text.done","text":"Hello!"}}
+
+event: response.completed
+data: {{"type":"response.completed","response":{{"id":"resp_abc123","object":"response","status":"completed"}}}}</span></div>
+          </div>
+
         </div>
       </div>
 
       <!-- ═══ Live Demo ═══ -->
       <div class="section-heading"><span class="icon">&#128640;</span> Try It Live</div>
       <div class="demo-card">
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+          <label style="font-size:0.82rem;color:#8b949e;align-self:center;">API Format:</label>
+          <select id="demo-api-format" style="padding:6px 10px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;font-size:0.85rem;font-family:inherit;">
+            <option value="chat">Chat Completions</option>
+            <option value="messages">Anthropic Messages</option>
+            <option value="responses">Responses API</option>
+          </select>
+        </div>
         <div class="demo-input-row">
           <input id="demo-prompt" type="text" placeholder="Type a message..." value="Say hello and tell me a fun fact.">
           <button id="demo-send" class="btn demo-btn">Send</button>
@@ -2313,7 +2634,7 @@ data: [DONE]</span></div>
         </div>
         <div class="ref-row">
           <span class="ref-label">Supported Endpoints</span>
-          <code><span class="ref-val">/v1/chat/completions, /v1/models</span><button class="copy-btn">Copy</button></code>
+          <code><span class="ref-val">/v1/chat/completions, /v1/messages, /v1/responses, /v1/models</span><button class="copy-btn">Copy</button></code>
         </div>
       </div>
 
