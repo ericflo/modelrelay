@@ -10,12 +10,19 @@ use tokio::{
     select,
     sync::mpsc,
     task::JoinHandle,
-    time::{Duration, sleep},
+    time::{Duration, Instant, sleep},
 };
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
+
+/// How long the worker waits without receiving any message from the server
+/// (including pings) before assuming the connection is dead and reconnecting.
+/// The server sends application-level pings every 30 s, so 90 s (3× that)
+/// gives plenty of margin for transient delays while still catching truly
+/// dead connections within a couple of minutes.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type WebSocketStream =
@@ -133,6 +140,7 @@ impl WorkerDaemon {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let mut active_requests = HashMap::<String, JoinHandle<()>>::new();
         let mut shutting_down = false;
+        let mut last_server_activity = Instant::now();
 
         send_worker_message(
             &mut socket_write,
@@ -146,7 +154,14 @@ impl WorkerDaemon {
         )
         .await?;
 
+        tracing::info!(
+            url = %self.config.websocket_url(),
+            "connected to proxy, registered worker"
+        );
+
         loop {
+            let idle_deadline = sleep(IDLE_TIMEOUT.saturating_sub(last_server_activity.elapsed()));
+
             select! {
                 maybe_message = socket_read.next() => {
                     let Some(message) = maybe_message else {
@@ -154,6 +169,7 @@ impl WorkerDaemon {
                     };
                     match message? {
                         Message::Text(payload) => {
+                            last_server_activity = Instant::now();
                             let server_message = serde_json::from_str::<ServerToWorkerMessage>(&payload)?;
                             if !self.handle_server_message(
                                 &event_tx,
@@ -166,9 +182,12 @@ impl WorkerDaemon {
                         }
                         Message::Close(_) => break,
                         Message::Ping(payload) => {
+                            last_server_activity = Instant::now();
                             socket_write.send(Message::Pong(payload)).await?;
                         }
-                        Message::Binary(_) | Message::Frame(_) | Message::Pong(_) => {}
+                        Message::Binary(_) | Message::Frame(_) | Message::Pong(_) => {
+                            last_server_activity = Instant::now();
+                        }
                     }
                 }
                 maybe_event = event_rx.recv() => {
@@ -190,6 +209,13 @@ impl WorkerDaemon {
                             return Err(Box::new(io::Error::other(error)));
                         }
                     }
+                }
+                () = idle_deadline => {
+                    tracing::warn!(
+                        timeout_secs = IDLE_TIMEOUT.as_secs(),
+                        "no messages received from server within idle timeout, assuming dead connection"
+                    );
+                    break;
                 }
             }
         }
@@ -229,6 +255,7 @@ impl WorkerDaemon {
 
         loop {
             let daemon = Self::new(config.clone());
+            let session_start = Instant::now();
             match daemon.run_session().await {
                 Ok(true) => {
                     // Server sent a graceful shutdown — it's going away (e.g. rolling
@@ -240,6 +267,7 @@ impl WorkerDaemon {
                     tracing::info!(
                         attempt,
                         delay_ms,
+                        session_duration_secs = session_start.elapsed().as_secs(),
                         "server sent graceful shutdown, reconnecting to new instance"
                     );
                     sleep(Duration::from_millis(delay_ms)).await;
@@ -247,10 +275,18 @@ impl WorkerDaemon {
                 }
                 Ok(false) => {
                     attempt += 1;
+                    let session_secs = session_start.elapsed().as_secs();
+                    // If the session lasted longer than the idle timeout, it was a
+                    // genuine connection that eventually dropped — reset backoff so
+                    // we reconnect quickly rather than waiting up to 30 s.
+                    if session_secs > IDLE_TIMEOUT.as_secs() {
+                        backoff_ms = 1_000;
+                    }
                     let jitter_ms = subsecond_jitter_ms();
                     tracing::warn!(
                         attempt,
                         delay_ms = backoff_ms + jitter_ms,
+                        session_duration_secs = session_secs,
                         "connection closed unexpectedly, reconnecting"
                     );
                     sleep(Duration::from_millis(backoff_ms + jitter_ms)).await;
@@ -258,11 +294,16 @@ impl WorkerDaemon {
                 }
                 Err(e) => {
                     attempt += 1;
+                    let session_secs = session_start.elapsed().as_secs();
+                    if session_secs > IDLE_TIMEOUT.as_secs() {
+                        backoff_ms = 1_000;
+                    }
                     let jitter_ms = subsecond_jitter_ms();
                     tracing::warn!(
                         error = %e,
                         attempt,
                         delay_ms = backoff_ms + jitter_ms,
+                        session_duration_secs = session_secs,
                         "connection error, reconnecting"
                     );
                     sleep(Duration::from_millis(backoff_ms + jitter_ms)).await;
