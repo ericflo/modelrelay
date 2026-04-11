@@ -12,7 +12,7 @@ jobs:
     env:
       HAS_TOKEN: ${{ secrets.CRATES_IO_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         if: env.HAS_TOKEN == 'true'
