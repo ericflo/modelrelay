@@ -4,24 +4,34 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pricing — ModelRelay</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
+  <meta name="description" content="Simple, transparent pricing for ModelRelay. $20/month flat rate — unlimited workers, unlimited requests, no per-request fees.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%237c3aed'/%3E%3Cpath d='M8 10h4l4 6-4 6H8l4-6-4-6zm12 0h4l4 6-4 6h-4l4-6-4-6z' fill='white'/%3E%3C/svg%3E">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: #0d1117; color: #e6edf3; line-height: 1.6;
+      overflow-x: hidden;
     }
     a { color: #7c3aed; text-decoration: none; }
     a:hover { text-decoration: underline; }
     .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
 
+    /* Scroll animations */
+    .fade-in {
+      opacity: 0; transform: translateY(24px);
+      transition: opacity 0.7s ease, transform 0.7s ease;
+    }
+    .fade-in.visible { opacity: 1; transform: translateY(0); }
+
+    /* Nav */
     nav { padding: 20px 0; border-bottom: 1px solid #21262d; }
     nav .container { display: flex; justify-content: space-between; align-items: center; }
     .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; text-decoration: none; }
     .logo:hover { text-decoration: none; }
     .logo span { color: #7c3aed; }
     .nav-links { display: flex; align-items: center; gap: 16px; }
-    .nav-links a { color: #8b949e; font-size: 0.9rem; }
+    .nav-links a { color: #8b949e; font-size: 0.9rem; transition: color 0.15s; }
     .nav-links a:hover { color: #e6edf3; text-decoration: none; }
     .nav-links a.active { color: #7c3aed; }
     .nav-links .btn-signup {
@@ -30,65 +40,175 @@
     }
     .nav-links .btn-signup:hover { background: #6d28d9; color: #fff; }
 
-    .pricing { padding: 80px 0; text-align: center; }
-    .pricing h1 { font-size: 2.5rem; font-weight: 800; margin-bottom: 16px; }
-    .pricing .subtitle { color: #8b949e; margin-bottom: 48px; font-size: 1.15rem; }
+    /* Hero */
+    .pricing-hero {
+      text-align: center; padding: 80px 0 64px; position: relative; overflow: hidden;
+    }
+    .pricing-hero::before {
+      content: ''; position: absolute; top: -40%; left: 50%; transform: translateX(-50%);
+      width: 800px; height: 600px;
+      background: radial-gradient(ellipse at center, rgba(124,58,237,0.15) 0%, rgba(124,58,237,0.05) 40%, transparent 70%);
+      pointer-events: none; z-index: 0;
+    }
+    .pricing-hero .container { position: relative; z-index: 1; }
+    .pricing-hero h1 {
+      font-size: 3rem; font-weight: 800; margin-bottom: 16px;
+      line-height: 1.12; letter-spacing: -0.02em;
+    }
+    .pricing-hero .subtitle { color: #8b949e; font-size: 1.2rem; margin-bottom: 0; }
 
+    /* Price Card */
+    .price-card-wrapper { padding: 0 0 64px; text-align: center; }
     .price-card {
-      display: inline-block; background: #161b22; border: 2px solid #7c3aed;
-      border-radius: 16px; padding: 48px; max-width: 480px; text-align: center;
+      display: inline-block; background: #161b22; border: 1px solid #21262d;
+      border-radius: 16px; padding: 48px; max-width: 520px; text-align: center;
+      position: relative; overflow: hidden;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.2), 0 0 60px rgba(124,58,237,0.06);
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+    .price-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.3), 0 0 80px rgba(124,58,237,0.1);
+    }
+    .price-card::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg, #7c3aed, #a78bfa);
+    }
+    .card-badge {
+      display: inline-block; background: rgba(124,58,237,0.12); color: #a78bfa;
+      font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      padding: 4px 14px; border-radius: 20px; margin-bottom: 20px;
+      border: 1px solid rgba(124,58,237,0.2);
     }
     .price-card h2 { font-size: 1.3rem; color: #8b949e; margin-bottom: 12px; font-weight: 500; }
     .price-card .amount { font-size: 3.5rem; font-weight: 800; color: #e6edf3; }
-    .price-card .period { font-size: 1.1rem; color: #8b949e; margin-bottom: 24px; }
-    .price-card ul { list-style: none; margin: 24px 0 32px; text-align: left; color: #8b949e; }
-    .price-card li { padding: 6px 0; }
-    .price-card li::before { content: "\2713 "; color: #7c3aed; font-weight: 700; }
+    .price-card .amount .unit { font-size: 1.1rem; font-weight: 400; color: #8b949e; }
+    .price-card .period { font-size: 0.95rem; color: #484f58; margin-bottom: 28px; }
+    .price-card ul { list-style: none; margin: 0 0 32px; text-align: left; }
+    .price-card li {
+      padding: 10px 0; color: #8b949e; font-size: 0.95rem;
+      display: flex; align-items: flex-start; gap: 12px;
+      border-bottom: 1px solid rgba(33,38,45,0.5);
+    }
+    .price-card li:last-child { border-bottom: none; }
+    .price-card li svg {
+      flex-shrink: 0; margin-top: 2px;
+    }
 
     .btn {
       display: inline-block; padding: 14px 36px; background: #7c3aed; color: #fff;
       border: none; border-radius: 8px; font-size: 1.1rem; font-weight: 600;
-      cursor: pointer; transition: background 0.2s;
+      cursor: pointer; transition: background 0.2s, box-shadow 0.2s;
+      font-family: inherit;
     }
-    .btn:hover { background: #6d28d9; text-decoration: none; }
+    .btn:hover { background: #6d28d9; text-decoration: none; box-shadow: 0 0 20px rgba(124,58,237,0.3); }
 
-    /* FAQ */
-    .faq { padding: 60px 0 80px; max-width: 680px; margin: 0 auto; }
-    .faq h2 { font-size: 1.6rem; margin-bottom: 32px; text-align: center; }
-    .faq-item { border-bottom: 1px solid #21262d; padding: 20px 0; }
-    .faq-item:first-of-type { border-top: 1px solid #21262d; }
-    .faq-item h3 { font-size: 1.05rem; color: #e6edf3; margin-bottom: 8px; font-weight: 600; }
-    .faq-item p { color: #8b949e; font-size: 0.95rem; }
+    /* Trust signals */
+    .trust-signals {
+      display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;
+      color: #484f58; font-size: 0.85rem; font-weight: 500; margin-top: 20px;
+    }
+    .trust-signals span { display: inline-flex; align-items: center; gap: 4px; }
 
     /* Comparison */
-    .comparison { padding: 0 0 40px; text-align: center; }
-    .comparison p { color: #8b949e; font-size: 0.95rem; max-width: 600px; margin: 0 auto; }
+    .comparison { padding: 0 0 80px; }
+    .comparison-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+      max-width: 800px; margin: 0 auto;
+    }
+    .comparison h2 {
+      text-align: center; font-size: 1.8rem; margin-bottom: 40px; font-weight: 700;
+    }
+    .compare-card {
+      background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 32px;
+    }
+    .compare-card h3 {
+      font-size: 1.1rem; margin-bottom: 16px; color: #e6edf3; font-weight: 600;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .compare-card ul { list-style: none; }
+    .compare-card li {
+      padding: 6px 0; color: #8b949e; font-size: 0.9rem;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .compare-card.managed { border-color: rgba(124,58,237,0.3); }
+    .compare-card.managed::before { display: none; }
 
-    .back { display: block; margin-top: 32px; color: #8b949e; font-size: 0.9rem; }
+    /* FAQ */
+    .faq { padding: 0 0 80px; max-width: 680px; margin: 0 auto; }
+    .faq h2 { font-size: 1.8rem; margin-bottom: 32px; text-align: center; font-weight: 700; }
+    .faq-item {
+      border: 1px solid #21262d; border-radius: 12px; margin-bottom: 12px;
+      background: #161b22; overflow: hidden; transition: border-color 0.2s;
+    }
+    .faq-item:hover { border-color: rgba(124,58,237,0.3); }
+    .faq-question {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 20px 24px; cursor: pointer; user-select: none;
+    }
+    .faq-question h3 {
+      font-size: 1rem; color: #e6edf3; font-weight: 600; margin: 0;
+    }
+    .faq-chevron {
+      width: 20px; height: 20px; flex-shrink: 0; color: #484f58;
+      transition: transform 0.25s ease, color 0.2s;
+    }
+    .faq-item.open .faq-chevron { transform: rotate(180deg); color: #7c3aed; }
+    .faq-answer {
+      max-height: 0; overflow: hidden; transition: max-height 0.3s ease, padding 0.3s ease;
+    }
+    .faq-item.open .faq-answer { max-height: 300px; }
+    .faq-answer p {
+      padding: 0 24px 20px; color: #8b949e; font-size: 0.95rem; margin: 0;
+    }
 
-    footer { padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }
-    footer a { color: #8b949e; }
+    /* CTA */
+    .final-cta {
+      padding: 64px 0 80px; text-align: center;
+      border-top: 1px solid #21262d;
+    }
+    .final-cta h2 { font-size: 1.8rem; margin-bottom: 12px; font-weight: 700; }
+    .final-cta p { color: #8b949e; font-size: 1.05rem; margin-bottom: 28px; }
+
+    /* Footer */
+    footer { padding: 48px 0; border-top: 1px solid #21262d; }
+    .footer-content { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
+    .footer-left { color: #484f58; font-size: 0.85rem; }
+    .footer-tagline { color: #30363d; font-size: 0.8rem; margin-top: 4px; }
+    .footer-links { display: flex; gap: 20px; }
+    .footer-links a { color: #8b949e; font-size: 0.85rem; }
+    .footer-links a:hover { color: #e6edf3; }
 
     /* Tablet */
     @media (max-width: 768px) {
-      .pricing { padding: 64px 0; }
-      .pricing h1 { font-size: 1.8rem; }
-      .pricing .subtitle { font-size: 1rem; margin-bottom: 32px; }
-      .price-card { padding: 32px; max-width: 100%; }
+      .pricing-hero { padding: 64px 0 48px; }
+      .pricing-hero h1 { font-size: 2rem; }
+      .pricing-hero .subtitle { font-size: 1rem; }
+      .pricing-hero::before { width: 500px; height: 400px; }
+      .price-card-wrapper { padding: 0 0 48px; }
+      .price-card { padding: 36px; max-width: 100%; }
       .price-card .amount { font-size: 2.8rem; }
+      .comparison-grid { grid-template-columns: 1fr; }
+      .comparison h2, .faq h2 { font-size: 1.5rem; }
       .nav-links { gap: 12px; }
       .nav-links a { font-size: 0.8rem; }
+      .footer-content { flex-direction: column; text-align: center; }
     }
 
     /* Mobile */
     @media (max-width: 480px) {
       .container { padding: 0 16px; }
-      .pricing { padding: 48px 0; }
-      .pricing h1 { font-size: 1.5rem; }
+      .pricing-hero { padding: 48px 0 36px; }
+      .pricing-hero h1 { font-size: 1.6rem; }
+      .pricing-hero::before { width: 360px; height: 300px; }
       .price-card { padding: 24px; }
       .price-card .amount { font-size: 2.4rem; }
       .btn { display: block; width: 100%; text-align: center; padding: 14px 20px; }
       .nav-links .btn-signup { padding: 6px 12px; }
+      .trust-signals { flex-direction: column; gap: 6px; }
+      .compare-card { padding: 24px; }
+      .faq-question { padding: 16px 20px; }
+      .faq-answer p { padding: 0 20px 16px; }
     }
   </style>
 </head>
@@ -106,59 +226,241 @@
     </div>
   </nav>
 
-  <section class="pricing">
+  <section class="pricing-hero">
     <div class="container">
-      <h1>Simple, Transparent Pricing</h1>
-      <p class="subtitle">One plan. Everything included. No per-request fees.</p>
-      <div class="price-card">
+      <h1 class="fade-in">Simple, Transparent Pricing</h1>
+      <p class="subtitle fade-in">One plan. Everything included. No per-request fees.</p>
+    </div>
+  </section>
+
+  <section class="price-card-wrapper">
+    <div class="container">
+      <div class="price-card fade-in">
+        <div class="card-badge">Everything Included</div>
         <h2>Managed Relay</h2>
-        <div class="amount">$20</div>
-        <div class="period">per month</div>
+        <div class="amount">$20<span class="unit">/mo</span></div>
+        <div class="period">Flat rate, no usage surprises</div>
         <ul>
-          <li>One managed relay instance</li>
-          <li>Unlimited workers</li>
-          <li>Unlimited requests</li>
-          <li>WebSocket streaming</li>
-          <li>Request queueing &amp; cancellation</li>
-          <li>All three API formats (OpenAI, Anthropic, Responses)</li>
-          <li>TLS &amp; authentication included</li>
-          <li>Priority support</li>
+          <li>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            One managed relay instance
+          </li>
+          <li>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            Unlimited workers
+          </li>
+          <li>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            Unlimited requests
+          </li>
+          <li>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            WebSocket streaming
+          </li>
+          <li>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            Request queueing &amp; cancellation
+          </li>
+          <li>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            All three API formats (OpenAI, Anthropic, Responses)
+          </li>
+          <li>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            TLS &amp; authentication included
+          </li>
+          <li>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            Priority support
+          </li>
         </ul>
         <form action="/checkout" method="post">
           <!-- CSRF_TOKEN -->
           <button type="submit" class="btn">Subscribe Now &rarr;</button>
         </form>
+        <div class="trust-signals">
+          <span>Open source</span>
+          <span>&middot;</span>
+          <span>No vendor lock-in</span>
+          <span>&middot;</span>
+          <span>Cancel anytime</span>
+        </div>
       </div>
-      <a class="back" href="/">&larr; Back to home</a>
     </div>
   </section>
 
-  <div class="container comparison">
-    <p>Running your own relay means provisioning a server, configuring TLS, setting up auth, monitoring uptime, and keeping dependencies updated. ModelRelay handles all of that for less than the cost of a small VPS.</p>
-  </div>
+  <section class="comparison">
+    <div class="container">
+      <h2 class="fade-in">Why Not Self-Host?</h2>
+      <div class="comparison-grid">
+        <div class="compare-card fade-in">
+          <h3>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="18" rx="3"/><path d="M8 7h8M8 11h5"/></svg>
+            Self-Hosted
+          </h3>
+          <ul>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#484f58" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              Provision and maintain a VPS
+            </li>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#484f58" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              Configure TLS certificates
+            </li>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#484f58" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              Set up WebSocket reverse proxy
+            </li>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#484f58" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              Monitor uptime and alerts
+            </li>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#484f58" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              Keep dependencies updated
+            </li>
+          </ul>
+        </div>
+        <div class="compare-card managed fade-in">
+          <h3>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+            ModelRelay Managed
+          </h3>
+          <ul>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+              Ready in under a minute
+            </li>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+              TLS and auth handled for you
+            </li>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+              Automatic monitoring and scaling
+            </li>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+              Always up-to-date
+            </li>
+            <li>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+              Less than the cost of a small VPS
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
 
-  <div class="container">
-    <section class="faq">
-      <h2>Frequently Asked Questions</h2>
-      <div class="faq-item">
-        <h3>What API formats does ModelRelay support?</h3>
-        <p>ModelRelay supports three API formats: OpenAI Chat Completions (<code>/v1/chat/completions</code>), Anthropic Messages (<code>/v1/messages</code>), and OpenAI Responses (<code>/v1/responses</code>). Use whichever SDK you prefer &mdash; they all route to your own workers.</p>
+  <section class="faq">
+    <div class="container" style="max-width: 680px;">
+      <h2 class="fade-in">Frequently Asked Questions</h2>
+
+      <div class="faq-item fade-in">
+        <div class="faq-question" onclick="toggleFaq(this)">
+          <h3>What API formats does ModelRelay support?</h3>
+          <svg class="faq-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-answer">
+          <p>ModelRelay supports three API formats: OpenAI Chat Completions (<code>/v1/chat/completions</code>), Anthropic Messages (<code>/v1/messages</code>), and OpenAI Responses (<code>/v1/responses</code>). Use whichever SDK you prefer &mdash; they all route to your own workers.</p>
+        </div>
       </div>
-      <div class="faq-item">
-        <h3>Are there any per-request or bandwidth fees?</h3>
-        <p>No. The $20/month plan includes unlimited requests and unlimited data transfer. You only pay the flat monthly fee regardless of usage.</p>
+
+      <div class="faq-item fade-in">
+        <div class="faq-question" onclick="toggleFaq(this)">
+          <h3>Are there any per-request or bandwidth fees?</h3>
+          <svg class="faq-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-answer">
+          <p>No. The $20/month plan includes unlimited requests and unlimited data transfer. You only pay the flat monthly fee regardless of usage.</p>
+        </div>
       </div>
-      <div class="faq-item">
-        <h3>Can I connect multiple GPU machines?</h3>
-        <p>Yes. You can connect as many worker machines as you want. ModelRelay automatically load-balances requests across all connected workers and handles failover if one goes offline.</p>
+
+      <div class="faq-item fade-in">
+        <div class="faq-question" onclick="toggleFaq(this)">
+          <h3>Can I connect multiple GPU machines?</h3>
+          <svg class="faq-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-answer">
+          <p>Yes. You can connect as many worker machines as you want. ModelRelay automatically load-balances requests across all connected workers and handles failover if one goes offline.</p>
+        </div>
       </div>
-    </section>
-  </div>
+
+      <div class="faq-item fade-in">
+        <div class="faq-question" onclick="toggleFaq(this)">
+          <h3>What happens if I cancel?</h3>
+          <svg class="faq-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-answer">
+          <p>You can cancel anytime from your dashboard. Your relay stays active until the end of your billing period. ModelRelay is open source, so you can always self-host if you prefer.</p>
+        </div>
+      </div>
+
+      <div class="faq-item fade-in">
+        <div class="faq-question" onclick="toggleFaq(this)">
+          <h3>Is ModelRelay open source?</h3>
+          <svg class="faq-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-answer">
+          <p>Yes. The relay server, worker SDK, and llamafile CLI are all open source on <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>. The managed service saves you the work of hosting and maintaining it yourself.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final-cta fade-in">
+    <div class="container">
+      <h2>Ready to get started?</h2>
+      <p>From sign-up to your first inference request in under a minute.</p>
+      <a class="btn" href="/signup">Get Started &rarr;</a>
+    </div>
+  </section>
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+      <div class="footer-content">
+        <div class="footer-left">
+          &copy; 2026 ModelRelay
+          <div class="footer-tagline">Your GPU workers, our relay. Inference without the infrastructure.</div>
+        </div>
+        <div class="footer-links">
+          <a href="/pricing">Pricing</a>
+          <a href="/integrate">Integration</a>
+          <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
+          <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
     </div>
   </footer>
+
+  <script>
+    // Scroll fade-in
+    (function() {
+      var observer = new IntersectionObserver(function(entries) {
+        entries.forEach(function(entry) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('visible');
+            observer.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+      document.querySelectorAll('.fade-in').forEach(function(el) {
+        observer.observe(el);
+      });
+    })();
+
+    // FAQ accordion
+    function toggleFaq(el) {
+      var item = el.parentElement;
+      var wasOpen = item.classList.contains('open');
+      // Close all
+      document.querySelectorAll('.faq-item.open').forEach(function(i) {
+        i.classList.remove('open');
+      });
+      // Toggle clicked
+      if (!wasOpen) item.classList.add('open');
+    }
+  </script>
 </body>
 </html>
