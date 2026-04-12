@@ -4,7 +4,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use sqlx::PgPool;
 
@@ -384,6 +384,7 @@ async fn handle_payment_failed(pool: &PgPool, payload: &serde_json::Value) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hmac::KeyInit;
 
     /// Helper: compute the real HMAC-SHA256 hex digest for `"{timestamp}.{payload}"`.
     fn compute_sig(secret: &str, timestamp: &str, payload: &[u8]) -> String {

@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 

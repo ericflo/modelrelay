@@ -20,7 +20,7 @@ reqwest = { workspace = true }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 sqlx = { workspace = true }
-tower-sessions = "0.15"
+tower-sessions = "0.14"
 tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { workspace = true }
