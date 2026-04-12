@@ -23,11 +23,19 @@
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: #0d1117; color: #e6edf3; line-height: 1.6;
+      overflow-x: hidden;
     }
     a { color: #7c3aed; text-decoration: none; }
     a:hover { text-decoration: underline; }
 
     .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+
+    /* Scroll animations */
+    .fade-in {
+      opacity: 0; transform: translateY(24px);
+      transition: opacity 0.7s ease, transform 0.7s ease;
+    }
+    .fade-in.visible { opacity: 1; transform: translateY(0); }
 
     /* Nav */
     nav { padding: 20px 0; border-bottom: 1px solid #21262d; }
@@ -45,27 +53,48 @@
     .nav-links .btn-signup:hover { background: #6d28d9; color: #fff; }
 
     /* Hero */
-    .hero { text-align: center; padding: 100px 0 80px; }
-    .hero h1 { font-size: 3rem; font-weight: 800; margin-bottom: 20px; line-height: 1.15; }
+    .hero { text-align: center; padding: 100px 0 80px; position: relative; overflow: hidden; }
+    .hero::before {
+      content: ''; position: absolute; top: -40%; left: 50%; transform: translateX(-50%);
+      width: 800px; height: 600px;
+      background: radial-gradient(ellipse at center, rgba(124,58,237,0.15) 0%, rgba(124,58,237,0.05) 40%, transparent 70%);
+      pointer-events: none; z-index: 0;
+    }
+    .hero .container { position: relative; z-index: 1; }
+    .hero h1 { font-size: 3.2rem; font-weight: 800; margin-bottom: 20px; line-height: 1.12; letter-spacing: -0.02em; }
     .hero h1 span { color: #7c3aed; }
     .hero p { font-size: 1.25rem; color: #8b949e; max-width: 680px; margin: 0 auto 16px; }
     .hero .api-badges { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-bottom: 40px; }
     .hero .api-badge {
-      display: inline-block; padding: 4px 14px; border-radius: 20px;
-      font-size: 0.85rem; font-weight: 600; background: #1c1f26; border: 1px solid #30363d; color: #8b949e;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 16px; border-radius: 20px;
+      font-size: 0.85rem; font-weight: 600;
+      background: rgba(124,58,237,0.08); border: 1px solid rgba(124,58,237,0.25); color: #c4b5fd;
+      transition: border-color 0.2s, box-shadow 0.2s;
     }
+    .hero .api-badge:hover {
+      border-color: rgba(124,58,237,0.5);
+      box-shadow: 0 0 12px rgba(124,58,237,0.15);
+    }
+    .hero .api-badge svg { flex-shrink: 0; }
     .btn {
       display: inline-block; padding: 14px 36px; background: #7c3aed; color: #fff;
-      border-radius: 8px; font-size: 1.1rem; font-weight: 600; transition: background 0.2s;
+      border-radius: 8px; font-size: 1.1rem; font-weight: 600;
+      transition: background 0.2s, box-shadow 0.2s;
     }
-    .btn:hover { background: #6d28d9; text-decoration: none; }
+    .btn:hover { background: #6d28d9; text-decoration: none; box-shadow: 0 0 20px rgba(124,58,237,0.3); }
     .btn-outline {
       display: inline-block; padding: 14px 36px; background: transparent; color: #8b949e;
       border: 1px solid #30363d; border-radius: 8px; font-size: 1.1rem; font-weight: 600;
       transition: border-color 0.2s, color 0.2s; margin-left: 12px;
     }
     .btn-outline:hover { border-color: #7c3aed; color: #e6edf3; text-decoration: none; }
-    .hero-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .hero-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 24px; }
+    .trust-signals {
+      display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;
+      color: #484f58; font-size: 0.85rem; font-weight: 500;
+    }
+    .trust-signals span { display: inline-flex; align-items: center; gap: 4px; }
 
     /* Features */
     .features { padding: 80px 0; border-top: 1px solid #21262d; }
@@ -73,14 +102,27 @@
     .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; }
     .feature-card {
       background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 32px;
+      transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+      border-left: 3px solid transparent;
     }
+    .feature-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+      border-left-color: #7c3aed;
+    }
+    .feature-icon {
+      display: flex; align-items: center; justify-content: center;
+      width: 48px; height: 48px; border-radius: 10px;
+      background: rgba(124,58,237,0.1); margin-bottom: 16px;
+    }
+    .feature-icon svg { width: 24px; height: 24px; }
     .feature-card h3 { font-size: 1.2rem; margin-bottom: 12px; color: #e6edf3; }
     .feature-card p { color: #8b949e; font-size: 0.95rem; }
 
     /* How It Works */
     .how-it-works { padding: 80px 0; border-top: 1px solid #21262d; }
     .how-it-works h2 { text-align: center; font-size: 2rem; margin-bottom: 48px; }
-    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-bottom: 48px; }
+    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-bottom: 48px; position: relative; }
     .step {
       background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 32px;
       position: relative;
@@ -92,9 +134,29 @@
     }
     .step h3 { font-size: 1.1rem; margin-bottom: 8px; color: #e6edf3; }
     .step p { color: #8b949e; font-size: 0.95rem; }
+    .step-connector {
+      display: none; position: absolute; top: 50%; right: -24px; width: 24px; height: 2px;
+      z-index: 1;
+    }
+    .step-connector::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 6px; height: 2px;
+      background: linear-gradient(90deg, #7c3aed, rgba(124,58,237,0.3));
+    }
+    .step-connector::after {
+      content: ''; position: absolute; top: -4px; right: 0; width: 0; height: 0;
+      border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+      border-left: 8px solid rgba(124,58,237,0.5);
+    }
+    @media (min-width: 769px) {
+      .steps { grid-template-columns: repeat(3, 1fr); }
+      .step-connector { display: block; }
+    }
+
+    /* Code example with copy */
     .code-example {
       background: #161b22; border: 1px solid #21262d; border-radius: 12px;
       padding: 24px 28px; max-width: 680px; margin: 0 auto; text-align: left;
+      position: relative;
     }
     .code-example .code-label {
       font-size: 0.8rem; color: #8b949e; margin-bottom: 12px; text-transform: uppercase;
@@ -106,6 +168,15 @@
     }
     .code-example .comment { color: #484f58; }
     .code-example .highlight { color: #7c3aed; font-weight: 600; }
+    .copy-btn {
+      position: absolute; top: 12px; right: 12px;
+      background: rgba(255,255,255,0.06); border: 1px solid #30363d; border-radius: 6px;
+      color: #8b949e; padding: 4px 10px; font-size: 0.75rem; font-family: inherit;
+      cursor: pointer; transition: color 0.15s, background 0.15s, border-color 0.15s;
+      display: flex; align-items: center; gap: 4px;
+    }
+    .copy-btn:hover { color: #e6edf3; background: rgba(255,255,255,0.1); border-color: #484f58; }
+    .copy-btn.copied { color: #3fb950; border-color: rgba(63,185,80,0.3); }
 
     /* Code Tabs */
     .code-tabs { display: flex; gap: 0; margin-bottom: -1px; position: relative; z-index: 1; }
@@ -116,28 +187,52 @@
       transition: color 0.15s, background 0.15s;
     }
     .code-tab:hover { color: #e6edf3; }
-    .code-tab.active { color: #e6edf3; background: #161b22; border-color: #21262d; }
+    .code-tab.active {
+      color: #e6edf3; background: #161b22; border-color: #21262d;
+      box-shadow: 0 -2px 8px rgba(124,58,237,0.08);
+    }
     .code-panel { display: none; }
     .code-panel.active { display: block; }
 
     /* Pricing CTA */
     .pricing-cta { padding: 80px 0; border-top: 1px solid #21262d; text-align: center; }
     .pricing-cta h2 { font-size: 2rem; margin-bottom: 16px; }
-    .pricing-cta p { color: #8b949e; font-size: 1.1rem; margin-bottom: 12px; }
-    .pricing-cta .price-highlight { font-size: 2.5rem; font-weight: 800; color: #e6edf3; margin-bottom: 8px; }
-    .pricing-cta .price-detail { color: #8b949e; margin-bottom: 32px; font-size: 0.95rem; }
-    .pricing-cta .includes { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: center; margin-bottom: 32px; color: #8b949e; font-size: 0.9rem; }
+    .pricing-cta p { color: #8b949e; font-size: 1.1rem; margin-bottom: 24px; }
+    .pricing-card {
+      display: inline-block; background: #161b22; border: 1px solid #21262d; border-radius: 16px;
+      padding: 40px 56px; margin-bottom: 24px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+      position: relative; overflow: hidden;
+    }
+    .pricing-card::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg, #7c3aed, #a78bfa);
+    }
+    .price-highlight { font-size: 3rem; font-weight: 800; color: #e6edf3; margin-bottom: 4px; }
+    .price-highlight .price-unit { font-size: 1.1rem; font-weight: 400; color: #8b949e; }
+    .price-detail { color: #8b949e; margin-bottom: 0; font-size: 0.95rem; }
+    .pricing-cta .includes { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: center; margin-bottom: 12px; color: #8b949e; font-size: 0.9rem; }
     .pricing-cta .includes span::before { content: "\2713 "; color: #7c3aed; font-weight: 700; }
+    .pricing-compare {
+      font-size: 0.85rem; color: #484f58; margin-bottom: 32px;
+    }
+    .pricing-compare strong { color: #8b949e; font-weight: 600; }
 
     /* Footer */
-    footer { padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }
-    footer a { color: #8b949e; }
+    footer { padding: 48px 0; border-top: 1px solid #21262d; }
+    .footer-content { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
+    .footer-left { color: #484f58; font-size: 0.85rem; }
+    .footer-tagline { color: #30363d; font-size: 0.8rem; margin-top: 4px; }
+    .footer-links { display: flex; gap: 20px; }
+    .footer-links a { color: #8b949e; font-size: 0.85rem; }
+    .footer-links a:hover { color: #e6edf3; }
 
     /* Tablet */
     @media (max-width: 768px) {
       .hero { padding: 64px 0 48px; }
       .hero h1 { font-size: 2rem; }
       .hero p { font-size: 1.05rem; }
+      .hero::before { width: 500px; height: 400px; }
       .features, .how-it-works, .pricing-cta { padding: 48px 0; }
       .features h2, .how-it-works h2, .pricing-cta h2 { font-size: 1.6rem; margin-bottom: 32px; }
       .feature-grid, .steps { grid-template-columns: 1fr; }
@@ -145,6 +240,8 @@
       .nav-links { gap: 12px; }
       .nav-links a { font-size: 0.8rem; }
       .btn-outline { margin-left: 0; }
+      .pricing-card { padding: 32px 28px; }
+      .footer-content { flex-direction: column; text-align: center; }
     }
 
     /* Mobile */
@@ -154,14 +251,17 @@
       .hero h1 { font-size: 1.6rem; }
       .hero p { font-size: 0.95rem; margin-bottom: 12px; }
       .hero-cta { flex-direction: column; }
+      .hero::before { width: 360px; height: 300px; }
       .btn, .btn-outline { display: block; width: 100%; text-align: center; padding: 14px 20px; margin-left: 0; }
       .features, .how-it-works, .pricing-cta { padding: 36px 0; }
       .features h2, .how-it-works h2, .pricing-cta h2 { font-size: 1.4rem; margin-bottom: 24px; }
       .feature-card, .step { padding: 24px; }
       .code-example { padding: 16px; }
       .code-example pre { font-size: 0.75rem; }
-      .pricing-cta .price-highlight { font-size: 2rem; }
+      .price-highlight { font-size: 2.2rem; }
+      .pricing-card { padding: 28px 20px; }
       .nav-links .btn-signup { padding: 6px 12px; }
+      .trust-signals { flex-direction: column; gap: 6px; }
     }
   </style>
 </head>
@@ -184,13 +284,29 @@
       <h1>Managed LLM Relay for<br>Your <span>AI Workers</span></h1>
       <p>Route inference requests to your GPU workers through a secure, authenticated relay. Always-on queueing, streaming, and cancellation.</p>
       <div class="api-badges">
-        <span class="api-badge">OpenAI Chat Completions</span>
-        <span class="api-badge">Anthropic Messages</span>
-        <span class="api-badge">OpenAI Responses</span>
+        <span class="api-badge">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none"><circle cx="8" cy="8" r="7" stroke="#a78bfa" stroke-width="1.5"/><path d="M5 8h6M8 5v6" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round"/></svg>
+          OpenAI Chat Completions
+        </span>
+        <span class="api-badge">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none"><path d="M3 4l5 4-5 4" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 12h5" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Anthropic Messages
+        </span>
+        <span class="api-badge">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none"><rect x="2" y="4" width="12" height="8" rx="2" stroke="#a78bfa" stroke-width="1.5"/><path d="M5 8h6" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round"/></svg>
+          OpenAI Responses
+        </span>
       </div>
       <div class="hero-cta">
         <a class="btn" href="/signup">Get Started &rarr;</a>
         <a class="btn-outline" href="/integrate">See Integration Guide</a>
+      </div>
+      <div class="trust-signals">
+        <span>Open source</span>
+        <span>&middot;</span>
+        <span>No vendor lock-in</span>
+        <span>&middot;</span>
+        <span>Cancel anytime</span>
       </div>
     </div>
   </section>
@@ -199,15 +315,36 @@
     <div class="container">
       <h2>Why ModelRelay?</h2>
       <div class="feature-grid">
-        <div class="feature-card">
+        <div class="feature-card fade-in">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+          </div>
           <h3>Secure WebSocket Relay</h3>
           <p>Workers connect via authenticated WebSocket from anywhere &mdash; behind NAT, in the cloud, or on bare metal. No inbound ports required.</p>
         </div>
-        <div class="feature-card">
+        <div class="feature-card fade-in">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="6" rx="2"/>
+              <rect x="2" y="9" width="20" height="6" rx="2"/>
+              <rect x="2" y="15" width="20" height="6" rx="2"/>
+              <circle cx="6" cy="6" r="1" fill="#a78bfa"/>
+              <circle cx="6" cy="12" r="1" fill="#a78bfa"/>
+              <circle cx="6" cy="18" r="1" fill="#a78bfa"/>
+            </svg>
+          </div>
           <h3>Multi-API Compatible</h3>
           <p>Supports OpenAI Chat Completions, Anthropic Messages, and the new OpenAI Responses API. Use any SDK &mdash; just point it at ModelRelay.</p>
         </div>
-        <div class="feature-card">
+        <div class="feature-card fade-in">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+            </svg>
+          </div>
           <h3>Managed Infrastructure</h3>
           <p>Hosted on reliable Kubernetes infrastructure. No ops burden &mdash; we handle uptime, TLS, scaling, and monitoring so you can focus on models.</p>
         </div>
@@ -219,29 +356,35 @@
     <div class="container">
       <h2>How It Works</h2>
       <div class="steps">
-        <div class="step">
+        <div class="step fade-in">
           <div class="step-number">1</div>
           <h3>Sign Up &amp; Get Your API Key</h3>
           <p>Create an account, subscribe, and receive your unique API key. It takes less than a minute.</p>
+          <div class="step-connector"></div>
         </div>
-        <div class="step">
+        <div class="step fade-in">
           <div class="step-number">2</div>
           <h3>Run a Model</h3>
           <p>Use the <strong>llamafile CLI</strong> for zero-setup on any machine (no GPU required), or connect a <strong>GPU worker</strong> for maximum performance. Both connect via WebSocket &mdash; no inbound ports needed.</p>
+          <div class="step-connector"></div>
         </div>
-        <div class="step">
+        <div class="step fade-in">
           <div class="step-number">3</div>
           <h3>Point Your SDK at ModelRelay</h3>
           <p>Change one line &mdash; set your <code style="color:#7c3aed">base_url</code> to ModelRelay. Works with OpenAI, Anthropic, and any compatible SDK.</p>
         </div>
       </div>
-      <div style="max-width: 680px; margin: 0 auto;">
+      <div class="fade-in" style="max-width: 680px; margin: 0 auto;">
         <div class="code-tabs">
           <button class="code-tab active" onclick="switchTab('llamafile')">llamafile CLI</button>
           <button class="code-tab" onclick="switchTab('python')">Python (OpenAI)</button>
           <button class="code-tab" onclick="switchTab('anthropic')">Python (Anthropic)</button>
         </div>
         <div class="code-example" id="panel-llamafile" style="border-radius: 0 12px 12px 12px;">
+          <button class="copy-btn" onclick="copyCode(this)">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
+            Copy
+          </button>
           <div class="code-label">Zero-setup &mdash; no GPU required</div>
           <pre><span class="comment"># Install the CLI</span>
 curl -fsSL <span class="highlight">https://raw.githubusercontent.com/ericflo/modelrelay/main/extras/modelrelay-llamafile</span> \
@@ -253,6 +396,10 @@ curl -fsSL <span class="highlight">https://raw.githubusercontent.com/ericflo/mod
 ./modelrelay-llamafile serve <span class="highlight">qwen3.5-2b</span></pre>
         </div>
         <div class="code-example code-panel" id="panel-python" style="border-radius: 0 12px 12px 12px;">
+          <button class="copy-btn" onclick="copyCode(this)">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
+            Copy
+          </button>
           <div class="code-label">Python &mdash; OpenAI SDK</div>
           <pre><span class="comment"># Just change the base_url to your ModelRelay endpoint</span>
 from openai import OpenAI
@@ -269,6 +416,10 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)</pre>
         </div>
         <div class="code-example code-panel" id="panel-anthropic" style="border-radius: 0 12px 12px 12px;">
+          <button class="copy-btn" onclick="copyCode(this)">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
+            Copy
+          </button>
           <div class="code-label">Python &mdash; Anthropic SDK</div>
           <pre><span class="comment"># Point the Anthropic SDK at your ModelRelay endpoint</span>
 from anthropic import Anthropic
@@ -297,30 +448,75 @@ print(message.content[0].text)</pre>
           document.getElementById('panel-' + tab).classList.add('active');
           event.currentTarget.classList.add('active');
         }
+        function copyCode(btn) {
+          var pre = btn.parentElement.querySelector('pre');
+          var text = pre.textContent || pre.innerText;
+          navigator.clipboard.writeText(text).then(function() {
+            btn.classList.add('copied');
+            btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 8.5l3.5 3.5 6.5-8"/></svg> Copied';
+            setTimeout(function() {
+              btn.classList.remove('copied');
+              btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg> Copy';
+            }, 2000);
+          });
+        }
       </script>
     </div>
   </section>
 
   <section class="pricing-cta">
     <div class="container">
-      <h2>Simple, Transparent Pricing</h2>
-      <p>One plan. Everything included. No per-request fees.</p>
-      <div class="price-highlight">$20<span style="font-size:1.1rem;font-weight:400;color:#8b949e;">/mo</span></div>
-      <div class="includes">
+      <h2 class="fade-in">Simple, Transparent Pricing</h2>
+      <p class="fade-in">One plan. Everything included. No per-request fees.</p>
+      <div class="pricing-card fade-in">
+        <div class="price-highlight">$20<span class="price-unit">/mo</span></div>
+        <div class="price-detail">Flat rate, no usage surprises</div>
+      </div>
+      <div class="includes fade-in">
         <span>Unlimited workers</span>
         <span>Unlimited requests</span>
         <span>WebSocket streaming</span>
         <span>All three API formats</span>
         <span>TLS &amp; auth included</span>
       </div>
-      <a class="btn" href="/pricing">View Pricing Details &rarr;</a>
+      <div class="pricing-compare fade-in">
+        <strong>vs self-hosted:</strong> skip the Nginx configs, TLS certs, WebSocket reverse proxies, and monitoring dashboards
+      </div>
+      <a class="btn fade-in" href="/pricing">View Pricing Details &rarr;</a>
     </div>
   </section>
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+      <div class="footer-content">
+        <div class="footer-left">
+          &copy; 2026 ModelRelay
+          <div class="footer-tagline">Your GPU workers, our relay. Inference without the infrastructure.</div>
+        </div>
+        <div class="footer-links">
+          <a href="/pricing">Pricing</a>
+          <a href="/integrate">Integration</a>
+          <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
+          <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
     </div>
   </footer>
+
+  <script>
+    (function() {
+      var observer = new IntersectionObserver(function(entries) {
+        entries.forEach(function(entry) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('visible');
+            observer.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+      document.querySelectorAll('.fade-in').forEach(function(el) {
+        observer.observe(el);
+      });
+    })();
+  </script>
 </body>
 </html>
