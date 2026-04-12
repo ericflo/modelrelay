@@ -28,6 +28,22 @@
     a { color: #7c3aed; text-decoration: none; }
     a:hover { text-decoration: underline; }
 
+    /* Skip navigation */
+    .skip-nav {
+      position: absolute; top: -100%; left: 16px; z-index: 1000;
+      background: #7c3aed; color: #fff; padding: 8px 16px; border-radius: 0 0 8px 8px;
+      font-size: 0.9rem; font-weight: 600; text-decoration: none;
+      transition: top 0.2s;
+    }
+    .skip-nav:focus { top: 0; text-decoration: none; }
+
+    /* Focus indicators */
+    :focus-visible {
+      outline: 2px solid #7c3aed;
+      outline-offset: 2px;
+    }
+    input:focus-visible { outline: none; }
+
     .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
 
     /* Scroll animations */
@@ -289,7 +305,8 @@
   </style>
 </head>
 <body>
-  <nav>
+  <a href="#main-content" class="skip-nav">Skip to content</a>
+  <nav role="navigation" aria-label="Main navigation">
     <div class="container">
       <a href="/" class="logo">Model<span>Relay</span></a>
       <button class="nav-hamburger" aria-label="Toggle menu" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
@@ -305,6 +322,7 @@
     </div>
   </nav>
 
+  <main id="main-content">
   <section class="hero">
     <div class="container">
       <h1>Managed LLM Relay for<br>Your <span>AI Workers</span></h1>
@@ -511,8 +529,9 @@ print(message.content[0].text)</pre>
       <a class="btn fade-in" href="/pricing">View Pricing Details &rarr;</a>
     </div>
   </section>
+  </main>
 
-  <footer>
+  <footer role="contentinfo">
     <div class="container">
       <div class="footer-content">
         <div class="footer-left">
