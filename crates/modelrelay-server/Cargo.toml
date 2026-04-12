@@ -22,7 +22,7 @@ chrono = { workspace = true, optional = true }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 futures-util.workspace = true
-rand = "0.9"
+rand = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11"
