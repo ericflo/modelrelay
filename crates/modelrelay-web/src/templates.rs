@@ -3006,7 +3006,7 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     };
 
     format!(
-        r#"<!DOCTYPE html>
+        r##"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -3021,6 +3021,23 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     }}
     a {{ color: #7c3aed; text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
+
+    /* Skip navigation */
+    .skip-nav {{
+      position: absolute; top: -100%; left: 16px; z-index: 1000;
+      background: #7c3aed; color: #fff; padding: 8px 16px; border-radius: 0 0 8px 8px;
+      font-size: 0.9rem; font-weight: 600; text-decoration: none;
+      transition: top 0.2s;
+    }}
+    .skip-nav:focus {{ top: 0; text-decoration: none; }}
+
+    /* Focus indicators */
+    :focus-visible {{
+      outline: 2px solid #7c3aed;
+      outline-offset: 2px;
+    }}
+    input:focus-visible {{ outline: none; }}
+
     .container {{ max-width: 900px; margin: 0 auto; padding: 0 24px; }}
 
     /* Nav */
@@ -3228,7 +3245,8 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
   </style>
 </head>
 <body>
-  <nav>
+  <a href="#main-content" class="skip-nav">Skip to content</a>
+  <nav role="navigation" aria-label="Main navigation">
     <div class="container">
       <a href="/" class="logo">Model<span>Relay</span></a>
       <button class="nav-hamburger" aria-label="Toggle navigation" onclick="this.classList.toggle('open');this.parentElement.querySelector('.nav-links').classList.toggle('open')">
@@ -3240,14 +3258,14 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     </div>
   </nav>
 
-  <section class="content">
+  <main id="main-content" class="content">
     <div class="container">
       <h1>{title}</h1>
       {body_content}
     </div>
-  </section>
+  </main>
 
-  <footer>
+  <footer role="contentinfo">
     <div class="container">
       <div class="footer-content">
         <div class="footer-left">
@@ -3264,6 +3282,6 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     </div>
   </footer>
 </body>
-</html>"#
+</html>"##
     )
 }

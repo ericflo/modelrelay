@@ -570,7 +570,13 @@ fn error_page(message: &str) -> Html<String> {
     Html(modelrelay_web::templates::page_shell(
         "Error",
         &format!(
-            "<div class=\"card\"><h2>Error</h2><p>{}</p>\
+            "<div class=\"card\" style=\"border-left: 3px solid #f87171;\">\
+             <h2 style=\"display:flex;align-items:center;gap:10px;\">\
+             <svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#f87171\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
+             <circle cx=\"12\" cy=\"12\" r=\"10\"/><line x1=\"15\" y1=\"9\" x2=\"9\" y2=\"15\"/><line x1=\"9\" y1=\"9\" x2=\"15\" y2=\"15\"/></svg>\
+             Something went wrong</h2>\
+             <p>{}</p>\
+             <p style=\"margin-top:16px;color:#8b949e;font-size:0.9rem;\">Try refreshing the page or returning to the dashboard.</p>\
              <p class=\"back-link\"><a href=\"/dashboard\">&larr; Back to dashboard</a></p></div>",
             html_escape(message)
         ),
@@ -579,8 +585,13 @@ fn error_page(message: &str) -> Html<String> {
 }
 
 fn no_db_html() -> String {
-    "<div class=\"card\"><h2>Dashboard Unavailable</h2>\
-     <p>The database is not connected. Please try again later.</p></div>"
+    "<div class=\"card\" style=\"border-left: 3px solid #fbbf24;\">\
+     <h2 style=\"display:flex;align-items:center;gap:10px;\">\
+     <svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#fbbf24\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
+     <path d=\"M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z\"/>\
+     <line x1=\"12\" y1=\"9\" x2=\"12\" y2=\"13\"/><line x1=\"12\" y1=\"17\" x2=\"12.01\" y2=\"17\"/></svg>\
+     Dashboard Unavailable</h2>\
+     <p>The database connection is temporarily unavailable. Please check back shortly.</p></div>"
         .to_string()
 }
 

@@ -28,15 +28,17 @@ fn client_ip(headers: &HeaderMap) -> IpAddr {
 
 /// Render a 429 Too Many Requests page.
 fn rate_limit_response() -> Response {
-    let html = modelrelay_web::templates::page_shell(
-        "Too Many Requests",
-        r#"<div class="card">
-  <h2>Too Many Requests</h2>
-  <p>You've made too many login or sign-up attempts. Please wait 15 minutes and try again.</p>
-  <a href="/" class="btn">Back to Home</a>
-</div>"#,
-        false,
-    );
+    let body = "\
+<div class=\"card\" style=\"border-left: 3px solid #fbbf24;\">\
+  <h2 style=\"display:flex;align-items:center;gap:10px;\">\
+    <svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#fbbf24\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><polyline points=\"12 6 12 12 16 14\"/></svg>\
+    Slow down\
+  </h2>\
+  <p>You've made too many login or sign-up attempts. Please wait <strong>15 minutes</strong> before trying again.</p>\
+  <p style=\"margin-top:12px;color:#8b949e;font-size:0.9rem;\">This limit protects your account from unauthorized access attempts.</p>\
+  <a href=\"/\" class=\"btn\" style=\"margin-top:20px;\">Back to Home</a>\
+</div>";
+    let html = modelrelay_web::templates::page_shell("Too Many Requests", body, false);
     (StatusCode::TOO_MANY_REQUESTS, Html(html)).into_response()
 }
 
