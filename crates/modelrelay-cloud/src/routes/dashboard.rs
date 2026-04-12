@@ -609,6 +609,7 @@ fn status_badge(status: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn dashboard_css() -> &'static str {
     "<style>\
     /* ── Dashboard Layout ── */\
