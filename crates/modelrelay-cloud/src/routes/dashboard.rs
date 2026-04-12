@@ -168,17 +168,11 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
 /// POST /dashboard/billing-portal — create a Stripe billing portal session and redirect.
 pub async fn billing_portal(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let Some(ref key) = state.stripe_key else {
-        return Html(
-            "<h1>Billing not configured</h1><p><a href=\"/dashboard\">&larr; Back</a></p>",
-        )
-        .into_response();
+        return error_page("Billing not configured").into_response();
     };
 
     let Some(ref pool) = state.db else {
-        return Html(
-            "<h1>Database not available</h1><p><a href=\"/dashboard\">&larr; Back</a></p>",
-        )
-        .into_response();
+        return error_page("Database not available").into_response();
     };
 
     let user_id = match require_user(&session).await {
@@ -225,32 +219,23 @@ pub async fn billing_portal(session: Session, State(state): State<Arc<CloudState
                 if let Some(url) = body["url"].as_str() {
                     Redirect::to(url).into_response()
                 } else {
-                    Html("<h1>Error</h1><p>Stripe did not return a portal URL.</p>").into_response()
+                    error_page("Stripe did not return a portal URL.").into_response()
                 }
             }
             Err(e) => {
                 tracing::error!("stripe portal response parse error: {e}");
-                Html("<h1>Error</h1><p>Could not process billing portal response.</p>")
-                    .into_response()
+                error_page("Could not process billing portal response.").into_response()
             }
         },
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
             tracing::error!("stripe billing portal API error: {status} — {body}");
-            Html(
-                "<h1>Error</h1><p>Could not open billing portal. Please try again later.</p>\
-                 <p><a href=\"/dashboard\">&larr; Back to dashboard</a></p>",
-            )
-            .into_response()
+            error_page("Could not open billing portal. Please try again later.").into_response()
         }
         Err(e) => {
             tracing::error!("stripe billing portal request error: {e}");
-            Html(
-                "<h1>Error</h1><p>Could not reach payment provider. Please try again later.</p>\
-                 <p><a href=\"/dashboard\">&larr; Back to dashboard</a></p>",
-            )
-            .into_response()
+            error_page("Could not reach payment provider. Please try again later.").into_response()
         }
     }
 }
