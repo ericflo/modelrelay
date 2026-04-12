@@ -369,24 +369,107 @@ pub fn dashboard_page() -> String {
     a:hover {{ text-decoration: underline; }}
     .container {{ max-width: 960px; margin: 0 auto; padding: 0 24px; }}
 
-    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; }}
+    /* Nav */
+    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; position: relative; }}
     nav .container {{ display: flex; justify-content: space-between; align-items: center; }}
     .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
+    .logo:hover {{ text-decoration: none; }}
     .logo span {{ color: #7c3aed; }}
-    .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
-    .nav-links a:hover {{ color: #e6edf3; text-decoration: none; }}
-    .nav-links a.active {{ color: #7c3aed; }}
+    .nav-links {{ display: flex; align-items: center; gap: 0; }}
+    .nav-links .nav-link {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; padding: 4px 0; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }}
+    .nav-links .nav-link:hover {{ color: #e6edf3; text-decoration: none; }}
+    .nav-links .nav-link.active {{ color: #e6edf3; border-bottom-color: #7c3aed; }}
     .nav-links form {{ display: inline; }}
-    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
+    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; transition: color 0.2s; }}
     .nav-links button:hover {{ color: #e6edf3; }}
+
+    /* Hamburger */
+    .nav-hamburger {{
+      display: none; background: none; border: none; cursor: pointer; padding: 4px;
+      flex-direction: column; justify-content: center; align-items: center; gap: 5px;
+    }}
+    .nav-hamburger span {{
+      display: block; width: 22px; height: 2px; background: #8b949e; border-radius: 1px;
+      transition: transform 0.25s, opacity 0.25s;
+    }}
+    .nav-hamburger:hover span {{ background: #e6edf3; }}
+    .nav-hamburger.open span:nth-child(1) {{ transform: translateY(7px) rotate(45deg); }}
+    .nav-hamburger.open span:nth-child(2) {{ opacity: 0; }}
+    .nav-hamburger.open span:nth-child(3) {{ transform: translateY(-7px) rotate(-45deg); }}
 
     .content {{ padding: 32px 0; }}
     .content h1 {{ font-size: 1.75rem; margin-bottom: 20px; }}
 
-    footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
-    footer a {{ color: #8b949e; }}
+    .badge {{
+      display: inline-block; padding: 4px 12px; border-radius: 20px;
+      font-size: 0.8rem; font-weight: 600; background: #1f2937; color: #8b949e;
+    }}
+    .badge-active {{ background: #064e3b; color: #34d399; }}
+    .badge-warn {{ background: #78350f; color: #fbbf24; }}
+    .badge-cancel {{ background: #7f1d1d; color: #f87171; }}
+
+    .btn {{
+      display: inline-block; padding: 10px 20px; background: #7c3aed; color: #fff;
+      border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
+      cursor: pointer; text-decoration: none;
+    }}
+    .btn:hover {{ background: #6d28d9; text-decoration: none; }}
+
+    /* Footer */
+    footer {{ padding: 48px 0; border-top: 1px solid #21262d; }}
+    .footer-content {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }}
+    .footer-left {{ color: #484f58; font-size: 0.85rem; }}
+    .footer-tagline {{ color: #30363d; font-size: 0.8rem; margin-top: 4px; }}
+    .footer-links {{ display: flex; gap: 20px; }}
+    .footer-links a {{ color: #8b949e; font-size: 0.85rem; }}
+    .footer-links a:hover {{ color: #e6edf3; text-decoration: none; }}
 
     code {{ font-family: "SFMono-Regular", Consolas, monospace; }}
+
+    /* Dashboard header row */
+    .dash-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 12px; flex-wrap: wrap; }}
+    .dash-header h1 {{ margin-bottom: 0; }}
+
+    /* Tablet */
+    @media (max-width: 768px) {{
+      .content {{ padding: 24px 0; }}
+      .content h1 {{ font-size: 1.5rem; }}
+      .nav-hamburger {{ display: flex; }}
+      .nav-links {{
+        display: none; position: absolute; top: 100%; left: 0; right: 0;
+        background: #161b22; border-bottom: 1px solid #21262d;
+        flex-direction: column; padding: 16px 24px; gap: 0; z-index: 100;
+      }}
+      .nav-links.open {{ display: flex; }}
+      .nav-links .nav-link {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; border-bottom: none; }}
+      .nav-links .nav-link.active {{ color: #7c3aed; }}
+      .nav-links form {{ display: block; }}
+      .nav-links button {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; }}
+      .footer-content {{ flex-direction: column; text-align: center; }}
+      .config-bar {{ flex-direction: column; align-items: stretch; }}
+      .config-bar input {{ width: 100%; }}
+      .config-bar label {{ margin-top: 4px; }}
+      .health-bar {{ gap: 8px; }}
+      .health-item {{ min-width: 0; flex-basis: calc(50% - 4px); }}
+      table.data {{ display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+      .stat-row .stat-label {{ min-width: 100px; font-size: 0.8rem; }}
+      .key-actions {{ flex-direction: column; }}
+      .key-actions input {{ width: 100%; }}
+    }}
+
+    /* Mobile */
+    @media (max-width: 480px) {{
+      .container {{ padding: 0 16px; }}
+      .content {{ padding: 20px 0; }}
+      .content h1 {{ font-size: 1.3rem; }}
+      .dash-header {{ flex-direction: column; align-items: flex-start; }}
+      .health-item {{ flex-basis: 100%; }}
+      .btn {{ display: block; width: 100%; text-align: center; }}
+      .stat-row {{ flex-direction: column; align-items: flex-start; gap: 4px; }}
+      .stat-row .stat-label {{ min-width: 0; }}
+      .stat-row .stat-bar {{ width: 100%; }}
+    }}
+
     {dashboard_css}
   </style>
 </head>
@@ -394,11 +477,14 @@ pub fn dashboard_page() -> String {
   <nav>
     <div class="container">
       <a href="/" class="logo">Model<span>Relay</span></a>
+      <button class="nav-hamburger" aria-label="Toggle navigation" onclick="this.classList.toggle('open');this.parentElement.querySelector('.nav-links').classList.toggle('open')">
+        <span></span><span></span><span></span>
+      </button>
       <div class="nav-links">
-        <a href="/dashboard" class="active">Dashboard</a>
-        <a href="/setup">Setup</a>
-        <a href="/integrate">Integrate</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
+        <a href="/dashboard" class="nav-link active">Dashboard</a>
+        <a href="/setup" class="nav-link">Setup</a>
+        <a href="/integrate" class="nav-link">Integrate</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener" class="nav-link">Docs</a>
         <form method="POST" action="/logout"><button type="submit">Log out</button></form>
       </div>
     </div>
@@ -406,8 +492,8 @@ pub fn dashboard_page() -> String {
 
   <section class="content">
     <div class="container">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
-        <h1 style="margin-bottom:0;">Dashboard</h1>
+      <div class="dash-header">
+        <h1>Dashboard</h1>
         <a href="/setup" class="btn">+ Add a machine</a>
       </div>
       {body_content}
@@ -416,7 +502,17 @@ pub fn dashboard_page() -> String {
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+      <div class="footer-content">
+        <div class="footer-left">
+          &copy; 2026 ModelRelay
+          <div class="footer-tagline">Your GPU workers, our relay. Inference without the infrastructure.</div>
+        </div>
+        <div class="footer-links">
+          <a href="/integrate">Integration</a>
+          <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
+          <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
     </div>
   </footer>
 
