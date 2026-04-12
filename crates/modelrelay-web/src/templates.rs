@@ -2775,10 +2775,26 @@ fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
 #[allow(clippy::too_many_lines)]
 pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     let title_lower = title.to_lowercase();
-    let active_dashboard = if title_lower.contains("dashboard") { " active" } else { "" };
-    let active_setup = if title_lower.contains("setup") { " active" } else { "" };
-    let active_integrate = if title_lower.contains("integrat") { " active" } else { "" };
-    let active_pricing = if title_lower.contains("pricing") { " active" } else { "" };
+    let active_dashboard = if title_lower.contains("dashboard") {
+        " active"
+    } else {
+        ""
+    };
+    let active_setup = if title_lower.contains("setup") {
+        " active"
+    } else {
+        ""
+    };
+    let active_integrate = if title_lower.contains("integrat") {
+        " active"
+    } else {
+        ""
+    };
+    let active_pricing = if title_lower.contains("pricing") {
+        " active"
+    } else {
+        ""
+    };
 
     let nav_links = if logged_in {
         format!(
