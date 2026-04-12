@@ -1,187 +1,118 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Checkout Cancelled — ModelRelay</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%237c3aed'/%3E%3Cpath d='M8 10h4l4 6-4 6H8l4-6-4-6zm12 0h4l4 6-4 6h-4l4-6-4-6z' fill='white'/%3E%3C/svg%3E">
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #0d1117; color: #e6edf3; line-height: 1.6;
-      overflow-x: hidden;
-    }
-    a { color: #7c3aed; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+<style>
+  /* Content */
+  .content {
+    padding: 100px 0 80px; text-align: center;
+    position: relative; overflow: hidden;
+  }
+  .content::before {
+    content: ''; position: absolute; top: -20%; left: 50%; transform: translateX(-50%);
+    width: 600px; height: 400px;
+    background: radial-gradient(ellipse at center, rgba(124,58,237,0.08) 0%, transparent 60%);
+    pointer-events: none; z-index: 0;
+  }
+  .content .container { position: relative; z-index: 1; }
 
-    /* Nav */
-    nav { padding: 20px 0; border-bottom: 1px solid #21262d; }
-    nav .container { display: flex; justify-content: space-between; align-items: center; }
-    .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; text-decoration: none; }
-    .logo:hover { text-decoration: none; }
-    .logo span { color: #7c3aed; }
-    .nav-links { display: flex; align-items: center; gap: 16px; }
-    .nav-links a { color: #8b949e; font-size: 0.9rem; transition: color 0.15s; }
-    .nav-links a:hover { color: #e6edf3; text-decoration: none; }
+  /* Cancel card */
+  .cancel-card {
+    display: inline-block; background: #161b22; border: 1px solid #21262d;
+    border-radius: 16px; padding: 48px 56px; max-width: 520px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+    position: relative; overflow: hidden;
+    animation: cardIn 0.5s ease-out;
+  }
+  @keyframes cardIn {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
-    /* Content */
-    .content {
-      padding: 100px 0 80px; text-align: center;
-      position: relative; overflow: hidden;
-    }
-    .content::before {
-      content: ''; position: absolute; top: -20%; left: 50%; transform: translateX(-50%);
-      width: 600px; height: 400px;
-      background: radial-gradient(ellipse at center, rgba(124,58,237,0.08) 0%, transparent 60%);
-      pointer-events: none; z-index: 0;
-    }
-    .content .container { position: relative; z-index: 1; }
+  .cancel-icon {
+    width: 64px; height: 64px; border-radius: 50%;
+    background: rgba(139,148,158,0.08); border: 2px solid rgba(139,148,158,0.15);
+    display: inline-flex; align-items: center; justify-content: center;
+    margin-bottom: 24px;
+  }
 
-    /* Cancel card */
-    .cancel-card {
-      display: inline-block; background: #161b22; border: 1px solid #21262d;
-      border-radius: 16px; padding: 48px 56px; max-width: 520px;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.2);
-      position: relative; overflow: hidden;
-      animation: cardIn 0.5s ease-out;
-    }
-    @keyframes cardIn {
-      from { opacity: 0; transform: translateY(16px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
+  .cancel-card h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 12px; }
+  .cancel-card p { color: #8b949e; font-size: 1.05rem; margin-bottom: 12px; }
+  .cancel-card .reassure {
+    color: #484f58; font-size: 0.9rem; margin-bottom: 32px;
+  }
 
-    .cancel-icon {
-      width: 64px; height: 64px; border-radius: 50%;
-      background: rgba(139,148,158,0.08); border: 2px solid rgba(139,148,158,0.15);
-      display: inline-flex; align-items: center; justify-content: center;
-      margin-bottom: 24px;
-    }
+  /* Reasons */
+  .reasons {
+    text-align: left; margin-bottom: 32px;
+    background: rgba(124,58,237,0.04); border: 1px solid rgba(124,58,237,0.1);
+    border-radius: 10px; padding: 20px 24px;
+  }
+  .reasons h3 {
+    font-size: 0.8rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #7c3aed; margin-bottom: 12px;
+  }
+  .reasons ul { list-style: none; }
+  .reasons li {
+    padding: 5px 0; color: #8b949e; font-size: 0.9rem;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .reasons li svg { flex-shrink: 0; }
 
-    .cancel-card h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 12px; }
-    .cancel-card p { color: #8b949e; font-size: 1.05rem; margin-bottom: 12px; }
-    .cancel-card .reassure {
-      color: #484f58; font-size: 0.9rem; margin-bottom: 32px;
-    }
+  .btn {
+    display: inline-block; padding: 14px 36px; background: #7c3aed; color: #fff;
+    border-radius: 8px; font-size: 1.1rem; font-weight: 600;
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+  .btn:hover { background: #6d28d9; text-decoration: none; box-shadow: 0 0 20px rgba(124,58,237,0.3); }
+  .btn-outline {
+    display: inline-block; padding: 14px 36px; background: transparent; color: #8b949e;
+    border: 1px solid #30363d; border-radius: 8px; font-size: 1.1rem; font-weight: 600;
+    transition: border-color 0.2s, color 0.2s; margin-left: 12px;
+  }
+  .btn-outline:hover { border-color: #7c3aed; color: #e6edf3; text-decoration: none; }
+  .cta-buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
 
-    /* Reasons */
-    .reasons {
-      text-align: left; margin-bottom: 32px;
-      background: rgba(124,58,237,0.04); border: 1px solid rgba(124,58,237,0.1);
-      border-radius: 10px; padding: 20px 24px;
-    }
-    .reasons h3 {
-      font-size: 0.8rem; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 0.06em; color: #7c3aed; margin-bottom: 12px;
-    }
-    .reasons ul { list-style: none; }
-    .reasons li {
-      padding: 5px 0; color: #8b949e; font-size: 0.9rem;
-      display: flex; align-items: center; gap: 10px;
-    }
-    .reasons li svg { flex-shrink: 0; }
+  @media (max-width: 480px) {
+    .content { padding: 64px 0 48px; }
+    .cancel-card { padding: 32px 24px; }
+    .cancel-card h1 { font-size: 1.4rem; }
+    .btn, .btn-outline { display: block; width: 100%; text-align: center; margin-left: 0; }
+    .cta-buttons { flex-direction: column; }
+  }
+</style>
 
-    .btn {
-      display: inline-block; padding: 14px 36px; background: #7c3aed; color: #fff;
-      border-radius: 8px; font-size: 1.1rem; font-weight: 600;
-      transition: background 0.2s, box-shadow 0.2s;
-    }
-    .btn:hover { background: #6d28d9; text-decoration: none; box-shadow: 0 0 20px rgba(124,58,237,0.3); }
-    .btn-outline {
-      display: inline-block; padding: 14px 36px; background: transparent; color: #8b949e;
-      border: 1px solid #30363d; border-radius: 8px; font-size: 1.1rem; font-weight: 600;
-      transition: border-color 0.2s, color 0.2s; margin-left: 12px;
-    }
-    .btn-outline:hover { border-color: #7c3aed; color: #e6edf3; text-decoration: none; }
-    .cta-buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+<section class="content">
+  <div class="container">
+    <div class="cancel-card">
+      <div class="cancel-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M9 15l6-6M15 15L9 9"/>
+        </svg>
+      </div>
+      <h1>Checkout Cancelled</h1>
+      <p>No worries &mdash; you haven't been charged.</p>
+      <p class="reassure">You can come back and subscribe whenever you're ready.</p>
 
-    /* Footer */
-    footer { padding: 48px 0; border-top: 1px solid #21262d; }
-    .footer-content { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
-    .footer-left { color: #484f58; font-size: 0.85rem; }
-    .footer-tagline { color: #30363d; font-size: 0.8rem; margin-top: 4px; }
-    .footer-links { display: flex; gap: 20px; }
-    .footer-links a { color: #8b949e; font-size: 0.85rem; }
-    .footer-links a:hover { color: #e6edf3; }
+      <div class="reasons">
+        <h3>What you'd get with ModelRelay</h3>
+        <ul>
+          <li>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            Unlimited workers and requests for $20/mo
+          </li>
+          <li>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            Zero DevOps &mdash; TLS, auth, and monitoring included
+          </li>
+          <li>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            Open source with no vendor lock-in
+          </li>
+        </ul>
+      </div>
 
-    @media (max-width: 480px) {
-      .container { padding: 0 16px; }
-      .content { padding: 64px 0 48px; }
-      .cancel-card { padding: 32px 24px; }
-      .cancel-card h1 { font-size: 1.4rem; }
-      .btn, .btn-outline { display: block; width: 100%; text-align: center; margin-left: 0; }
-      .cta-buttons { flex-direction: column; }
-      .footer-content { flex-direction: column; text-align: center; }
-    }
-  </style>
-</head>
-<body>
-  <nav>
-    <div class="container">
-      <a href="/" class="logo">Model<span>Relay</span></a>
-      <div class="nav-links">
-        <a href="/pricing">Pricing</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
-        <a href="/login">Log in</a>
+      <div class="cta-buttons">
+        <a class="btn" href="/pricing">Back to Pricing</a>
+        <a class="btn-outline" href="/">Back to Home</a>
       </div>
     </div>
-  </nav>
-
-  <section class="content">
-    <div class="container">
-      <div class="cancel-card">
-        <div class="cancel-icon">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M9 15l6-6M15 15L9 9"/>
-          </svg>
-        </div>
-        <h1>Checkout Cancelled</h1>
-        <p>No worries &mdash; you haven't been charged.</p>
-        <p class="reassure">You can come back and subscribe whenever you're ready.</p>
-
-        <div class="reasons">
-          <h3>What you'd get with ModelRelay</h3>
-          <ul>
-            <li>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-              Unlimited workers and requests for $20/mo
-            </li>
-            <li>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-              Zero DevOps &mdash; TLS, auth, and monitoring included
-            </li>
-            <li>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-              Open source with no vendor lock-in
-            </li>
-          </ul>
-        </div>
-
-        <div class="cta-buttons">
-          <a class="btn" href="/pricing">Back to Pricing</a>
-          <a class="btn-outline" href="/">Back to Home</a>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <footer>
-    <div class="container">
-      <div class="footer-content">
-        <div class="footer-left">
-          &copy; 2026 ModelRelay
-          <div class="footer-tagline">Your GPU workers, our relay. Inference without the infrastructure.</div>
-        </div>
-        <div class="footer-links">
-          <a href="/pricing">Pricing</a>
-          <a href="/integrate">Integration</a>
-          <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
-          <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
-        </div>
-      </div>
-    </div>
-  </footer>
-</body>
-</html>
+  </div>
+</section>

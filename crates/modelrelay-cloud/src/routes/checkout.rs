@@ -10,6 +10,14 @@ use crate::state::CloudState;
 static CANCEL_HTML: &str = include_str!("../../templates/checkout_cancel.html");
 static SUCCESS_HTML: &str = include_str!("../../templates/checkout_success.html");
 
+fn success_page() -> String {
+    modelrelay_web::templates::page_shell("Subscription Active", SUCCESS_HTML, true)
+}
+
+fn cancel_page() -> String {
+    modelrelay_web::templates::page_shell("Checkout Cancelled", CANCEL_HTML, false)
+}
+
 /// POST /checkout — create a Stripe Checkout Session and redirect to Stripe.
 ///
 /// If the user is logged in, pre-fills their email in the checkout session.
@@ -133,7 +141,7 @@ pub async fn success(
         tracing::error!("failed to store user_id in session: {e}");
     }
 
-    Html(SUCCESS_HTML).into_response()
+    Html(success_page()).into_response()
 }
 
 /// Retrieve the Stripe checkout session, extract the customer email, and find the user.
@@ -178,6 +186,6 @@ async fn resolve_user_from_stripe(
 }
 
 /// GET /checkout/cancel
-pub async fn cancel() -> Html<&'static str> {
-    Html(CANCEL_HTML)
+pub async fn cancel() -> Html<String> {
+    Html(cancel_page())
 }

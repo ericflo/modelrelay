@@ -1,217 +1,148 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Subscription Active — ModelRelay</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%237c3aed'/%3E%3Cpath d='M8 10h4l4 6-4 6H8l4-6-4-6zm12 0h4l4 6-4 6h-4l4-6-4-6z' fill='white'/%3E%3C/svg%3E">
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #0d1117; color: #e6edf3; line-height: 1.6;
-      overflow-x: hidden;
-    }
-    a { color: #7c3aed; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+<style>
+  /* Content */
+  .content {
+    padding: 100px 0 80px; text-align: center;
+    position: relative; overflow: hidden;
+  }
+  .content::before {
+    content: ''; position: absolute; top: -20%; left: 50%; transform: translateX(-50%);
+    width: 600px; height: 400px;
+    background: radial-gradient(ellipse at center, rgba(63,185,80,0.1) 0%, rgba(124,58,237,0.05) 40%, transparent 70%);
+    pointer-events: none; z-index: 0;
+  }
+  .content .container { position: relative; z-index: 1; }
 
-    /* Nav */
-    nav { padding: 20px 0; border-bottom: 1px solid #21262d; }
-    nav .container { display: flex; justify-content: space-between; align-items: center; }
-    .logo { font-size: 1.25rem; font-weight: 700; color: #e6edf3; text-decoration: none; }
-    .logo:hover { text-decoration: none; }
-    .logo span { color: #7c3aed; }
-    .nav-links { display: flex; align-items: center; gap: 16px; }
-    .nav-links a { color: #8b949e; font-size: 0.9rem; transition: color 0.15s; }
-    .nav-links a:hover { color: #e6edf3; text-decoration: none; }
+  /* Success card */
+  .success-card {
+    display: inline-block; background: #161b22; border: 1px solid #21262d;
+    border-radius: 16px; padding: 48px 56px; max-width: 560px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+    position: relative; overflow: hidden;
+    animation: cardIn 0.5s ease-out;
+  }
+  .success-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, #3fb950, #7c3aed);
+  }
+  @keyframes cardIn {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
-    /* Content */
-    .content {
-      padding: 100px 0 80px; text-align: center;
-      position: relative; overflow: hidden;
-    }
-    .content::before {
-      content: ''; position: absolute; top: -20%; left: 50%; transform: translateX(-50%);
-      width: 600px; height: 400px;
-      background: radial-gradient(ellipse at center, rgba(63,185,80,0.1) 0%, rgba(124,58,237,0.05) 40%, transparent 70%);
-      pointer-events: none; z-index: 0;
-    }
-    .content .container { position: relative; z-index: 1; }
+  /* Checkmark */
+  .check-circle {
+    width: 72px; height: 72px; border-radius: 50%;
+    background: rgba(63,185,80,0.1); border: 2px solid rgba(63,185,80,0.3);
+    display: inline-flex; align-items: center; justify-content: center;
+    margin-bottom: 24px;
+    animation: checkPop 0.6s ease-out 0.2s both;
+  }
+  @keyframes checkPop {
+    0% { transform: scale(0); opacity: 0; }
+    60% { transform: scale(1.15); }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .check-circle svg { width: 36px; height: 36px; }
 
-    /* Success card */
-    .success-card {
-      display: inline-block; background: #161b22; border: 1px solid #21262d;
-      border-radius: 16px; padding: 48px 56px; max-width: 560px;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.2);
-      position: relative; overflow: hidden;
-      animation: cardIn 0.5s ease-out;
-    }
-    .success-card::before {
-      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
-      background: linear-gradient(90deg, #3fb950, #7c3aed);
-    }
-    @keyframes cardIn {
-      from { opacity: 0; transform: translateY(16px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
+  .success-card h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 12px; }
+  .success-card p { color: #8b949e; font-size: 1.05rem; margin-bottom: 28px; }
 
-    /* Checkmark */
-    .check-circle {
-      width: 72px; height: 72px; border-radius: 50%;
-      background: rgba(63,185,80,0.1); border: 2px solid rgba(63,185,80,0.3);
-      display: inline-flex; align-items: center; justify-content: center;
-      margin-bottom: 24px;
-      animation: checkPop 0.6s ease-out 0.2s both;
-    }
-    @keyframes checkPop {
-      0% { transform: scale(0); opacity: 0; }
-      60% { transform: scale(1.15); }
-      100% { transform: scale(1); opacity: 1; }
-    }
-    .check-circle svg { width: 36px; height: 36px; }
+  /* Steps */
+  .next-steps {
+    text-align: left; margin-bottom: 32px;
+    background: rgba(124,58,237,0.04); border: 1px solid rgba(124,58,237,0.12);
+    border-radius: 10px; padding: 20px 24px;
+  }
+  .next-steps h3 {
+    font-size: 0.8rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #7c3aed; margin-bottom: 12px;
+  }
+  .next-steps ol {
+    list-style: none; counter-reset: steps;
+  }
+  .next-steps li {
+    counter-increment: steps; padding: 6px 0; color: #8b949e; font-size: 0.9rem;
+    display: flex; align-items: flex-start; gap: 10px;
+  }
+  .next-steps li::before {
+    content: counter(steps); display: inline-flex; align-items: center; justify-content: center;
+    min-width: 22px; height: 22px; border-radius: 50%;
+    background: rgba(124,58,237,0.15); color: #a78bfa;
+    font-size: 0.75rem; font-weight: 700; flex-shrink: 0; margin-top: 1px;
+  }
 
-    .success-card h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 12px; }
-    .success-card p { color: #8b949e; font-size: 1.05rem; margin-bottom: 28px; }
+  .btn {
+    display: inline-block; padding: 14px 36px; background: #7c3aed; color: #fff;
+    border-radius: 8px; font-size: 1.1rem; font-weight: 600;
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+  .btn:hover { background: #6d28d9; text-decoration: none; box-shadow: 0 0 20px rgba(124,58,237,0.3); }
 
-    /* Steps */
-    .next-steps {
-      text-align: left; margin-bottom: 32px;
-      background: rgba(124,58,237,0.04); border: 1px solid rgba(124,58,237,0.12);
-      border-radius: 10px; padding: 20px 24px;
-    }
-    .next-steps h3 {
-      font-size: 0.8rem; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 0.06em; color: #7c3aed; margin-bottom: 12px;
-    }
-    .next-steps ol {
-      list-style: none; counter-reset: steps;
-    }
-    .next-steps li {
-      counter-increment: steps; padding: 6px 0; color: #8b949e; font-size: 0.9rem;
-      display: flex; align-items: flex-start; gap: 10px;
-    }
-    .next-steps li::before {
-      content: counter(steps); display: inline-flex; align-items: center; justify-content: center;
-      min-width: 22px; height: 22px; border-radius: 50%;
-      background: rgba(124,58,237,0.15); color: #a78bfa;
-      font-size: 0.75rem; font-weight: 700; flex-shrink: 0; margin-top: 1px;
-    }
+  /* Confetti */
+  .confetti-container {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 10; overflow: hidden;
+  }
+  .confetti {
+    position: absolute; width: 8px; height: 8px; border-radius: 2px;
+    animation: confettiFall 3s ease-out forwards;
+    opacity: 0;
+  }
+  @keyframes confettiFall {
+    0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
+    100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+  }
 
-    .btn {
-      display: inline-block; padding: 14px 36px; background: #7c3aed; color: #fff;
-      border-radius: 8px; font-size: 1.1rem; font-weight: 600;
-      transition: background 0.2s, box-shadow 0.2s;
-    }
-    .btn:hover { background: #6d28d9; text-decoration: none; box-shadow: 0 0 20px rgba(124,58,237,0.3); }
+  @media (max-width: 480px) {
+    .content { padding: 64px 0 48px; }
+    .success-card { padding: 32px 24px; }
+    .success-card h1 { font-size: 1.4rem; }
+    .btn { display: block; width: 100%; text-align: center; }
+  }
+</style>
 
-    /* Confetti */
-    .confetti-container {
-      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      pointer-events: none; z-index: 10; overflow: hidden;
-    }
-    .confetti {
-      position: absolute; width: 8px; height: 8px; border-radius: 2px;
-      animation: confettiFall 3s ease-out forwards;
-      opacity: 0;
-    }
-    @keyframes confettiFall {
-      0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
-      100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
-    }
+<div class="confetti-container" id="confetti"></div>
 
-    /* Footer */
-    footer { padding: 48px 0; border-top: 1px solid #21262d; }
-    .footer-content { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
-    .footer-left { color: #484f58; font-size: 0.85rem; }
-    .footer-tagline { color: #30363d; font-size: 0.8rem; margin-top: 4px; }
-    .footer-links { display: flex; gap: 20px; }
-    .footer-links a { color: #8b949e; font-size: 0.85rem; }
-    .footer-links a:hover { color: #e6edf3; }
-
-    @media (max-width: 480px) {
-      .container { padding: 0 16px; }
-      .content { padding: 64px 0 48px; }
-      .success-card { padding: 32px 24px; }
-      .success-card h1 { font-size: 1.4rem; }
-      .btn { display: block; width: 100%; text-align: center; }
-      .footer-content { flex-direction: column; text-align: center; }
-    }
-  </style>
-</head>
-<body>
-  <div class="confetti-container" id="confetti"></div>
-
-  <nav>
-    <div class="container">
-      <a href="/" class="logo">Model<span>Relay</span></a>
-      <div class="nav-links">
-        <a href="/pricing">Pricing</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
-        <a href="/dashboard">Dashboard</a>
+<section class="content">
+  <div class="container">
+    <div class="success-card">
+      <div class="check-circle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 6L9 17l-5-5"/>
+        </svg>
       </div>
-    </div>
-  </nav>
-
-  <section class="content">
-    <div class="container">
-      <div class="success-card">
-        <div class="check-circle">
-          <svg viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 6L9 17l-5-5"/>
-          </svg>
-        </div>
-        <h1>You're All Set!</h1>
-        <p>Your ModelRelay subscription is active. Your managed relay instance is being provisioned now.</p>
-        <div class="next-steps">
-          <h3>What happens next</h3>
-          <ol>
-            <li>Check your email for your API key and connection details</li>
-            <li>Connect your first GPU worker or use the llamafile CLI</li>
-            <li>Point your SDK at your ModelRelay endpoint and start inferencing</li>
-          </ol>
-        </div>
-        <a class="btn" href="/dashboard">Go to Dashboard &rarr;</a>
+      <h1>You're All Set!</h1>
+      <p>Your ModelRelay subscription is active. Your managed relay instance is being provisioned now.</p>
+      <div class="next-steps">
+        <h3>What happens next</h3>
+        <ol>
+          <li>Check your email for your API key and connection details</li>
+          <li>Connect your first GPU worker or use the llamafile CLI</li>
+          <li>Point your SDK at your ModelRelay endpoint and start inferencing</li>
+        </ol>
       </div>
+      <a class="btn" href="/dashboard">Go to Dashboard &rarr;</a>
     </div>
-  </section>
+  </div>
+</section>
 
-  <footer>
-    <div class="container">
-      <div class="footer-content">
-        <div class="footer-left">
-          &copy; 2026 ModelRelay
-          <div class="footer-tagline">Your GPU workers, our relay. Inference without the infrastructure.</div>
-        </div>
-        <div class="footer-links">
-          <a href="/pricing">Pricing</a>
-          <a href="/integrate">Integration</a>
-          <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
-          <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
-        </div>
-      </div>
-    </div>
-  </footer>
-
-  <script>
-    // Confetti burst
-    (function() {
-      var container = document.getElementById('confetti');
-      var colors = ['#7c3aed', '#a78bfa', '#3fb950', '#c4b5fd', '#58a6ff', '#f97583'];
-      for (var i = 0; i < 40; i++) {
-        var el = document.createElement('div');
-        el.className = 'confetti';
-        el.style.left = Math.random() * 100 + '%';
-        el.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
-        el.style.animationDelay = Math.random() * 1.5 + 's';
-        el.style.animationDuration = (2 + Math.random() * 2) + 's';
-        el.style.width = (5 + Math.random() * 6) + 'px';
-        el.style.height = (5 + Math.random() * 6) + 'px';
-        container.appendChild(el);
-      }
-      // Clean up after animation
-      setTimeout(function() { container.innerHTML = ''; }, 5000);
-    })();
-  </script>
-</body>
-</html>
+<script>
+  // Confetti burst
+  (function() {
+    var container = document.getElementById('confetti');
+    var colors = ['#7c3aed', '#a78bfa', '#3fb950', '#c4b5fd', '#58a6ff', '#f97583'];
+    for (var i = 0; i < 40; i++) {
+      var el = document.createElement('div');
+      el.className = 'confetti';
+      el.style.left = Math.random() * 100 + '%';
+      el.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+      el.style.animationDelay = Math.random() * 1.5 + 's';
+      el.style.animationDuration = (2 + Math.random() * 2) + 's';
+      el.style.width = (5 + Math.random() * 6) + 'px';
+      el.style.height = (5 + Math.random() * 6) + 'px';
+      container.appendChild(el);
+    }
+    // Clean up after animation
+    setTimeout(function() { container.innerHTML = ''; }, 5000);
+  })();
+</script>
