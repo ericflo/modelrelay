@@ -1476,76 +1476,100 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
       border:1px solid #21262d; border-radius:12px;
     }
     .integrate-inputs .field { display:flex; flex-direction:column; flex:1; min-width:180px; }
-    .integrate-inputs label { font-size:0.78rem; color:#8b949e; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px; }
+    .integrate-inputs label { font-size:0.75rem; color:#8b949e; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:6px; font-weight:600; }
     .integrate-inputs input {
-      padding:8px 12px; background:#0d1117; border:1px solid #30363d;
-      border-radius:8px; color:#e6edf3; font-size:0.9rem; font-family:'SFMono-Regular',Consolas,monospace;
+      padding:10px 14px; background:#0d1117; border:1px solid #30363d;
+      border-radius:8px; color:#e6edf3; font-size:0.88rem; font-family:'SFMono-Regular',Consolas,monospace;
+      transition:border-color 0.2s;
     }
-    .integrate-inputs input:focus { outline:none; border-color:#7c3aed; }
+    .integrate-inputs input:focus { outline:none; border-color:#7c3aed; box-shadow:0 0 0 3px rgba(124,58,237,0.15); }
 
     .section-heading {
-      font-size:1.2rem; font-weight:700; margin:32px 0 16px; display:flex;
-      align-items:center; gap:10px;
+      font-size:1.1rem; font-weight:700; margin:40px 0 16px; display:flex;
+      align-items:center; gap:10px; color:#e6edf3;
+      padding-bottom:12px; border-bottom:1px solid #21262d;
     }
-    .section-heading .icon { font-size:1.4rem; }
+    .section-heading .icon { font-size:1.3rem; opacity:0.8; }
+    .section-heading .endpoint-label {
+      color:#8b949e; font-weight:400; font-size:0.82rem;
+      margin-left:auto; font-family:'SFMono-Regular',Consolas,monospace;
+    }
     .section-heading:first-of-type { margin-top:0; }
 
-    .int-tabs { display:flex; gap:6px; margin-bottom:0; flex-wrap:wrap; }
+    .int-tabs { display:flex; gap:2px; margin-bottom:0; flex-wrap:wrap; }
     .int-tabs .tab {
-      padding:8px 16px; background:#0d1117; border:1px solid #30363d;
-      border-radius:8px 8px 0 0; color:#8b949e; cursor:pointer;
-      font-size:0.85rem; font-weight:600; transition:all 0.15s;
-      border-bottom:none; position:relative; top:1px;
+      padding:8px 16px; background:transparent; border:1px solid transparent;
+      border-bottom:none; border-radius:8px 8px 0 0; color:#8b949e; cursor:pointer;
+      font-size:0.82rem; font-weight:600; transition:all 0.2s ease;
+      position:relative; top:1px;
     }
-    .int-tabs .tab:hover { border-color:#7c3aed; color:#e6edf3; }
-    .int-tabs .tab.active { background:#161b22; border-color:#21262d; color:#7c3aed; }
+    .int-tabs .tab:hover { color:#e6edf3; background:rgba(124,58,237,0.08); }
+    .int-tabs .tab.active {
+      background:#161b22; border-color:#21262d; color:#7c3aed;
+      border-bottom-color:#161b22;
+    }
 
     .int-panel {
       background:#161b22; border:1px solid #21262d; border-radius:0 12px 12px 12px;
       padding:24px; margin-bottom:24px;
     }
-    .int-panel p { color:#8b949e; margin-bottom:12px; line-height:1.7; font-size:0.92rem; }
+    .int-panel p { color:#8b949e; margin-bottom:12px; line-height:1.7; font-size:0.9rem; }
     .int-panel h3 { font-size:1rem; margin-bottom:8px; color:#e6edf3; }
-    .int-panel .step-label { color:#7c3aed; font-weight:600; font-size:0.85rem; margin-bottom:4px; }
+    .int-panel .step-label {
+      color:#7c3aed; font-weight:600; font-size:0.8rem; margin-bottom:6px;
+      text-transform:uppercase; letter-spacing:0.5px;
+    }
 
     .int-content { display:none; }
-    .int-content.active { display:block; }
+    .int-content.active { display:block; animation:fadeIn 0.15s ease; }
+    @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
 
     .code-block {
       background:#0d1117; border:1px solid #30363d; border-radius:8px;
-      padding:16px; font-family:'SFMono-Regular',Consolas,monospace;
+      padding:16px 48px 16px 16px; font-family:'SFMono-Regular',Consolas,monospace;
       font-size:0.82rem; color:#e6edf3; overflow-x:auto; position:relative;
       line-height:1.7; margin:8px 0 16px; white-space:pre;
     }
     .code-block .copy-btn {
-      position:absolute; top:8px; right:8px; padding:4px 10px;
-      font-size:0.72rem; background:#30363d; color:#e6edf3;
-      border:none; border-radius:4px; cursor:pointer; z-index:1;
+      position:absolute; top:8px; right:8px; padding:5px 10px;
+      font-size:0.72rem; background:#21262d; color:#8b949e;
+      border:1px solid #30363d; border-radius:6px; cursor:pointer; z-index:1;
+      transition:all 0.2s; display:flex; align-items:center; gap:4px;
     }
-    .code-block .copy-btn:hover { background:#484f58; }
-    .code-block .copy-btn.copied { background:#064e3b; color:#34d399; }
+    .code-block .copy-btn:hover { background:#30363d; color:#e6edf3; border-color:#484f58; }
+    .code-block .copy-btn.copied { background:#064e3b; color:#34d399; border-color:#065f46; }
 
-    .ref-card {
-      background:#161b22; border:1px solid #21262d; border-radius:12px;
-      padding:20px; margin-bottom:16px;
+    .ref-grid {
+      display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));
+      gap:12px; margin-bottom:24px;
     }
-    .ref-card h3 { font-size:1rem; margin-bottom:8px; }
-    .ref-row { display:flex; align-items:center; gap:12px; margin-bottom:8px; }
-    .ref-row .ref-label { color:#8b949e; font-size:0.85rem; min-width:180px; }
-    .ref-row code {
-      flex:1; padding:6px 10px; background:#0d1117; border:1px solid #30363d;
-      border-radius:6px; font-size:0.85rem; color:#e6edf3; position:relative;
-      display:flex; align-items:center; justify-content:space-between;
+    .ref-card-item {
+      background:#161b22; border:1px solid #21262d; border-radius:10px;
+      padding:16px 18px; transition:border-color 0.2s;
     }
-    .ref-row code .copy-btn {
-      padding:2px 8px; font-size:0.7rem; background:#30363d; color:#e6edf3;
-      border:none; border-radius:4px; cursor:pointer; margin-left:8px; flex-shrink:0;
+    .ref-card-item:hover { border-color:#30363d; }
+    .ref-card-item .ref-label {
+      font-size:0.75rem; color:#8b949e; text-transform:uppercase;
+      letter-spacing:0.5px; font-weight:600; margin-bottom:8px; display:block;
     }
-    .ref-row code .copy-btn:hover { background:#484f58; }
+    .ref-card-item .ref-value {
+      display:flex; align-items:center; justify-content:space-between; gap:8px;
+      padding:8px 12px; background:#0d1117; border:1px solid #30363d;
+      border-radius:6px; font-family:'SFMono-Regular',Consolas,monospace;
+      font-size:0.85rem; color:#e6edf3;
+    }
+    .ref-card-item .ref-value .copy-btn {
+      padding:3px 8px; font-size:0.7rem; background:#21262d; color:#8b949e;
+      border:1px solid #30363d; border-radius:4px; cursor:pointer; flex-shrink:0;
+      transition:all 0.2s;
+    }
+    .ref-card-item .ref-value .copy-btn:hover { background:#30363d; color:#e6edf3; }
+    .ref-card-item .ref-value .copy-btn.copied { background:#064e3b; color:#34d399; border-color:#065f46; }
 
     .hint-box {
       background:#1c1f26; border:1px solid #30363d; border-radius:8px;
-      padding:12px 14px; margin:8px 0 16px; font-size:0.82rem; color:#8b949e;
+      padding:14px 16px; margin:8px 0 16px; font-size:0.82rem; color:#8b949e;
+      line-height:1.8;
     }
     .hint-box strong { color:#e6edf3; }
 
@@ -1553,14 +1577,25 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
       background:#161b22; border:1px solid #21262d; border-radius:12px;
       padding:24px; margin-bottom:24px;
     }
+    .demo-controls {
+      display:flex; gap:12px; margin-bottom:12px; flex-wrap:wrap; align-items:center;
+    }
+    .demo-controls label { font-size:0.8rem; color:#8b949e; font-weight:600; }
+    .demo-controls select {
+      padding:7px 12px; background:#0d1117; border:1px solid #30363d;
+      border-radius:8px; color:#e6edf3; font-size:0.85rem; font-family:inherit;
+      transition:border-color 0.2s;
+    }
+    .demo-controls select:focus { outline:none; border-color:#7c3aed; }
     .demo-input-row {
       display:flex; gap:8px; margin-bottom:16px;
     }
     .demo-input-row input {
       flex:1; padding:10px 14px; background:#0d1117; border:1px solid #30363d;
       border-radius:8px; color:#e6edf3; font-size:0.95rem; font-family:inherit;
+      transition:border-color 0.2s;
     }
-    .demo-input-row input:focus { outline:none; border-color:#7c3aed; }
+    .demo-input-row input:focus { outline:none; border-color:#7c3aed; box-shadow:0 0 0 3px rgba(124,58,237,0.15); }
     .demo-btn { padding:10px 20px; font-size:0.9rem; white-space:nowrap; }
     .demo-btn-stop { background:#dc2626; }
     .demo-btn-stop:hover { background:#b91c1c; }
@@ -1570,8 +1605,22 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
       padding:16px; min-height:120px; max-height:400px; overflow-y:auto;
       font-family:'SFMono-Regular',Consolas,monospace; font-size:0.88rem;
       line-height:1.7; color:#e6edf3; white-space:pre-wrap; word-break:break-word;
+      transition:border-color 0.3s;
     }
+    .demo-output.streaming { border-color:#7c3aed; }
     .demo-placeholder { color:#484f58; font-style:italic; }
+    .demo-error { color:#f87171; }
+    .demo-error-title { font-weight:600; margin-bottom:4px; display:block; }
+    .demo-error-detail { color:#8b949e; font-size:0.82rem; }
+    .demo-loading {
+      display:flex; align-items:center; gap:10px; color:#8b949e;
+    }
+    .demo-spinner {
+      width:18px; height:18px; border:2px solid #30363d;
+      border-top-color:#7c3aed; border-radius:50%;
+      animation:spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
     .demo-cursor {
       display:inline-block; width:2px; height:1em; background:#7c3aed;
       vertical-align:text-bottom; animation:blink 1s step-end infinite;
@@ -1579,7 +1628,8 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     @keyframes blink { 50% { opacity:0; } }
     .demo-meta {
       display:flex; justify-content:space-between; align-items:center;
-      margin-top:8px; font-size:0.8rem; color:#8b949e;
+      margin-top:10px; padding-top:10px; border-top:1px solid #21262d;
+      font-size:0.8rem; color:#8b949e;
     }
     .demo-toggle { display:flex; align-items:center; gap:6px; cursor:pointer; }
     .demo-toggle input { accent-color:#7c3aed; }
@@ -1588,11 +1638,15 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     @media (max-width:600px) {
       .integrate-inputs { flex-direction:column; }
       .integrate-inputs .field { min-width:100%; }
-      .int-tabs { gap:4px; }
-      .int-tabs .tab { padding:6px 10px; font-size:0.78rem; }
-      .ref-row { flex-direction:column; align-items:stretch; gap:4px; }
-      .ref-row .ref-label { min-width:auto; }
+      .int-tabs { gap:2px; }
+      .int-tabs .tab { padding:6px 10px; font-size:0.75rem; }
+      .int-panel { padding:16px; }
+      .code-block { font-size:0.75rem; padding:12px 40px 12px 12px; }
+      .ref-grid { grid-template-columns:1fr; }
       .demo-input-row { flex-direction:column; }
+      .demo-controls { gap:8px; }
+      .section-heading { flex-wrap:wrap; }
+      .section-heading .endpoint-label { margin-left:0; width:100%; margin-top:4px; }
     }
     ";
 
@@ -1646,16 +1700,16 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
   document.addEventListener('click', e => {
     const btn = e.target.closest('.copy-btn');
     if (!btn) return;
-    const block = btn.closest('.code-block') || btn.closest('code');
+    const block = btn.closest('.code-block') || btn.closest('.ref-value') || btn.closest('code');
     if (!block) return;
-    // Get text content minus the button text
     const clone = block.cloneNode(true);
     clone.querySelectorAll('.copy-btn').forEach(b => b.remove());
     const text = clone.textContent.trim();
     navigator.clipboard.writeText(text).then(() => {
-      btn.textContent = 'Copied!';
+      const prev = btn.textContent;
+      btn.textContent = '\u2713 Copied!';
       btn.classList.add('copied');
-      setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+      setTimeout(() => { btn.textContent = prev; btn.classList.remove('copied'); }, 1500);
     });
   });
 
@@ -1808,8 +1862,9 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     demoSend.disabled = true;
     demoSend.style.display = 'none';
     demoStop.style.display = '';
-    demoOutput.textContent = '';
-    demoStatus.textContent = streaming ? 'Streaming...' : 'Sending request...';
+    demoOutput.innerHTML = '<div class="demo-loading"><div class="demo-spinner"></div><span>' + (streaming ? 'Connecting to stream\u2026' : 'Sending request\u2026') + '</span></div>';
+    demoOutput.classList.toggle('streaming', streaming);
+    demoStatus.textContent = '';
     const t0 = performance.now();
 
     const req = buildDemoRequest(format, url, key, model, prompt, streaming);
@@ -1824,12 +1879,13 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
 
       if (!res.ok) {
         const err = await res.text().catch(() => 'Unknown error');
-        const hint = res.status === 401 ? ' — check your API key'
-          : res.status === 404 ? ' — check your server URL'
-          : res.status === 503 ? ' — no workers available'
+        const hint = res.status === 401 ? 'Check your API key and try again.'
+          : res.status === 404 ? 'Check your server URL \u2014 endpoint not found.'
+          : res.status === 503 ? 'No workers available. Ensure a worker is connected.'
           : '';
-        demoOutput.innerHTML = '<span class="demo-placeholder" style="color:#f87171;">HTTP ' + res.status + ': ' + escHtml(err) + hint + '</span>';
-        demoStatus.textContent = 'Error ' + res.status;
+        demoOutput.innerHTML = '<div class="demo-error"><span class="demo-error-title">HTTP ' + res.status + ' Error</span>' + escHtml(err.substring(0, 200)) + (hint ? '<br><span class="demo-error-detail">' + hint + '</span>' : '') + '</div>';
+        demoStatus.textContent = 'Error \u00b7 ' + Math.round(performance.now() - t0) + 'ms';
+        demoOutput.classList.remove('streaming');
         return;
       }
 
@@ -1838,11 +1894,13 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
         const content = extractNonStreamContent(format, data);
         demoOutput.textContent = content;
         const ms = Math.round(performance.now() - t0);
-        demoStatus.textContent = 'Done in ' + ms + 'ms';
+        demoStatus.textContent = 'Done \u00b7 ' + ms + 'ms';
+        demoOutput.classList.remove('streaming');
         return;
       }
 
       // SSE streaming
+      demoOutput.textContent = '';
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
@@ -1870,21 +1928,22 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
         const ms = Math.round(performance.now() - t0);
         demoStatus.textContent = tokens + ' chunks \u00b7 ' + ms + 'ms';
       }
-      // Remove cursor when done
       const cursor = demoOutput.querySelector('.demo-cursor');
       if (cursor) cursor.remove();
+      demoOutput.classList.remove('streaming');
       const ms = Math.round(performance.now() - t0);
-      demoStatus.textContent = 'Done: ' + tokens + ' chunks in ' + ms + 'ms';
+      demoStatus.textContent = 'Done \u00b7 ' + tokens + ' chunks \u00b7 ' + ms + 'ms';
     } catch (e) {
+      demoOutput.classList.remove('streaming');
       if (e.name === 'AbortError') {
-        demoStatus.textContent = 'Stopped';
+        demoStatus.textContent = 'Stopped \u00b7 ' + Math.round(performance.now() - t0) + 'ms';
         const cursor = demoOutput.querySelector('.demo-cursor');
         if (cursor) cursor.remove();
       } else if (e.name === 'TypeError' && e.message.includes('Failed to fetch')) {
-        demoOutput.innerHTML = '<span class="demo-placeholder" style="color:#f87171;">Could not connect to the server. This is usually a CORS issue or the server is unreachable. Make sure your server URL is correct and accessible from your browser.</span>';
+        demoOutput.innerHTML = '<div class="demo-error"><span class="demo-error-title">Connection Failed</span>Could not reach the server.<br><span class="demo-error-detail">This is usually a CORS issue or the server is unreachable. Check the URL and try again.</span></div>';
         demoStatus.textContent = 'Connection failed';
       } else {
-        demoOutput.innerHTML = '<span class="demo-placeholder" style="color:#f87171;">' + escHtml(e.message) + '</span>';
+        demoOutput.innerHTML = '<div class="demo-error"><span class="demo-error-title">Error</span>' + escHtml(e.message) + '</div>';
         demoStatus.textContent = 'Error';
       }
     } finally {
@@ -2228,6 +2287,12 @@ func main() {
     footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
     footer a {{ color: #8b949e; }}
 
+    .btn {{
+      display: inline-block; padding: 10px 20px; background: #7c3aed; color: #fff;
+      border: none; border-radius: 8px; font-weight: 600; font-size: 0.9rem;
+      cursor: pointer; font-family: inherit; transition: background 0.2s;
+    }}
+    .btn:hover {{ background: #6d28d9; text-decoration: none; }}
     code {{ font-family: "SFMono-Regular", Consolas, monospace; }}
     {integrate_css}
   </style>
@@ -2245,7 +2310,7 @@ func main() {
   <section class="content">
     <div class="container">
       <h1>Integrate</h1>
-      <p class="subtitle">Copy-paste configuration for your favorite tools, agents, and languages.</p>
+      <p class="subtitle">Copy-paste snippets for your favorite tools, agents, and languages. Fill in your details below and all code blocks update automatically.</p>
 
       <div id="int-cloud-banner" style="display:none;padding:10px 16px;background:#0b1d0b;border:1px solid #064e3b;border-radius:8px;margin-bottom:16px;font-size:0.9rem;color:#34d399;">
         &#x2705; Logged in &mdash; your server URL and API key are pre-filled below.
@@ -2328,7 +2393,7 @@ func main() {
       </div>
 
       <!-- ═══ OpenAI Chat Completions ═══ -->
-      <div class="section-heading"><span class="icon">&#128187;</span> OpenAI Chat Completions <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">/v1/chat/completions</span></div>
+      <div class="section-heading"><span class="icon">&#128187;</span> OpenAI Chat Completions <span class="endpoint-label">/v1/chat/completions</span></div>
       <div class="tab-section">
         <div class="int-tabs">
           <div class="tab active" data-tab="curl">curl</div>
@@ -2390,7 +2455,7 @@ func main() {
       </div>
 
       <!-- ═══ Anthropic Messages API ═══ -->
-      <div class="section-heading"><span class="icon">&#129504;</span> Anthropic Messages API <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">/v1/messages</span></div>
+      <div class="section-heading"><span class="icon">&#129504;</span> Anthropic Messages API <span class="endpoint-label">/v1/messages</span></div>
       <div class="tab-section">
         <div class="int-tabs">
           <div class="tab active" data-tab="anth-curl">curl</div>
@@ -2425,7 +2490,7 @@ func main() {
       </div>
 
       <!-- ═══ OpenAI Responses API ═══ -->
-      <div class="section-heading"><span class="icon">&#128301;</span> OpenAI Responses API <span style="color:#8b949e;font-weight:400;font-size:0.85rem;">/v1/responses</span></div>
+      <div class="section-heading"><span class="icon">&#128301;</span> OpenAI Responses API <span class="endpoint-label">/v1/responses</span></div>
       <div class="tab-section">
         <div class="int-tabs">
           <div class="tab active" data-tab="resp-api-curl">curl</div>
@@ -2609,9 +2674,9 @@ data: {{"type":"response.completed","response":{{"id":"resp_abc123","object":"re
       <!-- ═══ Live Demo ═══ -->
       <div class="section-heading"><span class="icon">&#128640;</span> Try It Live</div>
       <div class="demo-card">
-        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-          <label style="font-size:0.82rem;color:#8b949e;align-self:center;">API Format:</label>
-          <select id="demo-api-format" style="padding:6px 10px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;font-size:0.85rem;font-family:inherit;">
+        <div class="demo-controls">
+          <label>API Format:</label>
+          <select id="demo-api-format">
             <option value="chat">Chat Completions</option>
             <option value="messages">Anthropic Messages</option>
             <option value="responses">Responses API</option>
@@ -2631,18 +2696,18 @@ data: {{"type":"response.completed","response":{{"id":"resp_abc123","object":"re
 
       <!-- ═══ Quick Reference ═══ -->
       <div class="section-heading"><span class="icon">&#128218;</span> Quick Reference</div>
-      <div class="ref-card">
-        <div class="ref-row" data-ref="SERVER_URL/v1">
+      <div class="ref-grid">
+        <div class="ref-card-item" data-ref="SERVER_URL/v1">
           <span class="ref-label">API Base URL</span>
-          <code><span class="ref-val">SERVER_URL/v1</span><button class="copy-btn">Copy</button></code>
+          <div class="ref-value"><span class="ref-val">SERVER_URL/v1</span><button class="copy-btn">Copy</button></div>
         </div>
-        <div class="ref-row" data-ref="Bearer API_KEY">
+        <div class="ref-card-item" data-ref="Bearer API_KEY">
           <span class="ref-label">Authorization Header</span>
-          <code><span class="ref-val">Bearer API_KEY</span><button class="copy-btn">Copy</button></code>
+          <div class="ref-value"><span class="ref-val">Bearer API_KEY</span><button class="copy-btn">Copy</button></div>
         </div>
-        <div class="ref-row">
+        <div class="ref-card-item">
           <span class="ref-label">Supported Endpoints</span>
-          <code><span class="ref-val">/v1/chat/completions, /v1/messages, /v1/responses, /v1/models</span><button class="copy-btn">Copy</button></code>
+          <div class="ref-value"><span class="ref-val">/v1/chat/completions, /v1/messages, /v1/responses, /v1/models</span><button class="copy-btn">Copy</button></div>
         </div>
       </div>
 
