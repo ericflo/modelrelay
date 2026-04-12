@@ -27,7 +27,7 @@ pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> R
         return Html(modelrelay_web::templates::page_shell(
             "Billing Not Configured",
             "<p>Stripe is not set up on this instance. Please check back soon.</p>\
-             <p style=\"margin-top:16px;\"><a href=\"/\">&larr; Back to home</a></p>",
+             <p class=\"back-link\"><a href=\"/\">&larr; Back to home</a></p>",
             false,
         ))
         .into_response();
@@ -38,7 +38,7 @@ pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> R
         return Html(modelrelay_web::templates::page_shell(
             "Billing Not Configured",
             "<p>No pricing plan is configured. Please check back soon.</p>\
-             <p style=\"margin-top:16px;\"><a href=\"/\">&larr; Back to home</a></p>",
+             <p class=\"back-link\"><a href=\"/\">&larr; Back to home</a></p>",
             false,
         ))
         .into_response();
@@ -95,7 +95,7 @@ pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> R
                     Html(modelrelay_web::templates::page_shell(
                         "Checkout Error",
                         "<p>Stripe did not return a checkout URL.</p>\
-                         <p style=\"margin-top:16px;\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
+                         <p class=\"back-link\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
                         false,
                     ))
                     .into_response()
@@ -106,7 +106,7 @@ pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> R
                 Html(modelrelay_web::templates::page_shell(
                     "Checkout Error",
                     "<p>Could not process Stripe response.</p>\
-                     <p style=\"margin-top:16px;\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
+                     <p class=\"back-link\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
                     false,
                 ))
                 .into_response()
@@ -119,7 +119,7 @@ pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> R
             Html(modelrelay_web::templates::page_shell(
                 "Checkout Error",
                 "<p>Could not create checkout session. Please try again later.</p>\
-                 <p style=\"margin-top:16px;\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
+                 <p class=\"back-link\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
                 false,
             ))
             .into_response()
@@ -129,7 +129,7 @@ pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> R
             Html(modelrelay_web::templates::page_shell(
                 "Checkout Error",
                 "<p>Could not reach payment provider. Please try again later.</p>\
-                 <p style=\"margin-top:16px;\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
+                 <p class=\"back-link\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
                 false,
             ))
             .into_response()

@@ -3062,6 +3062,7 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     }}
     .card h2 {{ font-size: 1.2rem; margin-bottom: 12px; color: #e6edf3; }}
     .card p {{ color: #8b949e; }}
+    .back-link {{ margin-top: 16px; }}
 
     /* Auth split layout */
     .auth-split {{
