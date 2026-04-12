@@ -305,23 +305,49 @@ fn signup_form_html(error: Option<&str>, csrf_field: &str) -> String {
         .unwrap_or_default();
 
     format!(
-        r#"<div class="card">
-  <h2>Create an Account</h2>
-  {error_html}
-  <form method="POST" action="/signup" class="auth-form">
-    {csrf_field}
-    <div class="form-group">
-      <label for="email">Email</label>
-      <input type="email" id="email" name="email" required placeholder="you@example.com">
+        r#"<div class="auth-split">
+  <div class="auth-value">
+    <h1 class="auth-value-headline">Run any AI model.<br>One unified API.</h1>
+    <p class="auth-value-sub">ModelRelay routes your inference requests to the fastest available GPU — your own hardware, cloud, or both.</p>
+    <ul class="auth-benefits">
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill='#7c3aed' opacity="0.15"/><path d="M5.5 9.5l2 2 5-5" stroke='#a78bfa' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>OpenAI-compatible — drop-in replacement</li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill='#7c3aed' opacity="0.15"/><path d="M5.5 9.5l2 2 5-5" stroke='#a78bfa' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Connect your own GPUs or use cloud workers</li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill='#7c3aed' opacity="0.15"/><path d="M5.5 9.5l2 2 5-5" stroke='#a78bfa' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Automatic load balancing and failover</li>
+    </ul>
+    <p class="auth-trust">Trusted by developers running production AI workloads.</p>
+  </div>
+  <div class="auth-form-panel">
+    <div class="auth-form-inner">
+      <h2>Create your account</h2>
+      <p class="auth-form-hint">Start routing AI requests in minutes.</p>
+      {error_html}
+      <form method="POST" action="/signup" class="auth-form" id="signup-form">
+        {csrf_field}
+        <div class="form-group">
+          <label for="email">Email</label>
+          <input type="email" id="email" name="email" required placeholder="you@example.com" autofocus>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <div class="password-wrapper">
+            <input type="password" id="password" name="password" required minlength="8" placeholder="At least 8 characters">
+            <button type="button" class="password-toggle" aria-label="Show password" onclick="togglePassword(this)">
+              <svg class="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke='#8b949e' stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-closed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke='#8b949e' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </button>
+          </div>
+        </div>
+        <button type="submit" class="btn auth-submit">Create Account</button>
+      </form>
+      <p class="auth-no-cc">No credit card required</p>
+      <p class="auth-switch">Already have an account? <a href="/login">Log in</a></p>
     </div>
-    <div class="form-group">
-      <label for="password">Password</label>
-      <input type="password" id="password" name="password" required minlength="8" placeholder="At least 8 characters">
-    </div>
-    <button type="submit" class="btn">Sign Up</button>
-  </form>
-  <p class="auth-switch">Already have an account? <a href="/login">Log in</a></p>
-</div>"#
+  </div>
+</div>
+<script>
+function togglePassword(btn){{var i=btn.parentElement.querySelector('input');var o=btn.querySelector('.eye-open');var c=btn.querySelector('.eye-closed');if(i.type==='password'){{i.type='text';o.style.display='none';c.style.display='';btn.setAttribute('aria-label','Hide password')}}else{{i.type='password';o.style.display='';c.style.display='none';btn.setAttribute('aria-label','Show password')}}}}
+document.querySelectorAll('.auth-form').forEach(function(f){{f.addEventListener('submit',function(){{var b=f.querySelector('.auth-submit');if(b){{b.disabled=true;b.classList.add('loading');b.innerHTML='<span class="spinner"></span>'+b.textContent}}}});}});
+</script>"#
     )
 }
 
@@ -331,23 +357,46 @@ fn login_form_html(error: Option<&str>, csrf_field: &str) -> String {
         .unwrap_or_default();
 
     format!(
-        r#"<div class="card">
-  <h2>Log In</h2>
-  {error_html}
-  <form method="POST" action="/login" class="auth-form">
-    {csrf_field}
-    <div class="form-group">
-      <label for="email">Email</label>
-      <input type="email" id="email" name="email" required placeholder="you@example.com">
+        r#"<div class="auth-split">
+  <div class="auth-value">
+    <h1 class="auth-value-headline">Welcome back.</h1>
+    <p class="auth-value-sub">Your AI infrastructure is ready and waiting. Log in to manage your workers, monitor traffic, and grab your API keys.</p>
+    <ul class="auth-benefits">
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill='#7c3aed' opacity="0.15"/><path d="M5.5 9.5l2 2 5-5" stroke='#a78bfa' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Real-time dashboard and usage analytics</li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill='#7c3aed' opacity="0.15"/><path d="M5.5 9.5l2 2 5-5" stroke='#a78bfa' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Manage API keys and worker connections</li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill='#7c3aed' opacity="0.15"/><path d="M5.5 9.5l2 2 5-5" stroke='#a78bfa' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Scale from prototype to production</li>
+    </ul>
+  </div>
+  <div class="auth-form-panel">
+    <div class="auth-form-inner">
+      <h2>Log in to ModelRelay</h2>
+      {error_html}
+      <form method="POST" action="/login" class="auth-form" id="login-form">
+        {csrf_field}
+        <div class="form-group">
+          <label for="email">Email</label>
+          <input type="email" id="email" name="email" required placeholder="you@example.com" autofocus>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <div class="password-wrapper">
+            <input type="password" id="password" name="password" required placeholder="Your password">
+            <button type="button" class="password-toggle" aria-label="Show password" onclick="togglePassword(this)">
+              <svg class="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke='#8b949e' stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-closed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke='#8b949e' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </button>
+          </div>
+        </div>
+        <button type="submit" class="btn auth-submit">Log In</button>
+      </form>
+      <p class="auth-switch">Don't have an account? <a href="/signup">Sign up free</a></p>
     </div>
-    <div class="form-group">
-      <label for="password">Password</label>
-      <input type="password" id="password" name="password" required placeholder="Your password">
-    </div>
-    <button type="submit" class="btn">Log In</button>
-  </form>
-  <p class="auth-switch">Don't have an account? <a href="/signup">Sign up</a></p>
-</div>"#
+  </div>
+</div>
+<script>
+function togglePassword(btn){{var i=btn.parentElement.querySelector('input');var o=btn.querySelector('.eye-open');var c=btn.querySelector('.eye-closed');if(i.type==='password'){{i.type='text';o.style.display='none';c.style.display='';btn.setAttribute('aria-label','Hide password')}}else{{i.type='password';o.style.display='';c.style.display='none';btn.setAttribute('aria-label','Show password')}}}}
+document.querySelectorAll('.auth-form').forEach(function(f){{f.addEventListener('submit',function(){{var b=f.querySelector('.auth-submit');if(b){{b.disabled=true;b.classList.add('loading');b.innerHTML='<span class="spinner"></span>'+b.textContent}}}});}});
+</script>"#
     )
 }
 
