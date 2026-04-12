@@ -2742,13 +2742,81 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     .card h2 {{ font-size: 1.2rem; margin-bottom: 12px; color: #e6edf3; }}
     .card p {{ color: #8b949e; }}
 
-    .auth-form .form-group {{ margin-bottom: 16px; }}
-    .auth-form label {{ display: block; font-size: 0.9rem; color: #8b949e; margin-bottom: 4px; }}
-    .auth-form input {{
-      width: 100%; padding: 10px 12px; background: #0d1117; border: 1px solid #30363d;
-      border-radius: 8px; color: #e6edf3; font-size: 0.95rem;
+    /* Auth split layout */
+    .auth-split {{
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+      min-height: calc(100vh - 200px); align-items: center;
     }}
-    .auth-form input:focus {{ outline: none; border-color: #7c3aed; }}
+    .auth-value {{
+      padding: 48px 48px 48px 0;
+    }}
+    .auth-value-headline {{
+      font-size: 2.2rem; font-weight: 700; line-height: 1.2;
+      color: #e6edf3; margin: 0 0 16px 0;
+    }}
+    .auth-value-sub {{
+      font-size: 1.05rem; color: #8b949e; line-height: 1.6; margin: 0 0 32px 0;
+    }}
+    .auth-benefits {{
+      list-style: none; padding: 0; margin: 0 0 32px 0;
+    }}
+    .auth-benefits li {{
+      display: flex; align-items: center; gap: 10px;
+      color: #c9d1d9; font-size: 0.95rem; padding: 8px 0;
+    }}
+    .auth-benefits li svg {{ flex-shrink: 0; }}
+    .auth-trust {{
+      font-size: 0.85rem; color: #484f58; margin: 0;
+    }}
+    .auth-form-panel {{
+      display: flex; align-items: center; justify-content: center;
+      padding: 48px 0 48px 48px;
+      border-left: 1px solid #21262d;
+    }}
+    .auth-form-inner {{
+      width: 100%; max-width: 400px;
+    }}
+    .auth-form-inner h2 {{
+      font-size: 1.4rem; font-weight: 700; color: #e6edf3; margin: 0 0 6px 0;
+    }}
+    .auth-form-hint {{
+      color: #8b949e; font-size: 0.9rem; margin: 0 0 24px 0;
+    }}
+    .auth-no-cc {{
+      text-align: center; color: #3fb950; font-size: 0.85rem; margin: 12px 0 0 0; font-weight: 500;
+    }}
+
+    .auth-form .form-group {{ margin-bottom: 16px; }}
+    .auth-form label {{ display: block; font-size: 0.9rem; color: #8b949e; margin-bottom: 6px; font-weight: 500; }}
+    .auth-form input {{
+      width: 100%; padding: 11px 14px; background: #0d1117; border: 1px solid #30363d;
+      border-radius: 8px; color: #e6edf3; font-size: 0.95rem;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }}
+    .auth-form input:focus {{ outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124,58,237,0.15); }}
+    .auth-submit {{
+      width: 100%; margin-top: 8px; padding: 12px 20px; font-size: 1rem; position: relative;
+      transition: background 0.2s, opacity 0.2s;
+    }}
+    .auth-submit:disabled {{ opacity: 0.7; cursor: not-allowed; }}
+    .auth-submit.loading .spinner {{
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+      border-radius: 50%; animation: spin 0.6s linear infinite;
+      margin-right: 8px; vertical-align: middle;
+    }}
+    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+
+    .password-wrapper {{
+      position: relative;
+    }}
+    .password-wrapper input {{ padding-right: 44px; }}
+    .password-toggle {{
+      position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+      background: none; border: none; cursor: pointer; padding: 4px;
+      display: flex; align-items: center; justify-content: center;
+    }}
+    .password-toggle:hover svg {{ stroke: #e6edf3; }}
 
     .badge {{
       display: inline-block; padding: 4px 12px; border-radius: 20px;
@@ -2793,6 +2861,10 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
       .nav-links a {{ font-size: 0.8rem; margin-left: 12px; }}
       .nav-links button {{ font-size: 0.8rem; margin-left: 12px; }}
       .info-table td:first-child {{ width: 120px; }}
+      .auth-split {{ grid-template-columns: 1fr; }}
+      .auth-value {{ padding: 32px 0 24px 0; }}
+      .auth-value-headline {{ font-size: 1.8rem; }}
+      .auth-form-panel {{ border-left: none; border-top: 1px solid #21262d; padding: 32px 0 0 0; }}
     }}
 
     /* Mobile */
@@ -2807,6 +2879,12 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
       .info-table td:first-child {{ width: auto; border-bottom: none; }}
       .key-display {{ font-size: 0.85rem; padding: 10px 12px; }}
       .nav-links .btn-signup {{ padding: 6px 12px; }}
+      .auth-value {{ padding: 24px 0 20px 0; }}
+      .auth-value-headline {{ font-size: 1.5rem; }}
+      .auth-value-sub {{ font-size: 0.95rem; margin-bottom: 20px; }}
+      .auth-benefits {{ margin-bottom: 20px; }}
+      .auth-form-panel {{ padding: 24px 0 0 0; }}
+      .auth-form-inner h2 {{ font-size: 1.2rem; }}
     }}
   </style>
 </head>
