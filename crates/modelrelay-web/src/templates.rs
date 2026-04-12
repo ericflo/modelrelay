@@ -351,175 +351,52 @@ pub fn dashboard_page() -> String {
     </div>
     "#;
 
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Dashboard — ModelRelay</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
-  <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #0d1117; color: #e6edf3; line-height: 1.6;
-    }}
-    a {{ color: #7c3aed; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .container {{ max-width: 960px; margin: 0 auto; padding: 0 24px; }}
+    let dashboard_override_css = r"
+    .container { max-width: 960px; }
+    .content { padding: 32px 0; }
+    .content h1 { font-size: 1.75rem; margin-bottom: 20px; }
+    code { font-family: 'SFMono-Regular', Consolas, monospace; }
+    .dash-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 12px; flex-wrap: wrap; }
+    .dash-header h1 { margin-bottom: 0; }
+    @media (max-width: 768px) {
+      .content { padding: 24px 0; }
+      .content h1 { font-size: 1.5rem; }
+      .config-bar { flex-direction: column; align-items: stretch; }
+      .config-bar input { width: 100%; }
+      .config-bar label { margin-top: 4px; }
+      .health-bar { gap: 8px; }
+      .health-item { min-width: 0; flex-basis: calc(50% - 4px); }
+      table.data { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .stat-row .stat-label { min-width: 100px; font-size: 0.8rem; }
+      .key-actions { flex-direction: column; }
+      .key-actions input { width: 100%; }
+    }
+    @media (max-width: 480px) {
+      .container { padding: 0 16px; }
+      .content { padding: 20px 0; }
+      .content h1 { font-size: 1.3rem; }
+      .dash-header { flex-direction: column; align-items: flex-start; }
+      .health-item { flex-basis: 100%; }
+      .btn { display: block; width: 100%; text-align: center; }
+      .stat-row { flex-direction: column; align-items: flex-start; gap: 4px; }
+      .stat-row .stat-label { min-width: 0; }
+      .stat-row .stat-bar { width: 100%; }
+    }
+    ";
 
-    /* Nav */
-    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; position: relative; }}
-    nav .container {{ display: flex; justify-content: space-between; align-items: center; }}
-    .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
-    .logo:hover {{ text-decoration: none; }}
-    .logo span {{ color: #7c3aed; }}
-    .nav-links {{ display: flex; align-items: center; gap: 0; }}
-    .nav-links .nav-link {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; padding: 4px 0; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }}
-    .nav-links .nav-link:hover {{ color: #e6edf3; text-decoration: none; }}
-    .nav-links .nav-link.active {{ color: #e6edf3; border-bottom-color: #7c3aed; }}
-    .nav-links form {{ display: inline; }}
-    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; transition: color 0.2s; }}
-    .nav-links button:hover {{ color: #e6edf3; }}
+    let extra_css = ["<style>", dashboard_override_css, dashboard_css, "</style>"].concat();
 
-    /* Hamburger */
-    .nav-hamburger {{
-      display: none; background: none; border: none; cursor: pointer; padding: 4px;
-      flex-direction: column; justify-content: center; align-items: center; gap: 5px;
-    }}
-    .nav-hamburger span {{
-      display: block; width: 22px; height: 2px; background: #8b949e; border-radius: 1px;
-      transition: transform 0.25s, opacity 0.25s;
-    }}
-    .nav-hamburger:hover span {{ background: #e6edf3; }}
-    .nav-hamburger.open span:nth-child(1) {{ transform: translateY(7px) rotate(45deg); }}
-    .nav-hamburger.open span:nth-child(2) {{ opacity: 0; }}
-    .nav-hamburger.open span:nth-child(3) {{ transform: translateY(-7px) rotate(-45deg); }}
+    let dash_body = format!(
+        "<div class=\"dash-header\">\n\
+         <h1>Dashboard</h1>\n\
+         <a href=\"/setup\" class=\"btn\">+ Add a machine</a>\n\
+         </div>\n\
+         {body_content}"
+    );
 
-    .content {{ padding: 32px 0; }}
-    .content h1 {{ font-size: 1.75rem; margin-bottom: 20px; }}
+    let extra_body_end = ["<script>", dashboard_js, "</script>"].concat();
 
-    .badge {{
-      display: inline-block; padding: 4px 12px; border-radius: 20px;
-      font-size: 0.8rem; font-weight: 600; background: #1f2937; color: #8b949e;
-    }}
-    .badge-active {{ background: #064e3b; color: #34d399; }}
-    .badge-warn {{ background: #78350f; color: #fbbf24; }}
-    .badge-cancel {{ background: #7f1d1d; color: #f87171; }}
-
-    .btn {{
-      display: inline-block; padding: 10px 20px; background: #7c3aed; color: #fff;
-      border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
-      cursor: pointer; text-decoration: none;
-    }}
-    .btn:hover {{ background: #6d28d9; text-decoration: none; }}
-
-    /* Footer */
-    footer {{ padding: 48px 0; border-top: 1px solid #21262d; }}
-    .footer-content {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }}
-    .footer-left {{ color: #484f58; font-size: 0.85rem; }}
-    .footer-tagline {{ color: #30363d; font-size: 0.8rem; margin-top: 4px; }}
-    .footer-links {{ display: flex; gap: 20px; }}
-    .footer-links a {{ color: #8b949e; font-size: 0.85rem; }}
-    .footer-links a:hover {{ color: #e6edf3; text-decoration: none; }}
-
-    code {{ font-family: "SFMono-Regular", Consolas, monospace; }}
-
-    /* Dashboard header row */
-    .dash-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 12px; flex-wrap: wrap; }}
-    .dash-header h1 {{ margin-bottom: 0; }}
-
-    /* Tablet */
-    @media (max-width: 768px) {{
-      .content {{ padding: 24px 0; }}
-      .content h1 {{ font-size: 1.5rem; }}
-      .nav-hamburger {{ display: flex; }}
-      .nav-links {{
-        display: none; position: absolute; top: 100%; left: 0; right: 0;
-        background: #161b22; border-bottom: 1px solid #21262d;
-        flex-direction: column; padding: 16px 24px; gap: 0; z-index: 100;
-      }}
-      .nav-links.open {{ display: flex; }}
-      .nav-links .nav-link {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; border-bottom: none; }}
-      .nav-links .nav-link.active {{ color: #7c3aed; }}
-      .nav-links form {{ display: block; }}
-      .nav-links button {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; }}
-      .footer-content {{ flex-direction: column; text-align: center; }}
-      .config-bar {{ flex-direction: column; align-items: stretch; }}
-      .config-bar input {{ width: 100%; }}
-      .config-bar label {{ margin-top: 4px; }}
-      .health-bar {{ gap: 8px; }}
-      .health-item {{ min-width: 0; flex-basis: calc(50% - 4px); }}
-      table.data {{ display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
-      .stat-row .stat-label {{ min-width: 100px; font-size: 0.8rem; }}
-      .key-actions {{ flex-direction: column; }}
-      .key-actions input {{ width: 100%; }}
-    }}
-
-    /* Mobile */
-    @media (max-width: 480px) {{
-      .container {{ padding: 0 16px; }}
-      .content {{ padding: 20px 0; }}
-      .content h1 {{ font-size: 1.3rem; }}
-      .dash-header {{ flex-direction: column; align-items: flex-start; }}
-      .health-item {{ flex-basis: 100%; }}
-      .btn {{ display: block; width: 100%; text-align: center; }}
-      .stat-row {{ flex-direction: column; align-items: flex-start; gap: 4px; }}
-      .stat-row .stat-label {{ min-width: 0; }}
-      .stat-row .stat-bar {{ width: 100%; }}
-    }}
-
-    {dashboard_css}
-  </style>
-</head>
-<body>
-  <nav>
-    <div class="container">
-      <a href="/" class="logo">Model<span>Relay</span></a>
-      <button class="nav-hamburger" aria-label="Toggle navigation" onclick="this.classList.toggle('open');this.parentElement.querySelector('.nav-links').classList.toggle('open')">
-        <span></span><span></span><span></span>
-      </button>
-      <div class="nav-links">
-        <a href="/dashboard" class="nav-link active">Dashboard</a>
-        <a href="/setup" class="nav-link">Setup</a>
-        <a href="/integrate" class="nav-link">Integrate</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener" class="nav-link">Docs</a>
-        <form method="POST" action="/logout"><button type="submit">Log out</button></form>
-      </div>
-    </div>
-  </nav>
-
-  <section class="content">
-    <div class="container">
-      <div class="dash-header">
-        <h1>Dashboard</h1>
-        <a href="/setup" class="btn">+ Add a machine</a>
-      </div>
-      {body_content}
-    </div>
-  </section>
-
-  <footer>
-    <div class="container">
-      <div class="footer-content">
-        <div class="footer-left">
-          &copy; 2026 ModelRelay
-          <div class="footer-tagline">Your GPU workers, our relay. Inference without the infrastructure.</div>
-        </div>
-        <div class="footer-links">
-          <a href="/integrate">Integration</a>
-          <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
-          <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
-        </div>
-      </div>
-    </div>
-  </footer>
-
-  <script>{dashboard_js}</script>
-</body>
-</html>"#
-    )
+    page_shell_custom("Dashboard", &dash_body, true, &extra_css, &extra_body_end)
 }
 
 /// Optional configuration for embedding the setup wizard in a cloud context.
@@ -1496,157 +1373,26 @@ Get-Service ModelRelayWorker</code>
     "##;
 
     let logged_in = cloud_config.is_some();
-    let setup_nav_links = if logged_in {
-        r#"<a href="/dashboard" class="nav-link">Dashboard</a>
-        <a href="/setup" class="nav-link active">Setup</a>
-        <a href="/integrate" class="nav-link">Integrate</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener" class="nav-link">Docs</a>
-        <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
-    } else {
-        r#"<a href="/dashboard" class="nav-link">Dashboard</a>
-        <a href="/setup" class="nav-link active">Setup</a>
-        <a href="/integrate" class="nav-link">Integrate</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener" class="nav-link">Docs</a>"#
-    };
 
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Setup — ModelRelay</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
-  <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #0d1117; color: #e6edf3; line-height: 1.6;
-    }}
-    a {{ color: #7c3aed; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .container {{ max-width: 900px; margin: 0 auto; padding: 0 24px; }}
+    let setup_override_css = r"
+    .content h1 { font-size: 2rem; margin-bottom: 8px; }
+    .subtitle { color: #8b949e; margin-bottom: 24px; }
+    code { font-family: 'SFMono-Regular', Consolas, monospace; }
+    ";
 
-    /* Nav — matches page_shell */
-    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; position: relative; }}
-    nav .container {{ display: flex; justify-content: space-between; align-items: center; }}
-    .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
-    .logo:hover {{ text-decoration: none; }}
-    .logo span {{ color: #7c3aed; }}
-    .nav-links {{ display: flex; align-items: center; gap: 0; }}
-    .nav-links .nav-link {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; padding: 4px 0; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }}
-    .nav-links .nav-link:hover {{ color: #e6edf3; text-decoration: none; }}
-    .nav-links .nav-link.active {{ color: #e6edf3; border-bottom-color: #7c3aed; }}
-    .nav-links form {{ display: inline; }}
-    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; transition: color 0.2s; }}
-    .nav-links button:hover {{ color: #e6edf3; }}
+    let extra_css = ["<style>", setup_override_css, wizard_css, "</style>"].concat();
 
-    /* Hamburger */
-    .nav-hamburger {{
-      display: none; background: none; border: none; cursor: pointer; padding: 4px;
-      flex-direction: column; justify-content: center; align-items: center; gap: 5px;
-    }}
-    .nav-hamburger span {{
-      display: block; width: 22px; height: 2px; background: #8b949e; border-radius: 1px;
-      transition: transform 0.25s, opacity 0.25s;
-    }}
-    .nav-hamburger:hover span {{ background: #e6edf3; }}
-    .nav-hamburger.open span:nth-child(1) {{ transform: translateY(7px) rotate(45deg); }}
-    .nav-hamburger.open span:nth-child(2) {{ opacity: 0; }}
-    .nav-hamburger.open span:nth-child(3) {{ transform: translateY(-7px) rotate(-45deg); }}
+    let setup_body = format!(
+        "<h1>Connect a Worker Machine</h1>\n\
+         <p class=\"subtitle\">Follow these steps to connect a GPU machine to your ModelRelay deployment.</p>\n\
+         {progress_html}\n\
+         {steps_html}"
+    );
 
-    .content {{ padding: 60px 0; }}
-    .content h1 {{ font-size: 2rem; margin-bottom: 8px; }}
-    .subtitle {{ color: #8b949e; margin-bottom: 24px; }}
+    let cloud_cfg_script = cloud_config_script(cloud_config);
+    let extra_body_end = format!("{cloud_cfg_script}<script>{wizard_js}</script>");
 
-    /* Footer — matches page_shell */
-    footer {{ padding: 48px 0; border-top: 1px solid #21262d; }}
-    .footer-content {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }}
-    .footer-left {{ color: #484f58; font-size: 0.85rem; }}
-    .footer-tagline {{ color: #30363d; font-size: 0.8rem; margin-top: 4px; }}
-    .footer-links {{ display: flex; gap: 20px; }}
-    .footer-links a {{ color: #8b949e; font-size: 0.85rem; }}
-    .footer-links a:hover {{ color: #e6edf3; text-decoration: none; }}
-
-    code {{ font-family: "SFMono-Regular", Consolas, monospace; }}
-
-    .btn {{
-      display: inline-block; padding: 10px 20px; background: #7c3aed; color: #fff;
-      border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
-      cursor: pointer; text-decoration: none; transition: background 0.2s;
-    }}
-    .btn:hover {{ background: #6d28d9; text-decoration: none; }}
-
-    /* Page-level responsive — matches page_shell */
-    @media (max-width: 768px) {{
-      .content {{ padding: 40px 0; }}
-      .content h1 {{ font-size: 1.6rem; }}
-      .nav-hamburger {{ display: flex; }}
-      .nav-links {{
-        display: none; position: absolute; top: 100%; left: 0; right: 0;
-        background: #161b22; border-bottom: 1px solid #21262d;
-        flex-direction: column; padding: 16px 24px; gap: 0; z-index: 100;
-      }}
-      .nav-links.open {{ display: flex; }}
-      .nav-links .nav-link {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; border-bottom: none; }}
-      .nav-links .nav-link.active {{ color: #7c3aed; }}
-      .nav-links form {{ display: block; }}
-      .nav-links button {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; }}
-      .footer-content {{ flex-direction: column; text-align: center; }}
-    }}
-    @media (max-width: 480px) {{
-      .container {{ padding: 0 16px; }}
-      .content {{ padding: 32px 0; }}
-      .content h1 {{ font-size: 1.4rem; }}
-    }}
-    {wizard_css}
-  </style>
-</head>
-<body>
-  <nav>
-    <div class="container">
-      <a href="/" class="logo">Model<span>Relay</span></a>
-      <button class="nav-hamburger" aria-label="Toggle navigation" onclick="this.classList.toggle('open');this.parentElement.querySelector('.nav-links').classList.toggle('open')">
-        <span></span><span></span><span></span>
-      </button>
-      <div class="nav-links">
-        {setup_nav_links}
-      </div>
-    </div>
-  </nav>
-
-  <section class="content">
-    <div class="container">
-      <h1>Connect a Worker Machine</h1>
-      <p class="subtitle">Follow these steps to connect a GPU machine to your ModelRelay deployment.</p>
-      {progress_html}
-      {steps_html}
-    </div>
-  </section>
-
-  <footer>
-    <div class="container">
-      <div class="footer-content">
-        <div class="footer-left">
-          &copy; 2026 ModelRelay
-          <div class="footer-tagline">Your GPU workers, our relay. Inference without the infrastructure.</div>
-        </div>
-        <div class="footer-links">
-          <a href="/pricing">Pricing</a>
-          <a href="/integrate">Integration</a>
-          <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
-          <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
-        </div>
-      </div>
-    </div>
-  </footer>
-
-  {cloud_config_script}
-  <script>{wizard_js}</script>
-</body>
-</html>"#,
-        cloud_config_script = cloud_config_script(cloud_config),
-    )
+    page_shell_custom("Setup", &setup_body, logged_in, &extra_css, &extra_body_end)
 }
 
 /// Build the integration snippets page (no cloud config).
@@ -2441,78 +2187,17 @@ func main() {
 }";
 
     let logged_in = cloud_config.is_some();
-    let integrate_nav_links = if logged_in {
-        r#"<a href="/dashboard">Dashboard</a>
-        <a href="/setup">Setup</a>
-        <a href="/integrate" class="active">Integrate</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
-        <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
-    } else {
-        r#"<a href="/dashboard">Dashboard</a>
-        <a href="/setup">Setup</a>
-        <a href="/integrate" class="active">Integrate</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>"#
-    };
+    let integrate_override_css = r"
+    .content { padding: 32px 0; }
+    .content h1 { font-size: 1.75rem; margin-bottom: 4px; }
+    .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 0.95rem; }
+    code { font-family: 'SFMono-Regular', Consolas, monospace; }
+    ";
 
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Integrate — ModelRelay</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%237c3aed'/><text x='50' y='72' font-size='60' font-weight='bold' text-anchor='middle' fill='white'>M</text></svg>">
-  <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #0d1117; color: #e6edf3; line-height: 1.6;
-    }}
-    a {{ color: #7c3aed; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .container {{ max-width: 900px; margin: 0 auto; padding: 0 24px; }}
+    let extra_css = ["<style>", integrate_override_css, integrate_css, "</style>"].concat();
 
-    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; }}
-    nav .container {{ display: flex; justify-content: space-between; align-items: center; }}
-    .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
-    .logo span {{ color: #7c3aed; }}
-    .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
-    .nav-links a:hover {{ color: #e6edf3; }}
-    .nav-links a.active {{ color: #7c3aed; }}
-    .nav-links form {{ display: inline; }}
-    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
-    .nav-links button:hover {{ color: #e6edf3; }}
-
-    .content {{ padding: 32px 0; }}
-    .content h1 {{ font-size: 1.75rem; margin-bottom: 4px; }}
-    .subtitle {{ color: #8b949e; margin-bottom: 24px; font-size: 0.95rem; }}
-
-    footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
-    footer a {{ color: #8b949e; }}
-
-    .btn {{
-      display: inline-block; padding: 10px 20px; background: #7c3aed; color: #fff;
-      border: none; border-radius: 8px; font-weight: 600; font-size: 0.9rem;
-      cursor: pointer; font-family: inherit; transition: background 0.2s;
-    }}
-    .btn:hover {{ background: #6d28d9; text-decoration: none; }}
-    code {{ font-family: "SFMono-Regular", Consolas, monospace; }}
-    {integrate_css}
-  </style>
-</head>
-<body>
-  <nav>
-    <div class="container">
-      <a href="/" class="logo">Model<span>Relay</span></a>
-      <div class="nav-links">
-        {integrate_nav_links}
-      </div>
-    </div>
-  </nav>
-
-  <section class="content">
-    <div class="container">
-      <h1>Integrate</h1>
+    let integrate_body = format!(
+        r#"<h1>Integrate</h1>
       <p class="subtitle">Copy-paste snippets for your favorite tools, agents, and languages. Fill in your details below and all code blocks update automatically.</p>
       <p style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px;margin-top:-12px;">
         <span style="font-size:0.75rem;padding:3px 10px;border-radius:20px;background:rgba(124,58,237,0.1);border:1px solid rgba(124,58,237,0.2);color:#a78bfa;">OpenAI Compatible</span>
@@ -2923,20 +2608,18 @@ data: {{"type":"response.completed","response":{{"id":"resp_abc123","object":"re
         </div>
       </div>
 
-    </div>
-  </section>
+"#
+    );
 
-  <footer>
-    <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
-    </div>
-  </footer>
+    let cloud_cfg_script = cloud_config_script(cloud_config);
+    let extra_body_end = format!("{cloud_cfg_script}<script>{integrate_js}</script>");
 
-  {cloud_config_script}
-  <script>{integrate_js}</script>
-</body>
-</html>"#,
-        cloud_config_script = cloud_config_script(cloud_config),
+    page_shell_custom(
+        "Integrate",
+        &integrate_body,
+        logged_in,
+        &extra_css,
+        &extra_body_end,
     )
 }
 
@@ -2958,13 +2641,21 @@ fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
     )
 }
 
-/// Shared HTML page shell used by the admin dashboard and commercial cloud routes.
+/// Full-control page shell: caller provides the complete body HTML (including headings),
+/// optional extra CSS (injected after the base `<style>` block), and optional extra
+/// content appended before `</body>` (typically `<script>` tags).
 ///
-/// `logged_in` controls the nav links: when `true`, shows Dashboard + Pricing + Log out;
-/// when `false`, shows Pricing + Log in + Sign up + GitHub (matching the landing page nav).
+/// `logged_in` controls the nav links: when `true`, shows Dashboard + Setup + Integrate +
+/// Docs + Log out; when `false`, shows Pricing + Docs + Log in + Sign up + GitHub.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
+pub fn page_shell_custom(
+    title: &str,
+    body_html: &str,
+    logged_in: bool,
+    extra_css: &str,
+    extra_body_end: &str,
+) -> String {
     let title_lower = title.to_lowercase();
     let active_dashboard = if title_lower.contains("dashboard") {
         " active"
@@ -3243,6 +2934,7 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
       .auth-form-inner h2 {{ font-size: 1.2rem; }}
     }}
   </style>
+  {extra_css}
 </head>
 <body>
   <a href="#main-content" class="skip-nav">Skip to content</a>
@@ -3260,8 +2952,7 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
 
   <main id="main-content" class="content">
     <div class="container">
-      <h1>{title}</h1>
-      {body_content}
+      {body_html}
     </div>
   </main>
 
@@ -3281,7 +2972,16 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
       </div>
     </div>
   </footer>
+  {extra_body_end}
 </body>
 </html>"##
     )
+}
+
+/// Convenience wrapper: auto-adds `<h1>` before body content.
+/// Most routes use this. For custom headers, use [`page_shell_custom`] directly.
+#[must_use]
+pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
+    let body_html = format!("<h1>{title}</h1>\n      {body_content}");
+    page_shell_custom(title, &body_html, logged_in, "", "")
 }
