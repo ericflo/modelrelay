@@ -571,7 +571,7 @@ fn error_page(message: &str) -> Html<String> {
         "Error",
         &format!(
             "<div class=\"card\"><h2>Error</h2><p>{}</p>\
-             <p style=\"margin-top:12px;\"><a href=\"/dashboard\">&larr; Back to dashboard</a></p></div>",
+             <p class=\"back-link\"><a href=\"/dashboard\">&larr; Back to dashboard</a></p></div>",
             html_escape(message)
         ),
         true,
@@ -634,6 +634,10 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> St
   @keyframes admin-skel-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }\
   .admin-skel-line { height: 14px; margin-bottom: 10px; }\
   .admin-skel-line:last-child { width: 60%; margin-bottom: 0; }\
+  .admin-skel-wrap { margin-top: 12px; }\
+  .admin-skel-w-70 { width: 70%; }\
+  .admin-skel-w-45 { width: 45%; }\
+  .admin-info-table { margin-top: 8px; }\
 \
   /* Onboarding CTA */\
   .admin-cta { border-color: #7c3aed; }\
@@ -646,6 +650,15 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> St
     .info-table th:nth-child(3), .info-table td:nth-child(3) { display: none; }\
     .admin-key-code { font-size: 0.8em; }\
     .workers-table th:nth-child(3), .workers-table td:nth-child(3) { display: none; }\
+  }\
+  @media (max-width: 480px) {\
+    .admin-container { padding: 0 4px; }\
+    .admin-header { margin-bottom: 20px; }\
+    .admin-key-code { font-size: 0.75em; }\
+    .btn-revoke { padding: 4px 8px; font-size: 0.8em; }\
+    .admin-section-label { font-size: 0.7rem; }\
+    .workers-table th, .workers-table td { padding: 6px 8px 6px 0; font-size: 0.85em; }\
+    .admin-cta { padding: 24px 16px; }\
   }\
 </style>";
 
@@ -716,9 +729,9 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> St
         <div class=\"card\">\
           <h2>Workers</h2>\
           <div id=\"admin-workers\">\
-            <div style=\"margin-top:12px;\">\
-              <div class=\"admin-skel admin-skel-line\" style=\"width:70%;\"></div>\
-              <div class=\"admin-skel admin-skel-line\" style=\"width:45%;\"></div>\
+            <div class=\"admin-skel-wrap\">\
+              <div class=\"admin-skel admin-skel-line admin-skel-w-70\"></div>\
+              <div class=\"admin-skel admin-skel-line admin-skel-w-45\"></div>\
             </div>\
           </div>\
           <script>\
@@ -757,7 +770,7 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> St
         </div>\
         <div class=\"card\">\
           <h2>Account</h2>\
-          <table class=\"info-table\" style=\"margin-top:8px;\">\
+          <table class=\"info-table admin-info-table\">\
             <tr><td>Email</td><td>{email_escaped}</td></tr>\
             <tr><td>Role</td><td>Administrator</td></tr>\
           </table>\
@@ -833,6 +846,25 @@ fn subscriber_dashboard_html(
   @keyframes skel-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }\
   .skel-line { height: 14px; margin-bottom: 10px; }\
   .skel-line:last-child { width: 60%; margin-bottom: 0; }\
+  .skel-wrap { margin-top: 12px; }\
+  .skel-w-80 { width: 80%; }\
+  .skel-w-70 { width: 70%; }\
+  .skel-w-50 { width: 50%; }\
+  .skel-w-45 { width: 45%; }\
+\
+  /* JS-injected relay stats elements */\
+  .relay-table { margin-top: 8px; }\
+  .relay-cta { margin-top: 16px; padding: 24px 20px; border-radius: 8px; }\
+  .relay-cta h2 { font-size: 1rem; }\
+  .relay-cta p { margin-bottom: 14px; }\
+  .relay-cta .btn { padding: 10px 24px; font-size: 0.95rem; }\
+  .per-model-info { margin-top: 8px; color: #8b949e; font-size: 0.85em; }\
+  .relay-error { margin-top: 8px; color: #8b949e; }\
+  .provisioned-msg { margin-top: 12px; color: #8b949e; }\
+  .sub-badge-wrap { margin-top: 8px; }\
+  .billing-form { margin-top: 12px; }\
+  .back-link { margin-top: 16px; }\
+  .pricing-link { margin-top: 8px; }\
 \
   /* Billing link */\
   .billing-link { background: none; border: none; color: #7c3aed; cursor: pointer; font-size: 0.9rem; font-weight: 600; font-family: inherit; padding: 0; }\
@@ -846,6 +878,23 @@ fn subscriber_dashboard_html(
     .copy-btn { position: static; display: block; margin-top: 10px; width: 100%; text-align: center; }\
     .card-empty-cta { padding: 32px 20px; }\
     .card-empty-cta .btn { display: block; width: 100%; }\
+  }\
+  @media (max-width: 480px) {\
+    .dash-container { padding: 0 4px; }\
+    .dash-header { margin-bottom: 20px; }\
+    .card { padding: 16px 14px; }\
+    .card-api-key h2 { font-size: 1rem; }\
+    .key-display code { font-size: 0.75rem; }\
+    .copy-btn { padding: 8px 12px; font-size: 0.75rem; }\
+    .dash-section-label { font-size: 0.7rem; }\
+    .card-empty-cta { padding: 24px 14px; }\
+    .card-empty-cta .btn { padding: 12px 20px; font-size: 1rem; }\
+    .relay-cta .btn { padding: 8px 18px; font-size: 0.85rem; }\
+    .key-actions { flex-direction: column; gap: 10px; }\
+    .key-actions a { font-size: 0.85rem; }\
+    .info-table td, .info-table th { padding: 6px 8px 6px 0; font-size: 0.85rem; }\
+    .dash-quick-link h2 { font-size: 0.9rem; }\
+    .dash-quick-link p { font-size: 0.8rem; }\
   }\
 </style>";
 
@@ -890,7 +939,7 @@ fn subscriber_dashboard_html(
             } else if s.api_key_id.is_some() {
                 "<div class=\"card card-api-key\">\
                    <h2>API Key <span class=\"badge badge-active\">Provisioned</span></h2>\
-                   <p style=\"margin-top:12px;color:#8b949e;\">Your API key has been provisioned. \
+                   <p class=\"provisioned-msg\">Your API key has been provisioned. \
                       The raw key was shown once at creation and is stored securely.</p>\
                    <div class=\"key-actions\"><a href=\"/integrate\">Integration snippets &rarr;</a></div>\
                  </div>"
@@ -898,11 +947,11 @@ fn subscriber_dashboard_html(
             } else if s.status == "active" {
                 "<div class=\"card\">\
                    <h2>API Key <span class=\"badge\">Provisioning&hellip;</span></h2>\
-                   <div style=\"margin-top:12px;\">\
-                     <div class=\"skel skel-line\" style=\"width:80%;\"></div>\
-                     <div class=\"skel skel-line\" style=\"width:50%;\"></div>\
+                   <div class=\"skel-wrap\">\
+                     <div class=\"skel skel-line skel-w-80\"></div>\
+                     <div class=\"skel skel-line skel-w-50\"></div>\
                    </div>\
-                   <p style=\"margin-top:12px;color:#8b949e;\">Your subscription is active. \
+                   <p class=\"provisioned-msg\">Your subscription is active. \
                       Your API key is being provisioned and will appear here shortly.</p>\
                  </div>"
                     .to_string()
@@ -928,7 +977,7 @@ fn subscriber_dashboard_html(
     // ── Section: Status grid ──
     let sub_badge = if let Some(s) = sub {
         format!(
-            "{}<table class=\"info-table\" style=\"margin-top:8px;\">\
+            "{}<table class=\"info-table relay-table\">\
                <tr><td>Status</td><td>{}</td></tr>\
                <tr><td>Updated</td><td>{}</td></tr>\
              </table>",
@@ -938,13 +987,13 @@ fn subscriber_dashboard_html(
         )
     } else {
         "<span class=\"badge\">No Active Subscription</span>\
-         <p style=\"margin-top:8px;\"><a href=\"/pricing\">View pricing &rarr;</a></p>"
+         <p class=\"pricing-link\"><a href=\"/pricing\">View pricing &rarr;</a></p>"
             .to_string()
     };
 
     let billing_btn = if has_stripe_customer {
         format!(
-            "<form method=\"POST\" action=\"/dashboard/billing-portal\" style=\"margin-top:12px;\">\
+            "<form method=\"POST\" action=\"/dashboard/billing-portal\" class=\"billing-form\">\
                {csrf_field}\
                <button type=\"submit\" class=\"billing-link\">Manage billing &rarr;</button>\
              </form>"
@@ -959,9 +1008,9 @@ fn subscriber_dashboard_html(
            <div class=\"card\">\
              <h2>Relay Status</h2>\
              <div id=\"relay-stats\">\
-               <div style=\"margin-top:12px;\">\
-                 <div class=\"skel skel-line\" style=\"width:70%;\"></div>\
-                 <div class=\"skel skel-line\" style=\"width:45%;\"></div>\
+               <div class=\"skel-wrap\">\
+                 <div class=\"skel skel-line skel-w-70\"></div>\
+                 <div class=\"skel skel-line skel-w-45\"></div>\
                </div>\
              </div>\
              <script>\
@@ -974,19 +1023,19 @@ fn subscriber_dashboard_html(
                      var total=0;\
                      for(var k in qd){{if(qd.hasOwnProperty(k))total+=qd[k];}}\
                      var aw=d.active_workers||0;\
-                     var h='<table class=\"info-table\" style=\"margin-top:8px;\">'\
+                     var h='<table class=\"info-table relay-table\">'\
                        +'<tr><td>Workers</td><td>'+aw+'</td></tr>'\
                        +'<tr><td>Queue Depth</td><td>'+total+'</td></tr>'\
                        +'</table>';\
                      if(aw===0){{\
-                       h+='<div class=\"card-empty-cta\" style=\"margin-top:16px;padding:24px 20px;border-radius:8px;\">'\
-                         +'<h2 style=\"font-size:1rem;\">Connect Your First Worker</h2>'\
-                         +'<p style=\"margin-bottom:14px;\">No GPU workers are connected yet. Set one up in minutes.</p>'\
-                         +'<a href=\"/setup\" class=\"btn\" style=\"padding:10px 24px;font-size:0.95rem;\">Set Up a Worker &rarr;</a>'\
+                       h+='<div class=\"card-empty-cta relay-cta\">'\
+                         +'<h2>Connect Your First Worker</h2>'\
+                         +'<p>No GPU workers are connected yet. Set one up in minutes.</p>'\
+                         +'<a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a>'\
                          +'</div>';\
                      }}\
                      if(Object.keys(qd).length>1){{\
-                       var extra='<p style=\"margin-top:8px;color:#8b949e;font-size:0.85em;\">Per-model: ';\
+                       var extra='<p class=\"per-model-info\">Per-model: ';\
                        for(var m in qd){{if(qd.hasOwnProperty(m))extra+=m+':&nbsp;'+qd[m]+'&ensp;';}}\
                        extra+='</p>';\
                        h+=extra;\
@@ -995,14 +1044,14 @@ fn subscriber_dashboard_html(
                    }})\
                    .catch(function(){{\
                      document.getElementById('relay-stats').innerHTML=\
-                       '<p style=\"margin-top:8px;color:#8b949e;\">Could not load relay status.</p>';\
+                       '<p class=\"relay-error\">Could not load relay status.</p>';\
                    }});\
                }})();\
              </script>\
            </div>\
            <div class=\"card\">\
              <h2>Subscription</h2>\
-             <div style=\"margin-top:8px;\">{sub_badge}</div>\
+             <div class=\"sub-badge-wrap\">{sub_badge}</div>\
              {billing_btn}\
            </div>\
          </div>"
