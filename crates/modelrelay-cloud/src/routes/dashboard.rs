@@ -738,64 +738,141 @@ fn subscriber_dashboard_html(
 ) -> String {
     let email_escaped = html_escape(email);
 
+    // ── Dashboard-specific styles ──
+    let dashboard_css = "\
+<style>\
+  .dash-container { max-width: 1100px; margin: 0 auto; }\
+  .dash-header { margin-bottom: 32px; }\
+  .dash-header p { color: #8b949e; font-size: 0.95rem; }\
+  .dash-header strong { color: #e6edf3; }\
+  .dash-section-label { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #484f58; margin-bottom: 12px; }\
+\
+  /* API key card — hero prominence */\
+  .card-api-key { border-color: #7c3aed; }\
+  .card-api-key h2 { display: flex; align-items: center; gap: 8px; }\
+  .key-display { position: relative; margin-top: 12px; }\
+  .key-display code { display: block; padding-right: 80px; }\
+  .copy-btn { position: absolute; top: 8px; right: 8px; padding: 6px 14px; font-size: 0.8rem; background: #30363d; color: #e6edf3; border: 1px solid #3d444d; border-radius: 6px; cursor: pointer; transition: background 0.15s, border-color 0.15s; font-family: inherit; font-weight: 600; }\
+  .copy-btn:hover { background: #3d444d; border-color: #484f58; }\
+  .copy-btn.copied { background: #064e3b; border-color: #34d399; color: #34d399; }\
+  .key-actions { margin-top: 14px; display: flex; gap: 16px; flex-wrap: wrap; }\
+  .key-actions a { color: #7c3aed; font-size: 0.9rem; font-weight: 600; }\
+\
+  /* Status grid — 2 columns on desktop, 1 on mobile */\
+  .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }\
+  .dash-grid .card { margin-bottom: 0; }\
+\
+  /* Quick start links — 3 columns on desktop, stack on mobile */\
+  .dash-quick-links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }\
+  .dash-quick-link { margin-bottom: 0; text-decoration: none; transition: border-color 0.2s; }\
+  .dash-quick-link:hover { border-color: #30363d; text-decoration: none; }\
+  .dash-quick-link h2 { font-size: 1rem; }\
+  .dash-quick-link p { color: #8b949e; font-size: 0.85rem; margin-top: 4px; }\
+\
+  /* Empty state CTA */\
+  .card-empty-cta { border: 1px dashed #30363d; background: #0d1117; text-align: center; padding: 40px 32px; }\
+  .card-empty-cta h2 { font-size: 1.1rem; margin-bottom: 8px; }\
+  .card-empty-cta p { color: #8b949e; margin-bottom: 20px; }\
+  .card-empty-cta .btn { padding: 14px 36px; font-size: 1.1rem; }\
+\
+  /* Loading skeleton animation */\
+  .skel { background: linear-gradient(90deg, #161b22 25%, #1c2129 50%, #161b22 75%); background-size: 200% 100%; animation: skel-pulse 1.5s ease-in-out infinite; border-radius: 6px; }\
+  @keyframes skel-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }\
+  .skel-line { height: 14px; margin-bottom: 10px; }\
+  .skel-line:last-child { width: 60%; margin-bottom: 0; }\
+\
+  /* Billing link */\
+  .billing-link { background: none; border: none; color: #7c3aed; cursor: pointer; font-size: 0.9rem; font-weight: 600; font-family: inherit; padding: 0; }\
+  .billing-link:hover { text-decoration: underline; }\
+\
+  /* Responsive */\
+  @media (max-width: 768px) {\
+    .dash-grid { grid-template-columns: 1fr; }\
+    .dash-quick-links { grid-template-columns: 1fr; }\
+    .key-display code { padding-right: 16px; font-size: 0.8rem; }\
+    .copy-btn { position: static; display: block; margin-top: 10px; width: 100%; text-align: center; }\
+    .card-empty-cta { padding: 32px 20px; }\
+    .card-empty-cta .btn { display: block; width: 100%; }\
+  }\
+</style>";
+
     // ── Welcome header ──
     let welcome = format!(
-        "<div style=\"margin-bottom:24px;\">\
-           <p style=\"color:#8b949e;margin-top:4px;\">Signed in as <strong style=\"color:#e6edf3;\">{email_escaped}</strong></p>\
+        "{dashboard_css}\
+         <div class=\"dash-container\">\
+         <div class=\"dash-header\">\
+           <p>Signed in as <strong>{email_escaped}</strong></p>\
          </div>"
     );
 
-    // ── API Key card (prominent, with copy button) ──
-    let api_key_card = if let Some(s) = sub {
-        if let Some(key) = api_key {
-            format!(
-                "<div class=\"card\" style=\"border-color:#7c3aed;\">\
-                   <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge badge-active\">Active</span></h2>\
-                   <div class=\"key-display\" style=\"position:relative;margin-top:12px;\">\
-                     <code id=\"api-key-value\">{}</code>\
-                     <button onclick=\"navigator.clipboard.writeText(document.getElementById('api-key-value').textContent).then(function(){{var b=this;this.textContent='Copied!';setTimeout(function(){{b.textContent='Copy';}},1500);}}.bind(this))\" \
-                       style=\"position:absolute;top:8px;right:8px;padding:4px 10px;font-size:0.75rem;background:#30363d;color:#e6edf3;border:none;border-radius:4px;cursor:pointer;\">Copy</button>\
+    // ── Section: API Key (hero card) ──
+    let api_key_section = {
+        let label = "<div class=\"dash-section-label\">Your API Key</div>";
+        let card = if let Some(s) = sub {
+            if let Some(key) = api_key {
+                format!(
+                    "<div class=\"card card-api-key\">\
+                       <h2>API Key <span class=\"badge badge-active\">Active</span></h2>\
+                       <div class=\"key-display\">\
+                         <code id=\"api-key-value\">{}</code>\
+                         <button class=\"copy-btn\" id=\"copy-btn\" type=\"button\">Copy</button>\
+                       </div>\
+                       <div class=\"key-actions\">\
+                         <a href=\"/integrate\">Integration snippets &rarr;</a>\
+                         <a href=\"/setup\">Connect a worker &rarr;</a>\
+                       </div>\
+                     </div>\
+                     <script>\
+                       document.getElementById('copy-btn').addEventListener('click',function(){{\
+                         var btn=this;\
+                         navigator.clipboard.writeText(document.getElementById('api-key-value').textContent).then(function(){{\
+                           btn.textContent='Copied!';\
+                           btn.classList.add('copied');\
+                           setTimeout(function(){{ btn.textContent='Copy'; btn.classList.remove('copied'); }},2000);\
+                         }});\
+                       }});\
+                     </script>",
+                    html_escape(key),
+                )
+            } else if s.api_key_id.is_some() {
+                "<div class=\"card card-api-key\">\
+                   <h2>API Key <span class=\"badge badge-active\">Provisioned</span></h2>\
+                   <p style=\"margin-top:12px;color:#8b949e;\">Your API key has been provisioned. \
+                      The raw key was shown once at creation and is stored securely.</p>\
+                   <div class=\"key-actions\"><a href=\"/integrate\">Integration snippets &rarr;</a></div>\
+                 </div>"
+                    .to_string()
+            } else if s.status == "active" {
+                "<div class=\"card\">\
+                   <h2>API Key <span class=\"badge\">Provisioning&hellip;</span></h2>\
+                   <div style=\"margin-top:12px;\">\
+                     <div class=\"skel skel-line\" style=\"width:80%;\"></div>\
+                     <div class=\"skel skel-line\" style=\"width:50%;\"></div>\
                    </div>\
-                   <div style=\"margin-top:12px;display:flex;gap:12px;flex-wrap:wrap;\">\
-                     <a href=\"/integrate\" style=\"color:#7c3aed;font-size:0.9rem;font-weight:600;\">View integration snippets &rarr;</a>\
-                     <a href=\"/setup\" style=\"color:#7c3aed;font-size:0.9rem;font-weight:600;\">Connect a worker &rarr;</a>\
-                   </div>\
-                 </div>",
-                html_escape(key),
-            )
-        } else if s.api_key_id.is_some() {
-            "<div class=\"card\">\
-               <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge badge-active\">Provisioned</span></h2>\
-               <p style=\"margin-top:12px;color:#8b949e;\">Your API key has been provisioned. \
-                  The raw key was shown once at creation and is stored securely.</p>\
-               <p style=\"margin-top:12px;\"><a href=\"/integrate\" style=\"color:#7c3aed;font-size:0.9rem;font-weight:600;\">View integration snippets &rarr;</a></p>\
-             </div>"
-                .to_string()
-        } else if s.status == "active" {
-            "<div class=\"card\">\
-               <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge\">Pending</span></h2>\
-               <p style=\"margin-top:12px;color:#8b949e;\">Your subscription is active. \
-                  Your API key is being provisioned and will appear here shortly.</p>\
-             </div>"
-                .to_string()
+                   <p style=\"margin-top:12px;color:#8b949e;\">Your subscription is active. \
+                      Your API key is being provisioned and will appear here shortly.</p>\
+                 </div>"
+                    .to_string()
+            } else {
+                "<div class=\"card-empty-cta card\">\
+                   <h2>Get Your API Key</h2>\
+                   <p>An active subscription is required for API key access.</p>\
+                   <a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a>\
+                 </div>"
+                    .to_string()
+            }
         } else {
-            "<div class=\"card\">\
-               <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge\">Unavailable</span></h2>\
-               <p style=\"margin-top:12px;color:#8b949e;\">An active subscription is required for API key access.</p>\
-               <p style=\"margin-top:12px;\"><a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a></p>\
+            "<div class=\"card-empty-cta card\">\
+               <h2>Start Routing Inference Requests</h2>\
+               <p>Subscribe to get your relay API key and connect your own GPU workers.</p>\
+               <a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a>\
              </div>"
                 .to_string()
-        }
-    } else {
-        "<div class=\"card\">\
-           <h2 style=\"display:flex;align-items:center;gap:8px;\">API Key <span class=\"badge\">Unavailable</span></h2>\
-           <p style=\"margin-top:12px;color:#8b949e;\">Subscribe to get your relay API key and start routing inference requests.</p>\
-           <p style=\"margin-top:12px;\"><a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a></p>\
-         </div>"
-            .to_string()
+        };
+        format!("{label}{card}")
     };
 
-    // ── Relay status + Subscription in a 2-column grid ──
+    // ── Section: Status grid ──
     let sub_badge = if let Some(s) = sub {
         format!(
             "{}<table class=\"info-table\" style=\"margin-top:8px;\">\
@@ -811,23 +888,28 @@ fn subscriber_dashboard_html(
          <p style=\"margin-top:8px;\"><a href=\"/pricing\">View pricing &rarr;</a></p>"
             .to_string()
     };
+
     let billing_btn = if has_stripe_customer {
         format!(
             "<form method=\"POST\" action=\"/dashboard/billing-portal\" style=\"margin-top:12px;\">\
                {csrf_field}\
-               <button type=\"submit\" style=\"background:none;border:none;color:#7c3aed;cursor:pointer;font-size:0.9rem;font-weight:600;font-family:inherit;padding:0;\">Manage billing &rarr;</button>\
+               <button type=\"submit\" class=\"billing-link\">Manage billing &rarr;</button>\
              </form>"
         )
     } else {
         String::new()
     };
 
-    let stats_and_sub = format!(
-        "<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px;\">\
-           <div class=\"card\" style=\"margin-bottom:0;\">\
+    let status_section = format!(
+        "<div class=\"dash-section-label\">Status</div>\
+         <div class=\"dash-grid\">\
+           <div class=\"card\">\
              <h2>Relay Status</h2>\
              <div id=\"relay-stats\">\
-               <p style=\"margin-top:8px;color:#8b949e;\">Loading&hellip;</p>\
+               <div style=\"margin-top:12px;\">\
+                 <div class=\"skel skel-line\" style=\"width:70%;\"></div>\
+                 <div class=\"skel skel-line\" style=\"width:45%;\"></div>\
+               </div>\
              </div>\
              <script>\
                (function(){{\
@@ -839,27 +921,35 @@ fn subscriber_dashboard_html(
                      var total=0;\
                      for(var k in qd){{if(qd.hasOwnProperty(k))total+=qd[k];}}\
                      var aw=d.active_workers||0;\
-                     el.innerHTML='<table class=\"info-table\" style=\"margin-top:8px;\">'\
+                     var h='<table class=\"info-table\" style=\"margin-top:8px;\">'\
                        +'<tr><td>Workers</td><td>'+aw+'</td></tr>'\
                        +'<tr><td>Queue Depth</td><td>'+total+'</td></tr>'\
                        +'</table>';\
+                     if(aw===0){{\
+                       h+='<div class=\"card-empty-cta\" style=\"margin-top:16px;padding:24px 20px;border-radius:8px;\">'\
+                         +'<h2 style=\"font-size:1rem;\">Connect Your First Worker</h2>'\
+                         +'<p style=\"margin-bottom:14px;\">No GPU workers are connected yet. Set one up in minutes.</p>'\
+                         +'<a href=\"/setup\" class=\"btn\" style=\"padding:10px 24px;font-size:0.95rem;\">Set Up a Worker &rarr;</a>'\
+                         +'</div>';\
+                     }}\
                      if(Object.keys(qd).length>1){{\
                        var extra='<p style=\"margin-top:8px;color:#8b949e;font-size:0.85em;\">Per-model: ';\
                        for(var m in qd){{if(qd.hasOwnProperty(m))extra+=m+':&nbsp;'+qd[m]+'&ensp;';}}\
                        extra+='</p>';\
-                       el.innerHTML+=extra;\
+                       h+=extra;\
                      }}\
+                     el.innerHTML=h;\
                    }})\
                    .catch(function(){{\
                      document.getElementById('relay-stats').innerHTML=\
-                       '<p style=\"margin-top:8px;color:#8b949e;\">Could not load stats.</p>';\
+                       '<p style=\"margin-top:8px;color:#8b949e;\">Could not load relay status.</p>';\
                    }});\
                }})();\
              </script>\
            </div>\
-           <div class=\"card\" style=\"margin-bottom:0;\">\
+           <div class=\"card\">\
              <h2>Subscription</h2>\
-             <p style=\"margin-top:8px;\">{sub_badge}</p>\
+             <div style=\"margin-top:8px;\">{sub_badge}</div>\
              {billing_btn}\
            </div>\
          </div>"
@@ -867,18 +957,19 @@ fn subscriber_dashboard_html(
 
     // ── Quick start links (only when they have a key) ──
     let quick_start = if api_key.is_some() {
-        "<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:24px;\">\
-           <a href=\"/setup\" class=\"card\" style=\"margin-bottom:0;text-decoration:none;transition:border-color 0.2s;\">\
-             <h2 style=\"font-size:1rem;\">&#x2699;&#xFE0F; Setup</h2>\
-             <p style=\"color:#8b949e;font-size:0.85rem;margin-top:4px;\">Connect a GPU worker machine</p>\
+        "<div class=\"dash-section-label\">Quick Start</div>\
+         <div class=\"dash-quick-links\">\
+           <a href=\"/setup\" class=\"card dash-quick-link\">\
+             <h2>&#x2699;&#xFE0F; Setup</h2>\
+             <p>Connect a GPU worker machine</p>\
            </a>\
-           <a href=\"/integrate\" class=\"card\" style=\"margin-bottom:0;text-decoration:none;transition:border-color 0.2s;\">\
-             <h2 style=\"font-size:1rem;\">&#x1F4CB; Integrate</h2>\
-             <p style=\"color:#8b949e;font-size:0.85rem;margin-top:4px;\">Code snippets for your favorite tools</p>\
+           <a href=\"/integrate\" class=\"card dash-quick-link\">\
+             <h2>&#x1F4CB; Integrate</h2>\
+             <p>Code snippets for your favorite tools</p>\
            </a>\
-           <a href=\"https://github.com/ericflo/modelrelay\" target=\"_blank\" class=\"card\" style=\"margin-bottom:0;text-decoration:none;transition:border-color 0.2s;\">\
-             <h2 style=\"font-size:1rem;\">&#x1F4D6; Docs</h2>\
-             <p style=\"color:#8b949e;font-size:0.85rem;margin-top:4px;\">GitHub README and examples</p>\
+           <a href=\"https://ericflo.github.io/modelrelay/\" target=\"_blank\" class=\"card dash-quick-link\">\
+             <h2>&#x1F4D6; Docs</h2>\
+             <p>API reference and examples</p>\
            </a>\
          </div>"
             .to_string()
@@ -886,7 +977,9 @@ fn subscriber_dashboard_html(
         String::new()
     };
 
-    format!("{welcome}\n{api_key_card}\n{stats_and_sub}\n{quick_start}")
+    let close = "</div>"; // close .dash-container
+
+    format!("{welcome}\n{api_key_section}\n{status_section}\n{quick_start}\n{close}")
 }
 
 /// Minimal HTML entity escaping for untrusted strings.
