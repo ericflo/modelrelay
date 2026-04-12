@@ -2774,18 +2774,44 @@ fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
-    let nav_links = if logged_in {
-        r#"<a href="/dashboard">Dashboard</a>
-        <a href="/setup">Setup</a>
-        <a href="/integrate">Integrate</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
-        <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
+    let title_lower = title.to_lowercase();
+    let active_dashboard = if title_lower.contains("dashboard") {
+        " active"
     } else {
-        r#"<a href="/pricing">Pricing</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
-        <a href="/login">Log in</a>
-        <a class="btn-signup" href="/signup">Sign up</a>
-        <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>"#
+        ""
+    };
+    let active_setup = if title_lower.contains("setup") {
+        " active"
+    } else {
+        ""
+    };
+    let active_integrate = if title_lower.contains("integrat") {
+        " active"
+    } else {
+        ""
+    };
+    let active_pricing = if title_lower.contains("pricing") {
+        " active"
+    } else {
+        ""
+    };
+
+    let nav_links = if logged_in {
+        format!(
+            r#"<a href="/dashboard" class="nav-link{active_dashboard}">Dashboard</a>
+            <a href="/setup" class="nav-link{active_setup}">Setup</a>
+            <a href="/integrate" class="nav-link{active_integrate}">Integrate</a>
+            <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener" class="nav-link">Docs</a>
+            <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
+        )
+    } else {
+        format!(
+            r#"<a href="/pricing" class="nav-link{active_pricing}">Pricing</a>
+            <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener" class="nav-link">Docs</a>
+            <a href="/login" class="nav-link">Log in</a>
+            <a class="btn-signup" href="/signup">Sign up</a>
+            <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener" class="nav-link">GitHub</a>"#
+        )
     };
 
     format!(
@@ -2806,17 +2832,35 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     a:hover {{ text-decoration: underline; }}
     .container {{ max-width: 900px; margin: 0 auto; padding: 0 24px; }}
 
-    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; }}
+    /* Nav */
+    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; position: relative; }}
     nav .container {{ display: flex; justify-content: space-between; align-items: center; }}
     .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
+    .logo:hover {{ text-decoration: none; }}
     .logo span {{ color: #7c3aed; }}
-    .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
-    .nav-links a:hover {{ color: #e6edf3; }}
+    .nav-links {{ display: flex; align-items: center; gap: 0; }}
+    .nav-links .nav-link {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; padding: 4px 0; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }}
+    .nav-links .nav-link:hover {{ color: #e6edf3; text-decoration: none; }}
+    .nav-links .nav-link.active {{ color: #e6edf3; border-bottom-color: #7c3aed; }}
     .nav-links form {{ display: inline; }}
-    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
+    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; transition: color 0.2s; }}
     .nav-links button:hover {{ color: #e6edf3; }}
-    .nav-links .btn-signup {{ background: #7c3aed; color: #fff; padding: 6px 16px; border-radius: 6px; font-weight: 600; font-size: 0.9rem; }}
+    .nav-links .btn-signup {{ background: #7c3aed; color: #fff; padding: 6px 16px; border-radius: 6px; font-weight: 600; font-size: 0.9rem; margin-left: 16px; border-bottom: none; }}
     .nav-links .btn-signup:hover {{ background: #6d28d9; color: #fff; text-decoration: none; }}
+
+    /* Hamburger */
+    .nav-hamburger {{
+      display: none; background: none; border: none; cursor: pointer; padding: 4px;
+      flex-direction: column; justify-content: center; align-items: center; gap: 5px;
+    }}
+    .nav-hamburger span {{
+      display: block; width: 22px; height: 2px; background: #8b949e; border-radius: 1px;
+      transition: transform 0.25s, opacity 0.25s;
+    }}
+    .nav-hamburger:hover span {{ background: #e6edf3; }}
+    .nav-hamburger.open span:nth-child(1) {{ transform: translateY(7px) rotate(45deg); }}
+    .nav-hamburger.open span:nth-child(2) {{ opacity: 0; }}
+    .nav-hamburger.open span:nth-child(3) {{ transform: translateY(-7px) rotate(-45deg); }}
 
     .content {{ padding: 60px 0; }}
     .content h1 {{ font-size: 2rem; margin-bottom: 24px; }}
@@ -2936,21 +2980,38 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
       padding: 10px 14px; margin-bottom: 16px; color: #f87171; font-size: 0.9rem;
     }}
 
-    footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
-    footer a {{ color: #8b949e; }}
+    /* Footer */
+    footer {{ padding: 48px 0; border-top: 1px solid #21262d; }}
+    .footer-content {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }}
+    .footer-left {{ color: #484f58; font-size: 0.85rem; }}
+    .footer-tagline {{ color: #30363d; font-size: 0.8rem; margin-top: 4px; }}
+    .footer-links {{ display: flex; gap: 20px; }}
+    .footer-links a {{ color: #8b949e; font-size: 0.85rem; }}
+    .footer-links a:hover {{ color: #e6edf3; text-decoration: none; }}
 
     /* Tablet */
     @media (max-width: 768px) {{
       .content {{ padding: 40px 0; }}
       .content h1 {{ font-size: 1.6rem; }}
       .card {{ padding: 24px; }}
-      .nav-links a {{ font-size: 0.8rem; margin-left: 12px; }}
-      .nav-links button {{ font-size: 0.8rem; margin-left: 12px; }}
       .info-table td:first-child {{ width: 120px; }}
       .auth-split {{ grid-template-columns: 1fr; }}
       .auth-value {{ padding: 32px 0 24px 0; }}
       .auth-value-headline {{ font-size: 1.8rem; }}
       .auth-form-panel {{ border-left: none; border-top: 1px solid #21262d; padding: 32px 0 0 0; }}
+      .nav-hamburger {{ display: flex; }}
+      .nav-links {{
+        display: none; position: absolute; top: 100%; left: 0; right: 0;
+        background: #161b22; border-bottom: 1px solid #21262d;
+        flex-direction: column; padding: 16px 24px; gap: 0; z-index: 100;
+      }}
+      .nav-links.open {{ display: flex; }}
+      .nav-links .nav-link {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; border-bottom: none; }}
+      .nav-links .nav-link.active {{ color: #7c3aed; }}
+      .nav-links form {{ display: block; }}
+      .nav-links button {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; }}
+      .nav-links .btn-signup {{ margin-left: 0; margin-top: 8px; display: inline-block; text-align: center; }}
+      .footer-content {{ flex-direction: column; text-align: center; }}
     }}
 
     /* Mobile */
@@ -2978,6 +3039,9 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
   <nav>
     <div class="container">
       <a href="/" class="logo">Model<span>Relay</span></a>
+      <button class="nav-hamburger" aria-label="Toggle navigation" onclick="this.classList.toggle('open');this.parentElement.querySelector('.nav-links').classList.toggle('open')">
+        <span></span><span></span><span></span>
+      </button>
       <div class="nav-links">
         {nav_links}
       </div>
@@ -2993,7 +3057,18 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+      <div class="footer-content">
+        <div class="footer-left">
+          &copy; 2026 ModelRelay
+          <div class="footer-tagline">Your GPU workers, our relay. Inference without the infrastructure.</div>
+        </div>
+        <div class="footer-links">
+          <a href="/pricing">Pricing</a>
+          <a href="/integrate">Integration</a>
+          <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
+          <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
     </div>
   </footer>
 </body>
