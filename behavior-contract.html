@@ -1,0 +1,317 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Behavior Contract - ModelRelay</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Central HTTP LLM proxy that routes inference requests to authenticated remote workers over WebSocket.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="index.html">Introduction</a></li><li class="chapter-item expanded affix "><a href="architecture.html">Architecture</a></li><li class="chapter-item expanded affix "><a href="protocol-walkthrough.html">Protocol Walkthrough</a></li><li class="chapter-item expanded affix "><a href="behavior-contract.html" class="active">Behavior Contract</a></li><li class="chapter-item expanded affix "><a href="runbook.html">Operational Runbook</a></li><li class="chapter-item expanded affix "><a href="tls.html">TLS Setup</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">ModelRelay</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/ericflo/modelrelay" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/ericflo/modelrelay/edit/main/docs/behavior-contract.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="behavior-contract"><a class="header" href="#behavior-contract">Behavior Contract</a></h1>
+<p>This document captures the externally observable behavior contract for ModelRelay — the behaviors that must hold across versions and that users and contributors can rely on. The contract test suite in <code>modelrelay-contract-tests</code> is the automated expression of these requirements.</p>
+<h2 id="core-contract"><a class="header" href="#core-contract">Core Contract</a></h2>
+<ul>
+<li>
+<p>Worker auth and registration:
+Workers connect to <code>/v1/worker/connect?provider=&lt;name&gt;</code> over WebSocket and authenticate with a provider-specific worker secret. The preferred transport is <code>X-Worker-Secret</code>; query-string secret fallback exists only for backward compatibility. Secret comparison is constant-time. Unknown providers are rejected, disabled providers are rejected, and repeated failed auth attempts are rate-limited by client IP.</p>
+</li>
+<li>
+<p>Capability advertisement:
+After connect, the worker sends a <code>register</code> message containing <code>worker_name</code>, <code>models</code>, <code>max_concurrent</code>, and <code>protocol_version</code>. The server may sanitize or truncate these values and must send <code>register_ack</code> with the accepted worker ID, accepted model list, and warnings. Legacy workers omitting <code>protocol_version</code> are tolerated in Katamari unless explicitly rejected by config; mismatched protocol versions are closed with a protocol error.
+The first Rust characterization harness makes that sanitization concrete by requiring the acked model list to trim whitespace, drop empty entries, de-duplicate exact duplicates while preserving first-seen order, and cap the accepted list at a provider-defined limit with warnings surfaced in <code>register_ack</code>.</p>
+</li>
+<li>
+<p>Model advertisement and worker selection:
+Workers advertise exact model names, and the server routes only to workers that explicitly support the requested model. Katamari keeps an O(1) model-membership set per worker. Selection is "lowest load with round-robin tie breaking" among workers that support the model and can atomically reserve capacity.</p>
+</li>
+<li>
+<p>Queueing when no worker is immediately available:
+If no eligible worker can accept the request, the request is queued per virtual provider. The queue is bounded and FIFO among requests compatible with a worker's model list. Requests remain keyed by original queue time so requeue does not grant infinite timeout extensions.</p>
+</li>
+<li>
+<p>Request dispatch over WebSocket:
+Requests are forwarded to workers as <code>request</code> messages with <code>request_id</code>, <code>model</code>, raw JSON body string, selected compatibility headers, target endpoint path, and <code>is_streaming</code>. The central proxy accepts ordinary provider-style HTTP requests and delegates only the worker-backed providers through this path. Compatibility-critical request headers include OpenAI-style <code>authorization</code>, <code>content-type</code>, and <code>openai-organization</code>, plus Anthropic-style <code>x-api-key</code>, <code>anthropic-version</code>, <code>anthropic-beta</code>, and <code>content-type</code>; incidental transport headers like <code>user-agent</code> are not part of the worker envelope contract.</p>
+</li>
+<li>
+<p>Non-streaming response pass-through:
+Workers reply with <code>response_complete</code> containing the final HTTP status, response headers, full body, and token counts. The proxy must forward status, headers, and body faithfully, including upstream 4xx and 5xx responses, rather than collapsing them into generic proxy errors.</p>
+</li>
+<li>
+<p>Streaming chunk ordering and termination semantics:
+Streaming responses are forwarded as <code>response_chunk</code> messages containing already-formatted SSE data and finish with <code>response_complete</code>. Chunks must preserve order. The HTTP side must flush promptly, retain streaming semantics, and treat completion metadata as the source of final status and token accounting. Katamari enforces a cumulative streaming size ceiling and emits an SSE error before terminating an oversized stream.</p>
+</li>
+<li>
+<p>Client cancellation propagation end to end:
+Client disconnect or request timeout must cancel the HTTP request context, remove queued work if still queued, or send a best-effort <code>cancel</code> message for active worker requests. Late chunks that arrive after cancellation are intentionally dropped. The worker protocol has explicit cancel reasons, including client disconnect and timeout.</p>
+</li>
+<li>
+<p>Worker disconnect during active request:
+On worker disconnect, active requests are examined one by one. If the request context is still alive, Katamari requeues it onto the provider queue without resetting its lifetime. If the request context is already canceled or timed out, the request fails immediately to the waiting client path instead. Requeue is capped at <code>MaxRequeueCount = 3</code>; after that the request fails with a service-unavailable style error instead of looping forever.</p>
+</li>
+<li>
+<p>Timeout behavior:
+Every provider has a request timeout used both for queue wait and overall request lifetime. Queue timeout produces a worker-unavailable style response. Streaming and non-streaming requests share the parent HTTP context, so client disconnect and timeout terminate the same request object. WebSocket heartbeats use ping every 15 seconds and a 45-second pong window.</p>
+</li>
+<li>
+<p>Queue-full, no-workers, and provider-disabled error surfaces:
+Katamari distinguishes bounded queue exhaustion, no worker capacity, disabled providers, deleted providers, timeout, and requeue exhaustion through dedicated error values. The public-facing HTTP layer currently sanitizes some internal errors into stable client messages such as "Service temporarily at capacity" and "Provider is currently disabled".</p>
+</li>
+<li>
+<p>Heartbeat, load reporting, and stale-worker cleanup:
+The server sends JSON <code>ping</code>; workers reply with JSON <code>pong</code> carrying current load. This heartbeat updates <code>last_heartbeat</code> and live load accounting. Workers may also send <code>models_update</code> when their local model catalog changes. Stale worker DB records are cleaned periodically, and failed auth rate-limit entries expire automatically.</p>
+</li>
+<li>
+<p>Graceful shutdown and drain semantics:
+The server can send <code>graceful_shutdown</code> to tell workers to stop accepting new work, finish current requests, and disconnect before a timeout. Provider deletion drains queued requests with an explicit provider-deleted error and closes connected workers.</p>
+</li>
+<li>
+<p>OpenAI-style and Anthropic-style compatibility:
+The central server is meant to accept ordinary client traffic, not a custom client. Katamari parses model and stream flags from OpenAI-style request bodies, provides a special <code>/v1/models</code> compatibility endpoint, and preserves SSE behavior expected by OpenAI-compatible tooling. The extracted Rust project should also preserve Anthropic-style compatibility at the central HTTP boundary even if the internal worker protocol stays provider-neutral.</p>
+</li>
+</ul>
+<h2 id="wire-messages-to-preserve"><a class="header" href="#wire-messages-to-preserve">Wire Messages To Preserve</a></h2>
+<ul>
+<li>
+<p>Server to worker:
+<code>ping</code>, <code>request</code>, <code>register_ack</code>, <code>cancel</code>, <code>graceful_shutdown</code>, <code>models_refresh</code></p>
+</li>
+<li>
+<p>Worker to server:
+<code>pong</code>, <code>register</code>, <code>models_update</code>, <code>response_chunk</code>, <code>response_complete</code>, <code>error</code></p>
+</li>
+</ul>
+<h2 id="invariants-worth-preserving"><a class="header" href="#invariants-worth-preserving">Invariants Worth Preserving</a></h2>
+<ul>
+<li>A worker never silently gains capability beyond the sanitized models acknowledged by the server.</li>
+<li>Queueing is bounded per provider and does not grow without limit.</li>
+<li>Requeue is intentional and finite.</li>
+<li>HTTP error bodies from the worker backend are preserved where safe instead of flattened away.</li>
+<li>Streaming remains SSE-shaped end to end.</li>
+<li>Worker churn or late chunks must not leave requests hanging forever.</li>
+</ul>
+<h2 id="extension-points"><a class="header" href="#extension-points">Extension Points</a></h2>
+<p>When adding new behaviors, add a contract test in <code>modelrelay-contract-tests</code> before implementing. This keeps the test suite as the primary specification. If a behavior described above is not yet covered by an automated test, that gap is the highest-priority work item.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="protocol-walkthrough.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="runbook.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="protocol-walkthrough.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="runbook.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
