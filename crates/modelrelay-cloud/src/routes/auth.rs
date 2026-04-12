@@ -38,11 +38,7 @@ fn rate_limit_response() -> Response {
   <p style=\"margin-top:12px;color:#8b949e;font-size:0.9rem;\">This limit protects your account from unauthorized access attempts.</p>\
   <a href=\"/\" class=\"btn\" style=\"margin-top:20px;\">Back to Home</a>\
 </div>";
-    let html = modelrelay_web::templates::page_shell(
-        "Too Many Requests",
-        body,
-        false,
-    );
+    let html = modelrelay_web::templates::page_shell("Too Many Requests", body, false);
     (StatusCode::TOO_MANY_REQUESTS, Html(html)).into_response()
 }
 
