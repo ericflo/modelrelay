@@ -374,8 +374,11 @@ pub fn dashboard_page() -> String {
     .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
     .logo span {{ color: #7c3aed; }}
     .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
-    .nav-links a:hover {{ color: #e6edf3; }}
+    .nav-links a:hover {{ color: #e6edf3; text-decoration: none; }}
     .nav-links a.active {{ color: #7c3aed; }}
+    .nav-links form {{ display: inline; }}
+    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
+    .nav-links button:hover {{ color: #e6edf3; }}
 
     .content {{ padding: 32px 0; }}
     .content h1 {{ font-size: 1.75rem; margin-bottom: 20px; }}
@@ -395,6 +398,8 @@ pub fn dashboard_page() -> String {
         <a href="/dashboard" class="active">Dashboard</a>
         <a href="/setup">Setup</a>
         <a href="/integrate">Integrate</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
+        <form method="POST" action="/logout"><button type="submit">Log out</button></form>
       </div>
     </div>
   </nav>
@@ -411,7 +416,7 @@ pub fn dashboard_page() -> String {
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
     </div>
   </footer>
 
@@ -1364,12 +1369,13 @@ Get-Service ModelRelayWorker</code>
         r#"<a href="/dashboard">Dashboard</a>
         <a href="/setup" class="active">Setup</a>
         <a href="/integrate">Integrate</a>
-        <a href="/pricing">Pricing</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
         <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
     } else {
         r#"<a href="/dashboard">Dashboard</a>
         <a href="/setup" class="active">Setup</a>
-        <a href="/integrate">Integrate</a>"#
+        <a href="/integrate">Integrate</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>"#
     };
 
     format!(
@@ -1440,7 +1446,7 @@ Get-Service ModelRelayWorker</code>
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
     </div>
   </footer>
 
@@ -2175,13 +2181,15 @@ func main() {
     let logged_in = cloud_config.is_some();
     let integrate_nav_links = if logged_in {
         r#"<a href="/dashboard">Dashboard</a>
+        <a href="/setup">Setup</a>
         <a href="/integrate" class="active">Integrate</a>
-        <a href="/pricing">Pricing</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
         <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
     } else {
         r#"<a href="/dashboard">Dashboard</a>
         <a href="/setup">Setup</a>
-        <a href="/integrate" class="active">Integrate</a>"#
+        <a href="/integrate" class="active">Integrate</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>"#
     };
 
     format!(
@@ -2643,7 +2651,7 @@ data: {{"type":"response.completed","response":{{"id":"resp_abc123","object":"re
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
     </div>
   </footer>
 
@@ -2682,14 +2690,16 @@ fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
 pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
     let nav_links = if logged_in {
         r#"<a href="/dashboard">Dashboard</a>
+        <a href="/setup">Setup</a>
         <a href="/integrate">Integrate</a>
-        <a href="/pricing">Pricing</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
         <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
     } else {
         r#"<a href="/pricing">Pricing</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
         <a href="/login">Log in</a>
         <a class="btn-signup" href="/signup">Sign up</a>
-        <a href="https://github.com/ericflo/modelrelay">GitHub</a>"#
+        <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>"#
     };
 
     format!(
@@ -2819,7 +2829,7 @@ pub fn page_shell(title: &str, body_content: &str, logged_in: bool) -> String {
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://github.com/ericflo/modelrelay">GitHub</a>
+      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
     </div>
   </footer>
 </body>
