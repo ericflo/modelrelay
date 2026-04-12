@@ -2196,7 +2196,8 @@ func main() {
 
     let extra_css = ["<style>", integrate_override_css, integrate_css, "</style>"].concat();
 
-    let integrate_body = format!(r#"<h1>Integrate</h1>
+    let integrate_body = format!(
+        r#"<h1>Integrate</h1>
       <p class="subtitle">Copy-paste snippets for your favorite tools, agents, and languages. Fill in your details below and all code blocks update automatically.</p>
       <p style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px;margin-top:-12px;">
         <span style="font-size:0.75rem;padding:3px 10px;border-radius:20px;background:rgba(124,58,237,0.1);border:1px solid rgba(124,58,237,0.2);color:#a78bfa;">OpenAI Compatible</span>
@@ -2607,12 +2608,19 @@ data: {{"type":"response.completed","response":{{"id":"resp_abc123","object":"re
         </div>
       </div>
 
-"#);
+"#
+    );
 
     let cloud_cfg_script = cloud_config_script(cloud_config);
     let extra_body_end = format!("{cloud_cfg_script}<script>{integrate_js}</script>");
 
-    page_shell_custom("Integrate", &integrate_body, logged_in, &extra_css, &extra_body_end)
+    page_shell_custom(
+        "Integrate",
+        &integrate_body,
+        logged_in,
+        &extra_css,
+        &extra_body_end,
+    )
 }
 
 fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
@@ -2641,7 +2649,13 @@ fn cloud_config_script(config: Option<&CloudWizardConfig>) -> String {
 /// Docs + Log out; when `false`, shows Pricing + Docs + Log in + Sign up + GitHub.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn page_shell_custom(title: &str, body_html: &str, logged_in: bool, extra_css: &str, extra_body_end: &str) -> String {
+pub fn page_shell_custom(
+    title: &str,
+    body_html: &str,
+    logged_in: bool,
+    extra_css: &str,
+    extra_body_end: &str,
+) -> String {
     let title_lower = title.to_lowercase();
     let active_dashboard = if title_lower.contains("dashboard") {
         " active"
