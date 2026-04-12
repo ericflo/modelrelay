@@ -107,10 +107,12 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
         .unwrap_or_default();
 
         let html = admin_dashboard_html(&user.email, &keys, &csrf_field);
-        Html(modelrelay_web::templates::page_shell(
+        Html(modelrelay_web::templates::page_shell_custom(
             "Dashboard",
             &html,
             true,
+            "",
+            "",
         ))
         .into_response()
     } else {
@@ -154,10 +156,12 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
             api_key_display.as_deref(),
             &csrf_field,
         );
-        Html(modelrelay_web::templates::page_shell(
+        Html(modelrelay_web::templates::page_shell_custom(
             "Dashboard",
             &html,
             true,
+            "",
+            "",
         ))
         .into_response()
     }
@@ -605,109 +609,192 @@ fn status_badge(status: &str) -> &'static str {
     }
 }
 
+fn dashboard_css() -> &'static str {
+    "<style>\
+    /* ── Dashboard Layout ── */\
+    .dash-header { margin-bottom: 32px; }\
+    .dash-header h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 4px; }\
+    .dash-header p { color: #8b949e; font-size: 0.9rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }\
+    .dash-header strong { color: #e6edf3; }\
+    .dash-section-label {\
+      font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;\
+      text-transform: uppercase; color: #484f58; margin-bottom: 12px;\
+    }\
+    .dash-grid {\
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 32px;\
+    }\
+    .dash-grid .card { margin-bottom: 0; }\
+    \
+    /* ── Skeleton Loading ── */\
+    .dash-skel {\
+      background: linear-gradient(90deg, #161b22 25%, #1c2129 50%, #161b22 75%);\
+      background-size: 200% 100%; animation: dash-pulse 1.5s ease-in-out infinite;\
+      border-radius: 6px; height: 14px; margin-bottom: 10px;\
+    }\
+    .dash-skel:last-child { width: 60%; margin-bottom: 0; }\
+    .dash-skel-w80 { width: 80%; }\
+    .dash-skel-w70 { width: 70%; }\
+    .dash-skel-w50 { width: 50%; }\
+    .dash-skel-w45 { width: 45%; }\
+    @keyframes dash-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }\
+    \
+    /* ── Card Variants ── */\
+    .card--accent { border-left: 3px solid #7c3aed; }\
+    .card--empty {\
+      border: 1px dashed #30363d; background: #0d1117;\
+      text-align: center; padding: 48px 32px;\
+    }\
+    .card--empty h2 { margin-bottom: 8px; }\
+    .card--empty p { color: #8b949e; margin-bottom: 20px; }\
+    \
+    /* ── API Key Display ── */\
+    .key-wrap { position: relative; margin-top: 12px; }\
+    .key-wrap .key-display { padding-right: 90px; }\
+    .copy-btn {\
+      position: absolute; top: 8px; right: 8px;\
+      padding: 6px 14px; font-size: 0.8rem;\
+      background: #30363d; color: #e6edf3;\
+      border: 1px solid #3d444d; border-radius: 6px;\
+      cursor: pointer; font-family: inherit; font-weight: 600;\
+      transition: background 0.15s, border-color 0.15s;\
+    }\
+    .copy-btn:hover { background: #3d444d; border-color: #484f58; }\
+    .copy-btn.copied { background: #064e3b; border-color: #34d399; color: #34d399; }\
+    .key-actions {\
+      margin-top: 14px; display: flex; gap: 16px; flex-wrap: wrap;\
+    }\
+    .key-actions a { color: #7c3aed; font-size: 0.9rem; font-weight: 600; }\
+    \
+    /* ── Workers Table ── */\
+    .workers-table {\
+      width: 100%; margin-top: 12px; border-collapse: collapse;\
+    }\
+    .workers-table th {\
+      font-weight: 600; color: #484f58;\
+      border-bottom: 1px solid #21262d;\
+      padding: 6px 12px 6px 0; text-align: left;\
+      font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em;\
+    }\
+    .workers-table td { padding: 10px 12px 10px 0; border-bottom: 1px solid #161b22; color: #c9d1d9; }\
+    .workers-table .worker-models { font-family: monospace; font-size: 0.85em; color: #8b949e; }\
+    \
+    /* ── Quick Links ── */\
+    .dash-links {\
+      display: grid; grid-template-columns: repeat(3, 1fr);\
+      gap: 16px; margin-bottom: 32px;\
+    }\
+    .dash-link {\
+      margin-bottom: 0; text-decoration: none;\
+      transition: border-color 0.2s, transform 0.15s;\
+    }\
+    .dash-link:hover { border-color: #30363d; text-decoration: none; transform: translateY(-1px); }\
+    .dash-link h3 { font-size: 0.95rem; margin-bottom: 4px; color: #e6edf3; }\
+    .dash-link p { color: #8b949e; font-size: 0.85rem; margin: 0; }\
+    \
+    /* ── Admin Keys Table ── */\
+    .keys-table { width: 100%; border-collapse: collapse; }\
+    .keys-table th {\
+      font-weight: 600; color: #484f58;\
+      border-bottom: 1px solid #21262d;\
+      padding: 8px 12px 8px 0; text-align: left;\
+      font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em;\
+    }\
+    .keys-table td { padding: 10px 12px 10px 0; border-bottom: 1px solid #161b22; }\
+    .keys-table td:last-child { text-align: right; }\
+    .keys-table code { font-size: 0.8em; word-break: break-all; color: #7c3aed; }\
+    .keys-date { color: #484f58; white-space: nowrap; font-size: 0.85em; }\
+    \
+    /* ── Buttons ── */\
+    .btn-revoke {\
+      background: transparent; padding: 4px 12px; font-size: 0.8rem;\
+      border: 1px solid #da3633; color: #f87171;\
+      border-radius: 6px; cursor: pointer; font-family: inherit; font-weight: 600;\
+      transition: background 0.15s;\
+    }\
+    .btn-revoke:hover { background: rgba(248,113,113,0.08); }\
+    .btn-generate { margin-top: 16px; }\
+    .billing-link {\
+      background: none; border: none; color: #7c3aed; cursor: pointer;\
+      font-size: 0.9rem; font-weight: 600; font-family: inherit; padding: 0;\
+    }\
+    .billing-link:hover { text-decoration: underline; }\
+    \
+    /* ── Misc ── */\
+    .empty-msg { color: #484f58; font-size: 0.9rem; }\
+    .connect-link { margin-top: 12px; }\
+    .connect-link a { color: #7c3aed; font-size: 0.9rem; font-weight: 600; }\
+    .per-model-info { margin-top: 8px; color: #484f58; font-size: 0.85em; }\
+    .relay-error { margin-top: 8px; color: #484f58; }\
+    .provisioned-msg { margin-top: 12px; color: #8b949e; }\
+    .billing-form { margin-top: 12px; }\
+    \
+    /* ── Responsive ── */\
+    @media (max-width: 768px) {\
+      .dash-grid { grid-template-columns: 1fr; }\
+      .dash-links { grid-template-columns: 1fr; }\
+      .key-wrap .key-display { padding-right: 16px; font-size: 0.85rem; }\
+      .copy-btn { position: static; display: block; margin-top: 10px; width: 100%; text-align: center; }\
+      .card--empty { padding: 32px 20px; }\
+      .workers-table th:nth-child(3), .workers-table td:nth-child(3) { display: none; }\
+      .keys-table th:nth-child(3), .keys-table td:nth-child(3) { display: none; }\
+    }\
+    @media (max-width: 480px) {\
+      .dash-header h1 { font-size: 1.25rem; }\
+      .dash-section-label { font-size: 0.65rem; }\
+      .key-wrap .key-display { font-size: 0.78rem; padding: 10px 12px; }\
+      .copy-btn { padding: 8px 12px; font-size: 0.78rem; }\
+      .key-actions { flex-direction: column; gap: 10px; }\
+      .workers-table th, .workers-table td { padding: 6px 8px 6px 0; font-size: 0.85em; }\
+      .keys-table th, .keys-table td { padding: 6px 8px 6px 0; font-size: 0.85em; }\
+      .btn-revoke { padding: 4px 8px; font-size: 0.75em; }\
+      .dash-links { gap: 12px; }\
+      .dash-link h3 { font-size: 0.9rem; }\
+      .dash-link p { font-size: 0.8rem; }\
+      .card--empty { padding: 24px 14px; }\
+    }\
+    </style>"
+}
+
 #[allow(clippy::too_many_lines)]
 fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> String {
     let email_escaped = html_escape(email);
+    let mut out = String::from(dashboard_css());
 
-    // ── Admin dashboard-specific styles ──
-    let admin_css = "\
-<style>\
-  .admin-container { max-width: 1100px; margin: 0 auto; }\
-  .admin-header { margin-bottom: 32px; }\
-  .admin-header p { color: #8b949e; font-size: 0.95rem; }\
-  .admin-header strong { color: #e6edf3; }\
-  .admin-section-label { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #484f58; margin-bottom: 12px; }\
-\
-  /* API key table */\
-  .admin-key-code { font-size: 0.85em; word-break: break-all; }\
-  .admin-key-created { color: #8b949e; white-space: nowrap; }\
-  .admin-key-actions { text-align: right; }\
-  .admin-key-actions form { display: inline; }\
-  .btn-revoke { background: #d73a49; padding: 4px 12px; font-size: 0.85em; border: 1px solid #da3633; color: #fff; border-radius: 6px; cursor: pointer; font-family: inherit; font-weight: 600; transition: background 0.15s; }\
-  .btn-revoke:hover { background: #b62324; text-decoration: none; }\
-  .admin-empty { color: #8b949e; margin-top: 8px; }\
-  .admin-generate { margin-top: 16px; }\
-\
-  /* Status grid — 2 columns on desktop */\
-  .admin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }\
-  .admin-grid .card { margin-bottom: 0; }\
-\
-  /* Workers table (generated by JS) */\
-  .workers-table { width: 100%; margin-top: 8px; border-collapse: collapse; }\
-  .workers-table th { font-weight: 600; color: #8b949e; border-bottom: 1px solid #21262d; padding: 8px 12px 8px 0; text-align: left; }\
-  .workers-table td { padding: 8px 12px 8px 0; }\
-  .workers-table .worker-models { font-family: monospace; font-size: 0.85em; }\
-  .workers-connect { margin-top: 12px; }\
-  .workers-connect a { color: #7c3aed; font-size: 0.9em; font-weight: 600; }\
-\
-  /* Loading skeleton */\
-  .admin-skel { background: linear-gradient(90deg, #161b22 25%, #1c2129 50%, #161b22 75%); background-size: 200% 100%; animation: admin-skel-pulse 1.5s ease-in-out infinite; border-radius: 6px; }\
-  @keyframes admin-skel-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }\
-  .admin-skel-line { height: 14px; margin-bottom: 10px; }\
-  .admin-skel-line:last-child { width: 60%; margin-bottom: 0; }\
-  .admin-skel-wrap { margin-top: 12px; }\
-  .admin-skel-w-70 { width: 70%; }\
-  .admin-skel-w-45 { width: 45%; }\
-  .admin-info-table { margin-top: 8px; }\
-\
-  /* Onboarding CTA */\
-  .admin-cta { border-color: #7c3aed; }\
-  .admin-cta p { margin-top: 8px; }\
-  .admin-cta .btn { margin-top: 16px; display: inline-block; }\
-\
-  /* Responsive */\
-  @media (max-width: 768px) {\
-    .admin-grid { grid-template-columns: 1fr; }\
-    .info-table th:nth-child(3), .info-table td:nth-child(3) { display: none; }\
-    .admin-key-code { font-size: 0.8em; }\
-    .workers-table th:nth-child(3), .workers-table td:nth-child(3) { display: none; }\
-  }\
-  @media (max-width: 480px) {\
-    .admin-container { padding: 0 4px; }\
-    .admin-header { margin-bottom: 20px; }\
-    .admin-key-code { font-size: 0.75em; }\
-    .btn-revoke { padding: 4px 8px; font-size: 0.8em; }\
-    .admin-section-label { font-size: 0.7rem; }\
-    .workers-table th, .workers-table td { padding: 6px 8px 6px 0; font-size: 0.85em; }\
-    .admin-cta { padding: 24px 16px; }\
-  }\
-</style>";
-
-    // ── Welcome header ──
-    let header = format!(
-        "{admin_css}\
-         <div class=\"admin-container\">\
-         <div class=\"admin-header\">\
+    // ── Header ──
+    let _ = write!(
+        out,
+        "<div class=\"dash-header\">\
+           <h1>Dashboard</h1>\
            <p>Signed in as <strong>{email_escaped}</strong> \
               <span class=\"badge badge-active\">Admin</span></p>\
          </div>"
     );
 
     // ── Section: API Keys ──
-    let mut keys_html = String::from(
-        "<div class=\"admin-section-label\">API Keys</div>\
-         <div class=\"card\">",
+    out.push_str(
+        "<div class=\"dash-section-label\">API Keys</div>\
+         <div class=\"card\" style=\"margin-bottom:32px;\">",
     );
 
     if keys.is_empty() {
-        keys_html.push_str("<p class=\"admin-empty\">No active API keys. Generate one below.</p>");
+        out.push_str("<p class=\"empty-msg\">No active API keys. Generate one to get started.</p>");
     } else {
-        keys_html.push_str(
-            "<table class=\"info-table\">\
-            <tr><th>Name</th><th>Key</th><th>Created</th><th></th></tr>",
+        out.push_str(
+            "<table class=\"keys-table\">\
+             <tr><th>Name</th><th>Key</th><th>Created</th><th></th></tr>",
         );
         for key in keys {
             let name_escaped = html_escape(&key.name);
             let key_escaped = html_escape(&key.raw_key);
-            let created = key.created_at.format("%Y-%m-%d %H:%M UTC").to_string();
+            let created = key.created_at.format("%b %d, %Y").to_string();
             let _ = write!(
-                keys_html,
+                out,
                 "<tr>\
                    <td>{name_escaped}</td>\
-                   <td><code class=\"admin-key-code\">{key_escaped}</code></td>\
-                   <td class=\"admin-key-created\">{created}</td>\
-                   <td class=\"admin-key-actions\">\
-                     <form method=\"POST\" action=\"/dashboard/keys/{}/revoke\">\
+                   <td><code>{key_escaped}</code></td>\
+                   <td class=\"keys-date\">{created}</td>\
+                   <td>\
+                     <form method=\"POST\" action=\"/dashboard/keys/{}/revoke\" style=\"display:inline\">\
                        {csrf_field}\
                        <button type=\"submit\" class=\"btn-revoke\" \
                          onclick=\"return confirm('Revoke this API key? This cannot be undone.')\">\
@@ -719,90 +806,87 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> St
                 key.id,
             );
         }
-        keys_html.push_str("</table>");
+        out.push_str("</table>");
     }
 
     let _ = write!(
-        keys_html,
-        "<div class=\"admin-generate\">\
+        out,
+        "<div class=\"btn-generate\">\
            <form method=\"POST\" action=\"/dashboard/keys/generate\">\
              {csrf_field}\
-             <button type=\"submit\" class=\"btn\">Generate New API Key</button>\
+             <button type=\"submit\" class=\"btn\">Generate New Key</button>\
            </form>\
          </div>\
-       </div>",
+       </div>"
     );
 
-    // ── Section: Status grid (workers + info) ──
-    let workers_card = format!(
-        "<div class=\"admin-section-label\">Status</div>\
-        <div class=\"admin-grid\">\
-        <div class=\"card\">\
-          <h2>Workers</h2>\
-          <div id=\"admin-workers\">\
-            <div class=\"admin-skel-wrap\">\
-              <div class=\"admin-skel admin-skel-line admin-skel-w-70\"></div>\
-              <div class=\"admin-skel admin-skel-line admin-skel-w-45\"></div>\
-            </div>\
-          </div>\
-          <script>\
-            (function(){{\
-              function poll(){{\
-                fetch('/dashboard/workers',{{credentials:'same-origin'}})\
-                  .then(function(r){{return r.json();}})\
-                  .then(function(d){{\
-                    var el=document.getElementById('admin-workers');\
-                    var ws=d.workers||[];\
-                    if(ws.length===0){{\
-                      el.innerHTML='<p class=\"admin-empty\">No workers connected. <a href=\"/setup\">Set up your first worker &rarr;</a></p>';\
-                      return;\
-                    }}\
-                    var h='<table class=\"workers-table\"><tr><th>Name</th><th>Models</th><th>Load</th></tr>';\
-                    for(var i=0;i<ws.length;i++){{\
-                      var w=ws[i];\
-                      var name=w.worker_name||w.worker_id||'worker';\
-                      var models=(w.models||[]).join(', ');\
-                      var load=w.in_flight_count+'/'+w.max_concurrent;\
-                      h+='<tr><td>'+name+'</td><td class=\"worker-models\">'+models+'</td><td>'+load+'</td></tr>';\
-                    }}\
-                    h+='</table>';\
-                    h+='<div class=\"workers-connect\"><a href=\"/setup\">+ Connect another machine</a></div>';\
-                    el.innerHTML=h;\
-                  }})\
-                  .catch(function(){{\
-                    document.getElementById('admin-workers').innerHTML=\
-                      '<p class=\"admin-empty\">Could not load worker status.</p>';\
-                  }});\
-              }}\
-              poll();\
-              setInterval(poll,5000);\
-            }})();\
-          </script>\
-        </div>\
-        <div class=\"card\">\
-          <h2>Account</h2>\
-          <table class=\"info-table admin-info-table\">\
-            <tr><td>Email</td><td>{email_escaped}</td></tr>\
-            <tr><td>Role</td><td>Administrator</td></tr>\
-          </table>\
-        </div>\
-        </div>"
-    );
-
-    let onboarding_card = if keys.is_empty() {
-        "<div class=\"card admin-cta\">\
-           <h2>&#x1F680; Get Started</h2>\
-           <p>Generate an API key above, then connect your first worker machine.</p>\
-           <p><a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a></p>\
+    // ── Section: System ──
+    let _ = write!(
+        out,
+        "<div class=\"dash-section-label\">System</div>\
+         <div class=\"dash-grid\">\
+           <div class=\"card\">\
+             <h2>Workers</h2>\
+             <div id=\"admin-workers\">\
+               <div class=\"dash-skel dash-skel-w70\"></div>\
+               <div class=\"dash-skel dash-skel-w45\"></div>\
+             </div>\
+             <script>\
+               (function(){{\
+                 function poll(){{\
+                   fetch('/dashboard/workers',{{credentials:'same-origin'}})\
+                     .then(function(r){{return r.json();}})\
+                     .then(function(d){{\
+                       var el=document.getElementById('admin-workers');\
+                       var ws=d.workers||[];\
+                       if(ws.length===0){{\
+                         el.innerHTML='<p class=\"empty-msg\">No workers connected. <a href=\"/setup\">Set up a worker &rarr;</a></p>';\
+                         return;\
+                       }}\
+                       var h='<table class=\"workers-table\"><tr><th>Name</th><th>Models</th><th>Load</th></tr>';\
+                       for(var i=0;i<ws.length;i++){{\
+                         var w=ws[i];\
+                         var name=w.worker_name||w.worker_id||'worker';\
+                         var models=(w.models||[]).join(', ');\
+                         var load=w.in_flight_count+'/'+w.max_concurrent;\
+                         h+='<tr><td>'+name+'</td><td class=\"worker-models\">'+models+'</td><td>'+load+'</td></tr>';\
+                       }}\
+                       h+='</table>';\
+                       h+='<div class=\"connect-link\"><a href=\"/setup\">+ Connect another machine</a></div>';\
+                       el.innerHTML=h;\
+                     }})\
+                     .catch(function(){{\
+                       document.getElementById('admin-workers').innerHTML=\
+                         '<p class=\"empty-msg\">Could not load worker status.</p>';\
+                     }});\
+                 }}\
+                 poll();\
+                 setInterval(poll,5000);\
+               }})();\
+             </script>\
+           </div>\
+           <div class=\"card\">\
+             <h2>Account</h2>\
+             <table class=\"info-table\" style=\"margin-top:8px\">\
+               <tr><td>Email</td><td>{email_escaped}</td></tr>\
+               <tr><td>Role</td><td>Administrator</td></tr>\
+             </table>\
+           </div>\
          </div>"
-            .to_string()
-    } else {
-        String::new()
-    };
+    );
 
-    let close = "</div>"; // close .admin-container
+    // ── Onboarding CTA (only when no keys) ──
+    if keys.is_empty() {
+        out.push_str(
+            "<div class=\"card card--accent\">\
+               <h2>Get Started</h2>\
+               <p>Generate an API key above, then connect your first worker machine.</p>\
+               <p style=\"margin-top:16px;\"><a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a></p>\
+             </div>",
+        );
+    }
 
-    format!("{header}\n{keys_html}\n{workers_card}\n{onboarding_card}\n{close}")
+    out
 }
 
 #[allow(clippy::too_many_lines)]
@@ -814,181 +898,91 @@ fn subscriber_dashboard_html(
     csrf_field: &str,
 ) -> String {
     let email_escaped = html_escape(email);
+    let mut out = String::from(dashboard_css());
 
-    // ── Dashboard-specific styles ──
-    let dashboard_css = "\
-<style>\
-  .dash-container { max-width: 1100px; margin: 0 auto; }\
-  .dash-header { margin-bottom: 32px; }\
-  .dash-header p { color: #8b949e; font-size: 0.95rem; }\
-  .dash-header strong { color: #e6edf3; }\
-  .dash-section-label { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #484f58; margin-bottom: 12px; }\
-\
-  /* API key card — hero prominence */\
-  .card-api-key { border-color: #7c3aed; }\
-  .card-api-key h2 { display: flex; align-items: center; gap: 8px; }\
-  .key-display { position: relative; margin-top: 12px; }\
-  .key-display code { display: block; padding-right: 80px; }\
-  .copy-btn { position: absolute; top: 8px; right: 8px; padding: 6px 14px; font-size: 0.8rem; background: #30363d; color: #e6edf3; border: 1px solid #3d444d; border-radius: 6px; cursor: pointer; transition: background 0.15s, border-color 0.15s; font-family: inherit; font-weight: 600; }\
-  .copy-btn:hover { background: #3d444d; border-color: #484f58; }\
-  .copy-btn.copied { background: #064e3b; border-color: #34d399; color: #34d399; }\
-  .key-actions { margin-top: 14px; display: flex; gap: 16px; flex-wrap: wrap; }\
-  .key-actions a { color: #7c3aed; font-size: 0.9rem; font-weight: 600; }\
-\
-  /* Status grid — 2 columns on desktop, 1 on mobile */\
-  .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }\
-  .dash-grid .card { margin-bottom: 0; }\
-\
-  /* Quick start links — 3 columns on desktop, stack on mobile */\
-  .dash-quick-links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }\
-  .dash-quick-link { margin-bottom: 0; text-decoration: none; transition: border-color 0.2s; }\
-  .dash-quick-link:hover { border-color: #30363d; text-decoration: none; }\
-  .dash-quick-link h2 { font-size: 1rem; }\
-  .dash-quick-link p { color: #8b949e; font-size: 0.85rem; margin-top: 4px; }\
-\
-  /* Empty state CTA */\
-  .card-empty-cta { border: 1px dashed #30363d; background: #0d1117; text-align: center; padding: 40px 32px; }\
-  .card-empty-cta h2 { font-size: 1.1rem; margin-bottom: 8px; }\
-  .card-empty-cta p { color: #8b949e; margin-bottom: 20px; }\
-  .card-empty-cta .btn { padding: 14px 36px; font-size: 1.1rem; }\
-\
-  /* Loading skeleton animation */\
-  .skel { background: linear-gradient(90deg, #161b22 25%, #1c2129 50%, #161b22 75%); background-size: 200% 100%; animation: skel-pulse 1.5s ease-in-out infinite; border-radius: 6px; }\
-  @keyframes skel-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }\
-  .skel-line { height: 14px; margin-bottom: 10px; }\
-  .skel-line:last-child { width: 60%; margin-bottom: 0; }\
-  .skel-wrap { margin-top: 12px; }\
-  .skel-w-80 { width: 80%; }\
-  .skel-w-70 { width: 70%; }\
-  .skel-w-50 { width: 50%; }\
-  .skel-w-45 { width: 45%; }\
-\
-  /* JS-injected relay stats elements */\
-  .relay-table { margin-top: 8px; }\
-  .relay-cta { margin-top: 16px; padding: 24px 20px; border-radius: 8px; }\
-  .relay-cta h2 { font-size: 1rem; }\
-  .relay-cta p { margin-bottom: 14px; }\
-  .relay-cta .btn { padding: 10px 24px; font-size: 0.95rem; }\
-  .per-model-info { margin-top: 8px; color: #8b949e; font-size: 0.85em; }\
-  .relay-error { margin-top: 8px; color: #8b949e; }\
-  .provisioned-msg { margin-top: 12px; color: #8b949e; }\
-  .sub-badge-wrap { margin-top: 8px; }\
-  .billing-form { margin-top: 12px; }\
-  .back-link { margin-top: 16px; }\
-  .pricing-link { margin-top: 8px; }\
-\
-  /* Billing link */\
-  .billing-link { background: none; border: none; color: #7c3aed; cursor: pointer; font-size: 0.9rem; font-weight: 600; font-family: inherit; padding: 0; }\
-  .billing-link:hover { text-decoration: underline; }\
-\
-  /* Responsive */\
-  @media (max-width: 768px) {\
-    .dash-grid { grid-template-columns: 1fr; }\
-    .dash-quick-links { grid-template-columns: 1fr; }\
-    .key-display code { padding-right: 16px; font-size: 0.8rem; }\
-    .copy-btn { position: static; display: block; margin-top: 10px; width: 100%; text-align: center; }\
-    .card-empty-cta { padding: 32px 20px; }\
-    .card-empty-cta .btn { display: block; width: 100%; }\
-  }\
-  @media (max-width: 480px) {\
-    .dash-container { padding: 0 4px; }\
-    .dash-header { margin-bottom: 20px; }\
-    .card { padding: 16px 14px; }\
-    .card-api-key h2 { font-size: 1rem; }\
-    .key-display code { font-size: 0.75rem; }\
-    .copy-btn { padding: 8px 12px; font-size: 0.75rem; }\
-    .dash-section-label { font-size: 0.7rem; }\
-    .card-empty-cta { padding: 24px 14px; }\
-    .card-empty-cta .btn { padding: 12px 20px; font-size: 1rem; }\
-    .relay-cta .btn { padding: 8px 18px; font-size: 0.85rem; }\
-    .key-actions { flex-direction: column; gap: 10px; }\
-    .key-actions a { font-size: 0.85rem; }\
-    .info-table td, .info-table th { padding: 6px 8px 6px 0; font-size: 0.85rem; }\
-    .dash-quick-link h2 { font-size: 0.9rem; }\
-    .dash-quick-link p { font-size: 0.8rem; }\
-  }\
-</style>";
-
-    // ── Welcome header ──
-    let welcome = format!(
-        "{dashboard_css}\
-         <div class=\"dash-container\">\
-         <div class=\"dash-header\">\
+    // ── Header ──
+    let _ = write!(
+        out,
+        "<div class=\"dash-header\">\
+           <h1>Dashboard</h1>\
            <p>Signed in as <strong>{email_escaped}</strong></p>\
          </div>"
     );
 
-    // ── Section: API Key (hero card) ──
-    let api_key_section = {
-        let label = "<div class=\"dash-section-label\">Your API Key</div>";
-        let card = if let Some(s) = sub {
-            if let Some(key) = api_key {
-                format!(
-                    "<div class=\"card card-api-key\">\
-                       <h2>API Key <span class=\"badge badge-active\">Active</span></h2>\
-                       <div class=\"key-display\">\
-                         <code id=\"api-key-value\">{}</code>\
-                         <button class=\"copy-btn\" id=\"copy-btn\" type=\"button\">Copy</button>\
-                       </div>\
-                       <div class=\"key-actions\">\
-                         <a href=\"/integrate\">Integration snippets &rarr;</a>\
-                         <a href=\"/setup\">Connect a worker &rarr;</a>\
-                       </div>\
-                     </div>\
-                     <script>\
-                       document.getElementById('copy-btn').addEventListener('click',function(){{\
-                         var btn=this;\
-                         navigator.clipboard.writeText(document.getElementById('api-key-value').textContent).then(function(){{\
-                           btn.textContent='Copied!';\
-                           btn.classList.add('copied');\
-                           setTimeout(function(){{ btn.textContent='Copy'; btn.classList.remove('copied'); }},2000);\
-                         }});\
-                       }});\
-                     </script>",
-                    html_escape(key),
-                )
-            } else if s.api_key_id.is_some() {
-                "<div class=\"card card-api-key\">\
+    // ── Section: API Key ──
+    out.push_str("<div class=\"dash-section-label\">Your API Key</div>");
+
+    if let Some(s) = sub {
+        if let Some(key) = api_key {
+            let _ = write!(
+                out,
+                "<div class=\"card card--accent\" style=\"margin-bottom:32px;\">\
+                   <h2>API Key <span class=\"badge badge-active\">Active</span></h2>\
+                   <div class=\"key-wrap\">\
+                     <div class=\"key-display\" id=\"api-key-value\">{}</div>\
+                     <button class=\"copy-btn\" id=\"copy-btn\" type=\"button\">Copy</button>\
+                   </div>\
+                   <div class=\"key-actions\">\
+                     <a href=\"/integrate\">Integration snippets &rarr;</a>\
+                     <a href=\"/setup\">Connect a worker &rarr;</a>\
+                   </div>\
+                 </div>\
+                 <script>\
+                   document.getElementById('copy-btn').addEventListener('click',function(){{\
+                     var btn=this;\
+                     navigator.clipboard.writeText(document.getElementById('api-key-value').textContent.trim()).then(function(){{\
+                       btn.textContent='Copied!';\
+                       btn.classList.add('copied');\
+                       setTimeout(function(){{ btn.textContent='Copy'; btn.classList.remove('copied'); }},2000);\
+                     }});\
+                   }});\
+                 </script>",
+                html_escape(key),
+            );
+        } else if s.api_key_id.is_some() {
+            out.push_str(
+                "<div class=\"card card--accent\" style=\"margin-bottom:32px;\">\
                    <h2>API Key <span class=\"badge badge-active\">Provisioned</span></h2>\
                    <p class=\"provisioned-msg\">Your API key has been provisioned. \
                       The raw key was shown once at creation and is stored securely.</p>\
                    <div class=\"key-actions\"><a href=\"/integrate\">Integration snippets &rarr;</a></div>\
-                 </div>"
-                    .to_string()
-            } else if s.status == "active" {
-                "<div class=\"card\">\
+                 </div>",
+            );
+        } else if s.status == "active" {
+            out.push_str(
+                "<div class=\"card\" style=\"margin-bottom:32px;\">\
                    <h2>API Key <span class=\"badge\">Provisioning&hellip;</span></h2>\
-                   <div class=\"skel-wrap\">\
-                     <div class=\"skel skel-line skel-w-80\"></div>\
-                     <div class=\"skel skel-line skel-w-50\"></div>\
+                   <div style=\"margin-top:12px\">\
+                     <div class=\"dash-skel dash-skel-w80\"></div>\
+                     <div class=\"dash-skel dash-skel-w50\"></div>\
                    </div>\
                    <p class=\"provisioned-msg\">Your subscription is active. \
                       Your API key is being provisioned and will appear here shortly.</p>\
-                 </div>"
-                    .to_string()
-            } else {
-                "<div class=\"card-empty-cta card\">\
+                 </div>",
+            );
+        } else {
+            out.push_str(
+                "<div class=\"card card--empty\" style=\"margin-bottom:32px;\">\
                    <h2>Get Your API Key</h2>\
                    <p>An active subscription is required for API key access.</p>\
                    <a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a>\
-                 </div>"
-                    .to_string()
-            }
-        } else {
-            "<div class=\"card-empty-cta card\">\
+                 </div>",
+            );
+        }
+    } else {
+        out.push_str(
+            "<div class=\"card card--empty\" style=\"margin-bottom:32px;\">\
                <h2>Start Routing Inference Requests</h2>\
                <p>Subscribe to get your relay API key and connect your own GPU workers.</p>\
                <a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a>\
-             </div>"
-                .to_string()
-        };
-        format!("{label}{card}")
-    };
+             </div>",
+        );
+    }
 
-    // ── Section: Status grid ──
+    // ── Section: Status ──
     let sub_badge = if let Some(s) = sub {
         format!(
-            "{}<table class=\"info-table relay-table\">\
+            "{}<table class=\"info-table\" style=\"margin-top:8px\">\
                <tr><td>Status</td><td>{}</td></tr>\
                <tr><td>Updated</td><td>{}</td></tr>\
              </table>",
@@ -998,7 +992,7 @@ fn subscriber_dashboard_html(
         )
     } else {
         "<span class=\"badge\">No Active Subscription</span>\
-         <p class=\"pricing-link\"><a href=\"/pricing\">View pricing &rarr;</a></p>"
+         <p style=\"margin-top:8px\"><a href=\"/pricing\">View pricing &rarr;</a></p>"
             .to_string()
     };
 
@@ -1013,16 +1007,15 @@ fn subscriber_dashboard_html(
         String::new()
     };
 
-    let status_section = format!(
+    let _ = write!(
+        out,
         "<div class=\"dash-section-label\">Status</div>\
          <div class=\"dash-grid\">\
            <div class=\"card\">\
-             <h2>Relay Status</h2>\
+             <h2>Relay</h2>\
              <div id=\"relay-stats\">\
-               <div class=\"skel-wrap\">\
-                 <div class=\"skel skel-line skel-w-70\"></div>\
-                 <div class=\"skel skel-line skel-w-45\"></div>\
-               </div>\
+               <div class=\"dash-skel dash-skel-w70\"></div>\
+               <div class=\"dash-skel dash-skel-w45\"></div>\
              </div>\
              <script>\
                (function(){{\
@@ -1034,19 +1027,19 @@ fn subscriber_dashboard_html(
                      var total=0;\
                      for(var k in qd){{if(qd.hasOwnProperty(k))total+=qd[k];}}\
                      var aw=d.active_workers||0;\
-                     var h='<table class=\"info-table relay-table\">'\
+                     var h='<table class=\"info-table\" style=\"margin-top:8px\">'\
                        +'<tr><td>Workers</td><td>'+aw+'</td></tr>'\
-                       +'<tr><td>Queue Depth</td><td>'+total+'</td></tr>'\
+                       +'<tr><td>Queue depth</td><td>'+total+'</td></tr>'\
                        +'</table>';\
                      if(aw===0){{\
-                       h+='<div class=\"card-empty-cta relay-cta\">'\
+                       h+='<div class=\"card card--empty\" style=\"margin-top:16px;padding:24px 20px;\">'\
                          +'<h2>Connect Your First Worker</h2>'\
-                         +'<p>No GPU workers are connected yet. Set one up in minutes.</p>'\
+                         +'<p>No GPU workers are connected. Set one up in minutes.</p>'\
                          +'<a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a>'\
                          +'</div>';\
                      }}\
                      if(Object.keys(qd).length>1){{\
-                       var extra='<p class=\"per-model-info\">Per-model: ';\
+                       var extra='<p class=\"per-model-info\">Per model: ';\
                        for(var m in qd){{if(qd.hasOwnProperty(m))extra+=m+':&nbsp;'+qd[m]+'&ensp;';}}\
                        extra+='</p>';\
                        h+=extra;\
@@ -1062,37 +1055,34 @@ fn subscriber_dashboard_html(
            </div>\
            <div class=\"card\">\
              <h2>Subscription</h2>\
-             <div class=\"sub-badge-wrap\">{sub_badge}</div>\
+             <div>{sub_badge}</div>\
              {billing_btn}\
            </div>\
          </div>"
     );
 
-    // ── Quick start links (only when they have a key) ──
-    let quick_start = if api_key.is_some() {
-        "<div class=\"dash-section-label\">Quick Start</div>\
-         <div class=\"dash-quick-links\">\
-           <a href=\"/setup\" class=\"card dash-quick-link\">\
-             <h2>&#x2699;&#xFE0F; Setup</h2>\
-             <p>Connect a GPU worker machine</p>\
-           </a>\
-           <a href=\"/integrate\" class=\"card dash-quick-link\">\
-             <h2>&#x1F4CB; Integrate</h2>\
-             <p>Code snippets for your favorite tools</p>\
-           </a>\
-           <a href=\"https://ericflo.github.io/modelrelay/\" target=\"_blank\" class=\"card dash-quick-link\">\
-             <h2>&#x1F4D6; Docs</h2>\
-             <p>API reference and examples</p>\
-           </a>\
-         </div>"
-            .to_string()
-    } else {
-        String::new()
-    };
+    // ── Quick Start (only with active key) ──
+    if api_key.is_some() {
+        out.push_str(
+            "<div class=\"dash-section-label\">Quick Start</div>\
+             <div class=\"dash-links\">\
+               <a href=\"/setup\" class=\"card dash-link\">\
+                 <h3>Setup</h3>\
+                 <p>Connect a GPU worker machine</p>\
+               </a>\
+               <a href=\"/integrate\" class=\"card dash-link\">\
+                 <h3>Integrate</h3>\
+                 <p>Code snippets for your favorite tools</p>\
+               </a>\
+               <a href=\"https://ericflo.github.io/modelrelay/\" target=\"_blank\" class=\"card dash-link\">\
+                 <h3>Documentation</h3>\
+                 <p>API reference and examples</p>\
+               </a>\
+             </div>",
+        );
+    }
 
-    let close = "</div>"; // close .dash-container
-
-    format!("{welcome}\n{api_key_section}\n{status_section}\n{quick_start}\n{close}")
+    out
 }
 
 /// Minimal HTML entity escaping for untrusted strings.
