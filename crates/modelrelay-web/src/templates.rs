@@ -558,11 +558,12 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     let wizard_css = r"
     .wizard-progress {
       display:flex; gap:0; margin-bottom:32px; overflow-x:auto;
+      -webkit-overflow-scrolling:touch;
     }
     .wizard-progress .step-indicator {
-      flex:1; text-align:center; padding:12px 4px; font-size:0.75rem;
-      color:#484f58; border-bottom:3px solid #21262d; min-width:90px;
-      transition: color 0.2s, border-color 0.2s; cursor:pointer;
+      flex:1; text-align:center; padding:12px 8px; font-size:0.75rem;
+      color:#484f58; border-bottom:2px solid #21262d; min-width:80px;
+      transition: color 0.3s, border-color 0.3s; cursor:pointer; user-select:none;
     }
     .wizard-progress .step-indicator:hover {
       color:#c9d1d9;
@@ -573,6 +574,9 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     .wizard-progress .step-indicator.done {
       color:#34d399; border-bottom-color:#34d399;
     }
+    .wizard-progress .step-indicator.done::after {
+      content:' \2713'; font-size:0.7rem; font-weight:700;
+    }
 
     .wizard-step { display:none; animation:fadeIn 0.3s ease; }
     .wizard-step.active { display:block; }
@@ -581,11 +585,11 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
       background:#161b22; border:1px solid #21262d; border-radius:12px;
       padding:32px; margin-bottom:24px;
     }
-    .wizard-card h2 { font-size:1.25rem; margin-bottom:16px; }
+    .wizard-card h2 { font-size:1.2rem; margin-bottom:12px; color:#e6edf3; }
     .wizard-card p { color:#8b949e; margin-bottom:12px; line-height:1.7; }
 
     .platform-tabs {
-      display:flex; gap:8px; margin-bottom:20px;
+      display:flex; gap:8px; margin-bottom:20px; flex-wrap:wrap;
     }
     .platform-tabs .tab {
       padding:10px 20px; background:#0d1117; border:1px solid #30363d;
@@ -603,7 +607,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
 
     .hint-box {
       background:#1c1f26; border:1px solid #30363d; border-radius:8px;
-      padding:14px 16px; margin:12px 0; font-size:0.85rem; color:#8b949e;
+      padding:16px; margin:12px 0; font-size:0.85rem; color:#8b949e; line-height:1.7;
     }
     .hint-box strong { color:#e6edf3; }
 
@@ -621,10 +625,11 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     }
     .code-block .copy-btn {
       position:absolute; top:8px; right:8px; padding:4px 10px;
-      font-size:0.75rem; background:#30363d; color:#e6edf3;
-      border:none; border-radius:4px; cursor:pointer;
+      font-size:0.75rem; background:#21262d; color:#8b949e;
+      border:1px solid #30363d; border-radius:6px; cursor:pointer;
+      transition: all 0.2s;
     }
-    .code-block .copy-btn:hover { background:#484f58; }
+    .code-block .copy-btn:hover { background:#30363d; color:#e6edf3; border-color:#484f58; }
 
     .wizard-nav {
       display:flex; justify-content:space-between; align-items:center;
@@ -633,6 +638,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     .wizard-nav .btn { min-width:120px; text-align:center; }
     .wizard-nav .btn-back {
       background:transparent; border:1px solid #30363d; color:#8b949e;
+      transition: all 0.2s;
     }
     .wizard-nav .btn-back:hover { border-color:#7c3aed; color:#e6edf3; }
 
@@ -642,7 +648,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
       margin:16px 0; font-size:0.95rem;
     }
     .status-indicator .pulse {
-      width:12px; height:12px; border-radius:50%; background:#484f58;
+      width:12px; height:12px; border-radius:50%; background:#484f58; flex-shrink:0;
     }
     .status-indicator .pulse.searching {
       background:#fbbf24;
@@ -674,12 +680,41 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     }
     .config-input label { color:#8b949e; font-size:0.85rem; min-width:120px; }
     .config-input input {
-      padding:8px 12px; background:#0d1117; border:1px solid #30363d;
+      padding:10px 14px; background:#0d1117; border:1px solid #30363d;
       border-radius:8px; color:#e6edf3; font-size:0.9rem; flex:1; min-width:200px;
+      transition: border-color 0.2s, box-shadow 0.2s;
     }
-    .config-input input:focus { outline:none; border-color:#7c3aed; }
+    .config-input input:focus { outline:none; border-color:#7c3aed; box-shadow:0 0 0 3px rgba(124,58,237,0.15); }
+
+    details summary { list-style:none; }
+    details summary::-webkit-details-marker { display:none; }
 
     @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+
+    /* Wizard tablet */
+    @media (max-width: 768px) {
+      .wizard-card { padding:24px; }
+      .wizard-card h2 { font-size:1.1rem; }
+      .platform-tabs .tab { padding:8px 14px; font-size:0.85rem; }
+      .config-input { flex-direction:column; align-items:stretch; }
+      .config-input label { min-width:auto; }
+      .config-input input { min-width:auto; }
+    }
+
+    /* Wizard mobile */
+    @media (max-width: 480px) {
+      .wizard-progress { margin-bottom:24px; }
+      .wizard-progress .step-indicator { min-width:60px; padding:10px 4px; font-size:0.65rem; }
+      .wizard-card { padding:20px; }
+      .wizard-nav { flex-direction:column; gap:12px; }
+      .wizard-nav .btn { width:100%; min-width:auto; }
+      .wizard-nav .btn-back { order:1; }
+      .platform-tabs .tab { flex:1; min-width:70px; padding:8px 10px; font-size:0.8rem; text-align:center; }
+      .code-block { padding:12px; font-size:0.8rem; }
+      .code-block .copy-btn { position:static; display:block; margin:0 0 8px auto; }
+      .hint-box { padding:12px; font-size:0.8rem; }
+      .status-indicator { padding:12px; font-size:0.85rem; }
+    }
     ";
 
     let wizard_js = r#"
@@ -1462,16 +1497,16 @@ Get-Service ModelRelayWorker</code>
 
     let logged_in = cloud_config.is_some();
     let setup_nav_links = if logged_in {
-        r#"<a href="/dashboard">Dashboard</a>
-        <a href="/setup" class="active">Setup</a>
-        <a href="/integrate">Integrate</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
+        r#"<a href="/dashboard" class="nav-link">Dashboard</a>
+        <a href="/setup" class="nav-link active">Setup</a>
+        <a href="/integrate" class="nav-link">Integrate</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener" class="nav-link">Docs</a>
         <form method="POST" action="/logout"><button type="submit">Log out</button></form>"#
     } else {
-        r#"<a href="/dashboard">Dashboard</a>
-        <a href="/setup" class="active">Setup</a>
-        <a href="/integrate">Integrate</a>
-        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>"#
+        r#"<a href="/dashboard" class="nav-link">Dashboard</a>
+        <a href="/setup" class="nav-link active">Setup</a>
+        <a href="/integrate" class="nav-link">Integrate</a>
+        <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener" class="nav-link">Docs</a>"#
     };
 
     format!(
@@ -1490,41 +1525,90 @@ Get-Service ModelRelayWorker</code>
     }}
     a {{ color: #7c3aed; text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
-    .container {{ max-width: 720px; margin: 0 auto; padding: 0 24px; }}
+    .container {{ max-width: 900px; margin: 0 auto; padding: 0 24px; }}
 
-    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; }}
-    nav .container {{ display: flex; justify-content: space-between; align-items: center; max-width: 960px; }}
+    /* Nav — matches page_shell */
+    nav {{ padding: 20px 0; border-bottom: 1px solid #21262d; position: relative; }}
+    nav .container {{ display: flex; justify-content: space-between; align-items: center; }}
     .logo {{ font-size: 1.25rem; font-weight: 700; color: #e6edf3; }}
+    .logo:hover {{ text-decoration: none; }}
     .logo span {{ color: #7c3aed; }}
-    .nav-links a {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; }}
-    .nav-links a:hover {{ color: #e6edf3; }}
-    .nav-links a.active {{ color: #7c3aed; }}
+    .nav-links {{ display: flex; align-items: center; gap: 0; }}
+    .nav-links .nav-link {{ color: #8b949e; font-size: 0.9rem; margin-left: 16px; padding: 4px 0; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }}
+    .nav-links .nav-link:hover {{ color: #e6edf3; text-decoration: none; }}
+    .nav-links .nav-link.active {{ color: #e6edf3; border-bottom-color: #7c3aed; }}
     .nav-links form {{ display: inline; }}
-    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; }}
+    .nav-links button {{ background: none; border: none; color: #8b949e; font-size: 0.9rem; cursor: pointer; margin-left: 16px; font-family: inherit; transition: color 0.2s; }}
     .nav-links button:hover {{ color: #e6edf3; }}
 
-    .content {{ padding: 32px 0; }}
-    .content h1 {{ font-size: 1.75rem; margin-bottom: 8px; }}
+    /* Hamburger */
+    .nav-hamburger {{
+      display: none; background: none; border: none; cursor: pointer; padding: 4px;
+      flex-direction: column; justify-content: center; align-items: center; gap: 5px;
+    }}
+    .nav-hamburger span {{
+      display: block; width: 22px; height: 2px; background: #8b949e; border-radius: 1px;
+      transition: transform 0.25s, opacity 0.25s;
+    }}
+    .nav-hamburger:hover span {{ background: #e6edf3; }}
+    .nav-hamburger.open span:nth-child(1) {{ transform: translateY(7px) rotate(45deg); }}
+    .nav-hamburger.open span:nth-child(2) {{ opacity: 0; }}
+    .nav-hamburger.open span:nth-child(3) {{ transform: translateY(-7px) rotate(-45deg); }}
+
+    .content {{ padding: 60px 0; }}
+    .content h1 {{ font-size: 2rem; margin-bottom: 8px; }}
     .subtitle {{ color: #8b949e; margin-bottom: 24px; }}
 
-    footer {{ padding: 40px 0; border-top: 1px solid #21262d; text-align: center; color: #484f58; font-size: 0.85rem; }}
-    footer a {{ color: #8b949e; }}
+    /* Footer — matches page_shell */
+    footer {{ padding: 48px 0; border-top: 1px solid #21262d; }}
+    .footer-content {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }}
+    .footer-left {{ color: #484f58; font-size: 0.85rem; }}
+    .footer-tagline {{ color: #30363d; font-size: 0.8rem; margin-top: 4px; }}
+    .footer-links {{ display: flex; gap: 20px; }}
+    .footer-links a {{ color: #8b949e; font-size: 0.85rem; }}
+    .footer-links a:hover {{ color: #e6edf3; text-decoration: none; }}
 
     code {{ font-family: "SFMono-Regular", Consolas, monospace; }}
 
     .btn {{
       display: inline-block; padding: 10px 20px; background: #7c3aed; color: #fff;
       border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
-      cursor: pointer; text-decoration: none;
+      cursor: pointer; text-decoration: none; transition: background 0.2s;
     }}
     .btn:hover {{ background: #6d28d9; text-decoration: none; }}
+
+    /* Page-level responsive — matches page_shell */
+    @media (max-width: 768px) {{
+      .content {{ padding: 40px 0; }}
+      .content h1 {{ font-size: 1.6rem; }}
+      .nav-hamburger {{ display: flex; }}
+      .nav-links {{
+        display: none; position: absolute; top: 100%; left: 0; right: 0;
+        background: #161b22; border-bottom: 1px solid #21262d;
+        flex-direction: column; padding: 16px 24px; gap: 0; z-index: 100;
+      }}
+      .nav-links.open {{ display: flex; }}
+      .nav-links .nav-link {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; border-bottom: none; }}
+      .nav-links .nav-link.active {{ color: #7c3aed; }}
+      .nav-links form {{ display: block; }}
+      .nav-links button {{ margin-left: 0; padding: 10px 0; font-size: 0.95rem; }}
+      .footer-content {{ flex-direction: column; text-align: center; }}
+    }}
+    @media (max-width: 480px) {{
+      .container {{ padding: 0 16px; }}
+      .content {{ padding: 32px 0; }}
+      .content h1 {{ font-size: 1.4rem; }}
+    }}
     {wizard_css}
   </style>
 </head>
 <body>
   <nav>
-    <div class="container" style="max-width:960px;">
+    <div class="container">
       <a href="/" class="logo">Model<span>Relay</span></a>
+      <button class="nav-hamburger" aria-label="Toggle navigation" onclick="this.classList.toggle('open');this.parentElement.querySelector('.nav-links').classList.toggle('open')">
+        <span></span><span></span><span></span>
+      </button>
       <div class="nav-links">
         {setup_nav_links}
       </div>
@@ -1542,7 +1626,18 @@ Get-Service ModelRelayWorker</code>
 
   <footer>
     <div class="container">
-      &copy; 2026 ModelRelay &middot; <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a> &middot; <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+      <div class="footer-content">
+        <div class="footer-left">
+          &copy; 2026 ModelRelay
+          <div class="footer-tagline">Your GPU workers, our relay. Inference without the infrastructure.</div>
+        </div>
+        <div class="footer-links">
+          <a href="/pricing">Pricing</a>
+          <a href="/integrate">Integration</a>
+          <a href="https://ericflo.github.io/modelrelay/" target="_blank" rel="noopener">Docs</a>
+          <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
     </div>
   </footer>
 

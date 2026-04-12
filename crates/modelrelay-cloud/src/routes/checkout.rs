@@ -21,23 +21,26 @@ fn cancel_page() -> String {
 /// POST /checkout — create a Stripe Checkout Session and redirect to Stripe.
 ///
 /// If the user is logged in, pre-fills their email in the checkout session.
+#[allow(clippy::too_many_lines)]
 pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let Some(ref key) = state.stripe_key else {
-        return Html(
-            "<h1>Billing not configured yet</h1>\
-             <p>Stripe is not set up on this instance. Please check back soon.</p>\
-             <p><a href=\"/\">&larr; Back to home</a></p>",
-        )
+        return Html(modelrelay_web::templates::page_shell(
+            "Billing Not Configured",
+            "<p>Stripe is not set up on this instance. Please check back soon.</p>\
+             <p style=\"margin-top:16px;\"><a href=\"/\">&larr; Back to home</a></p>",
+            false,
+        ))
         .into_response();
     };
 
     let price_id = std::env::var("STRIPE_PRICE_ID").unwrap_or_default();
     if price_id.is_empty() {
-        return Html(
-            "<h1>Billing not configured yet</h1>\
-             <p>No pricing plan is configured. Please check back soon.</p>\
-             <p><a href=\"/\">&larr; Back to home</a></p>",
-        )
+        return Html(modelrelay_web::templates::page_shell(
+            "Billing Not Configured",
+            "<p>No pricing plan is configured. Please check back soon.</p>\
+             <p style=\"margin-top:16px;\"><a href=\"/\">&larr; Back to home</a></p>",
+            false,
+        ))
         .into_response();
     }
 
@@ -89,33 +92,46 @@ pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> R
                 if let Some(url) = body["url"].as_str() {
                     Redirect::to(url).into_response()
                 } else {
-                    Html("<h1>Error</h1><p>Stripe did not return a checkout URL.</p>")
-                        .into_response()
+                    Html(modelrelay_web::templates::page_shell(
+                        "Checkout Error",
+                        "<p>Stripe did not return a checkout URL.</p>\
+                         <p style=\"margin-top:16px;\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
+                        false,
+                    ))
+                    .into_response()
                 }
             }
             Err(e) => {
                 tracing::error!("stripe response parse error: {e}");
-                Html("<h1>Error</h1><p>Could not process Stripe response.</p>").into_response()
+                Html(modelrelay_web::templates::page_shell(
+                    "Checkout Error",
+                    "<p>Could not process Stripe response.</p>\
+                     <p style=\"margin-top:16px;\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
+                    false,
+                ))
+                .into_response()
             }
         },
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
             tracing::error!("stripe API error: {status} — {body}");
-            Html(
-                "<h1>Checkout Error</h1>\
-                 <p>Could not create checkout session. Please try again later.</p>\
-                 <p><a href=\"/pricing\">&larr; Back to pricing</a></p>",
-            )
+            Html(modelrelay_web::templates::page_shell(
+                "Checkout Error",
+                "<p>Could not create checkout session. Please try again later.</p>\
+                 <p style=\"margin-top:16px;\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
+                false,
+            ))
             .into_response()
         }
         Err(e) => {
             tracing::error!("stripe request error: {e}");
-            Html(
-                "<h1>Checkout Error</h1>\
-                 <p>Could not reach payment provider. Please try again later.</p>\
-                 <p><a href=\"/pricing\">&larr; Back to pricing</a></p>",
-            )
+            Html(modelrelay_web::templates::page_shell(
+                "Checkout Error",
+                "<p>Could not reach payment provider. Please try again later.</p>\
+                 <p style=\"margin-top:16px;\"><a href=\"/pricing\">&larr; Back to pricing</a></p>",
+                false,
+            ))
             .into_response()
         }
     }
