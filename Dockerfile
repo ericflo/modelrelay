@@ -45,7 +45,7 @@ RUN --mount=type=cache,id=modelrelay-cargo-registry,target=/usr/local/cargo/regi
     && install -m 0755 target/release/modelrelay-cloud /out/modelrelay-cloud \
     && install -m 0755 target/release/reprovision-server-keys /out/reprovision-server-keys
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS cloud
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS cloud
 WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 \
@@ -56,7 +56,7 @@ COPY --from=build /build/crates/modelrelay-cloud/templates/ /app/templates/
 EXPOSE 8000
 CMD ["modelrelay-cloud"]
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS server
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS server
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
