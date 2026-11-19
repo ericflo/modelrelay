@@ -3,7 +3,7 @@
 FROM rust:1.94.1-slim@sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c142c53fef3e1a AS build
 WORKDIR /build
 
-RUN apt-get update \
+RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -47,7 +47,7 @@ RUN --mount=type=cache,id=modelrelay-cargo-registry,target=/usr/local/cargo/regi
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS cloud
 WORKDIR /app
-RUN apt-get update \
+RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/modelrelay-cloud /usr/local/bin/modelrelay-cloud
@@ -57,7 +57,7 @@ EXPOSE 8000
 CMD ["modelrelay-cloud"]
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS server
-RUN apt-get update \
+RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/modelrelay-server /usr/local/bin/modelrelay-server
