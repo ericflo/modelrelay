@@ -4,21 +4,16 @@ FROM rust:1.94.1-slim@sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c
 WORKDIR /build
 
 RUN apt-get update && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends ca-certificates libssl-dev pkg-config \
+    && apt-get install -y --no-install-recommends ca-certificates git libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-ADD --checksum=sha256:7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428 \
-    https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz \
-    /tmp/cargo-audit.tgz
 ADD --checksum=sha256:9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f \
     https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz \
     /tmp/cargo-deny.tgz
 RUN mkdir -p /opt/modelrelay-ci \
-    && tar -xzf /tmp/cargo-audit.tgz -C /opt/modelrelay-ci --strip-components=1 \
-      cargo-audit-x86_64-unknown-linux-musl-v0.22.2/cargo-audit \
     && tar -xzf /tmp/cargo-deny.tgz -C /opt/modelrelay-ci --strip-components=1 \
       cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny \
-    && rm /tmp/cargo-audit.tgz /tmp/cargo-deny.tgz
+    && rm /tmp/cargo-deny.tgz
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml deny.toml ./
 COPY .cargo/ .cargo/
@@ -28,6 +23,9 @@ COPY docs/ docs/
 # Quality checks and release compilation share one exact source snapshot and
 # one node-local compiler cache. A failed check prevents /out from existing,
 # so neither production target can be published without the complete gate.
+# Audit the resolved workspace graph with every feature. Cargo.lock also retains
+# disabled SQLx drivers (rust-lang/cargo#10801). Vulnerabilities still fail the
+# build; unmaintained notices remain warnings, matching the prior audit policy.
 RUN --mount=type=cache,id=modelrelay-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=modelrelay-cargo-target,target=/build/target,sharing=locked \
     CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo fmt --check \
@@ -35,7 +33,7 @@ RUN --mount=type=cache,id=modelrelay-cargo-registry,target=/usr/local/cargo/regi
       cargo clippy --locked --workspace --exclude modelrelay-desktop --all-targets --all-features -- -D warnings \
     && CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
       cargo test --locked --workspace --exclude modelrelay-desktop \
-    && /opt/modelrelay-ci/cargo-audit audit \
+    && /opt/modelrelay-ci/cargo-deny --all-features --locked check advisories --warn unmaintained \
     && /opt/modelrelay-ci/cargo-deny --all-features --locked check licenses bans sources \
     && cargo build --locked --release \
       -p modelrelay-server -p modelrelay-worker -p modelrelay-cloud \
