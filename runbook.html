@@ -1,0 +1,597 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Operational Runbook - ModelRelay</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Central HTTP LLM proxy that routes inference requests to authenticated remote workers over WebSocket.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="index.html">Introduction</a></li><li class="chapter-item expanded affix "><a href="architecture.html">Architecture</a></li><li class="chapter-item expanded affix "><a href="protocol-walkthrough.html">Protocol Walkthrough</a></li><li class="chapter-item expanded affix "><a href="behavior-contract.html">Behavior Contract</a></li><li class="chapter-item expanded affix "><a href="runbook.html" class="active">Operational Runbook</a></li><li class="chapter-item expanded affix "><a href="tls.html">TLS Setup</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">ModelRelay</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/ericflo/modelrelay" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/ericflo/modelrelay/edit/main/docs/runbook.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="operational-runbook"><a class="header" href="#operational-runbook">Operational Runbook</a></h1>
+<p>This guide covers day-to-day operations for running ModelRelay in
+production.  It assumes you have one <code>modelrelay-server</code> instance and one or
+more <code>modelrelay-worker</code> processes.</p>
+<hr />
+<h2 id="health-checks"><a class="header" href="#health-checks">Health Checks</a></h2>
+<h3 id="proxy-server"><a class="header" href="#proxy-server">Proxy Server</a></h3>
+<p>The proxy server exposes a dedicated <code>/health</code> endpoint:</p>
+<pre><code class="language-bash"># Primary health check — returns JSON with version, worker count, queue depth, and uptime.
+curl -sf http://proxy:8080/health | jq .
+</code></pre>
+<p>Example response:</p>
+<pre><code class="language-json">{
+  "status": "ok",
+  "version": "0.1.6",
+  "workers_connected": 2,
+  "queue_depth": 0,
+  "uptime_secs": 3621.5
+}
+</code></pre>
+<p>Use <code>/health</code> for liveness probes, Kubernetes readiness checks, and
+monitoring.  A <code>workers_connected</code> of 0 means the proxy is running but
+no workers are registered.</p>
+<p>You can also list routable models directly:</p>
+<pre><code class="language-bash">curl -s http://proxy:8080/v1/models | jq '.data[].id'
+</code></pre>
+<h3 id="worker-daemon"><a class="header" href="#worker-daemon">Worker Daemon</a></h3>
+<p>The worker daemon does not expose its own HTTP port — it connects
+<em>outward</em> to the proxy.  Health is observable from the proxy side:</p>
+<pre><code class="language-bash"># Check if workers are registered by listing models.
+curl -s http://proxy:8080/v1/models | jq '.data[].id'
+</code></pre>
+<p>If expected models are missing, the worker is either down or failed to
+register.  Check worker logs for connection errors or authentication
+failures.</p>
+<hr />
+<h2 id="admin-api--monitoring"><a class="header" href="#admin-api--monitoring">Admin API &amp; Monitoring</a></h2>
+<p>ModelRelay includes admin endpoints for inspecting workers, request metrics,
+and managing client API keys. All <code>/admin/*</code> endpoints require a Bearer
+token.</p>
+<h3 id="enabling-admin-endpoints"><a class="header" href="#enabling-admin-endpoints">Enabling Admin Endpoints</a></h3>
+<p>Set <code>MODELRELAY_ADMIN_TOKEN</code> when starting the server:</p>
+<pre><code class="language-bash">modelrelay-server --worker-secret mysecret --admin-token my-admin-secret
+</code></pre>
+<p>Without this token, all <code>/admin/*</code> endpoints return <code>403 Forbidden</code>.</p>
+<h3 id="querying-admin-endpoints"><a class="header" href="#querying-admin-endpoints">Querying Admin Endpoints</a></h3>
+<pre><code class="language-bash">TOKEN="my-admin-secret"
+
+# List connected workers (models, load, capabilities)
+curl -s -H "Authorization: Bearer $TOKEN" http://proxy:8080/admin/workers | jq .
+
+# Request stats and queue depth
+curl -s -H "Authorization: Bearer $TOKEN" http://proxy:8080/admin/stats | jq .
+
+# List client API keys (metadata only, no secrets)
+curl -s -H "Authorization: Bearer $TOKEN" http://proxy:8080/admin/keys | jq .
+</code></pre>
+<h3 id="managing-client-api-keys"><a class="header" href="#managing-client-api-keys">Managing Client API Keys</a></h3>
+<p>When <code>MODELRELAY_REQUIRE_API_KEYS=true</code>, clients must send a valid API key
+as a Bearer token on inference requests.</p>
+<pre><code class="language-bash">TOKEN="my-admin-secret"
+
+# Create a new API key (the secret is returned only at creation time)
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "production-app"}' \
+  http://proxy:8080/admin/keys | jq .
+
+# Revoke a key by ID
+curl -s -X DELETE \
+  -H "Authorization: Bearer $TOKEN" \
+  http://proxy:8080/admin/keys/{key-id}
+</code></pre>
+<p>Clients use the returned secret as a Bearer token:</p>
+<pre><code class="language-bash">curl -H "Authorization: Bearer mr-..." \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3.2:3b", "messages": [{"role": "user", "content": "Hi"}]}' \
+  http://proxy:8080/v1/chat/completions
+</code></pre>
+<h3 id="web-dashboard--setup-wizard"><a class="header" href="#web-dashboard--setup-wizard">Web Dashboard &amp; Setup Wizard</a></h3>
+<p>The proxy serves a built-in web UI:</p>
+<ul>
+<li><strong>Dashboard</strong> — visit <code>http://proxy:8080/dashboard</code> for real-time
+worker status, request metrics, and queue depth.</li>
+<li><strong>Setup Wizard</strong> — visit <code>http://proxy:8080/setup</code> for a step-by-step
+guide to connecting a new worker (platform detection, backend setup,
+binary download, and live connection verification).</li>
+</ul>
+<p>The wizard is always accessible, not just on first run — use it whenever
+you add another GPU box.</p>
+<h3 id="troubleshooting-admin-features"><a class="header" href="#troubleshooting-admin-features">Troubleshooting Admin Features</a></h3>
+<p><strong>Admin endpoints return 403:</strong>
+<code>MODELRELAY_ADMIN_TOKEN</code> is not set on the server, or the <code>Authorization</code>
+header doesn't match. Verify the token value and ensure the header format
+is <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+<p><strong>Client requests return 401 when API key auth is enabled:</strong>
+The client is not sending a Bearer token, or the key has been revoked.
+Create a new key via <code>POST /admin/keys</code> and ensure the client sends
+<code>Authorization: Bearer &lt;key&gt;</code>.</p>
+<p><strong>API key auth not taking effect:</strong>
+<code>MODELRELAY_REQUIRE_API_KEYS</code> must be set to <code>true</code>. When <code>false</code>
+(the default), inference endpoints accept unauthenticated requests.</p>
+<hr />
+<h2 id="checking-worker-registration"><a class="header" href="#checking-worker-registration">Checking Worker Registration</a></h2>
+<p>After starting a new worker, confirm it registered:</p>
+<pre><code class="language-bash"># Should include the worker's advertised models.
+curl -s http://proxy:8080/v1/models | jq .
+</code></pre>
+<p>If a worker's models don't appear within ~10 seconds:</p>
+<ol>
+<li><strong>Check the worker secret</strong> — does <code>WORKER_SECRET</code> on the worker
+match the proxy?</li>
+<li><strong>Check connectivity</strong> — can the worker reach <code>PROXY_URL</code>?
+<pre><code class="language-bash">curl -v http://proxy:8080/v1/worker/connect
+# Should get 400 or upgrade-required, not a connection error
+</code></pre>
+</li>
+<li><strong>Check worker logs</strong> — look for <code>register</code> / <code>register_ack</code> messages
+or error lines.</li>
+</ol>
+<hr />
+<h2 id="draining-a-worker-gracefully"><a class="header" href="#draining-a-worker-gracefully">Draining a Worker Gracefully</a></h2>
+<p>To remove a worker from rotation without dropping in-flight requests:</p>
+<ol>
+<li>
+<p><strong>Send SIGTERM</strong> to the modelrelay-worker process.  The daemon initiates a
+graceful disconnect — the proxy sends a <code>GracefulShutdown</code> message and
+stops routing new requests to that worker.</p>
+</li>
+<li>
+<p><strong>In-flight requests finish normally.</strong>  The proxy waits up to
+<code>drain_timeout_secs</code> (from the shutdown message) for active requests
+to complete.</p>
+</li>
+<li>
+<p><strong>Once idle, the WebSocket closes.</strong>  The worker process exits.</p>
+</li>
+</ol>
+<pre><code class="language-bash"># Graceful stop via systemd
+systemctl stop modelrelay-worker@gpu-box-1
+
+# Or with Docker
+docker stop --time 60 worker-gpu-box-1
+</code></pre>
+<p><strong>Monitoring drain progress:</strong> Watch the proxy logs for
+<code>"worker drained"</code> or similar messages.  If the worker still has
+in-flight requests, you'll see ongoing <code>ResponseChunk</code> / <code>ResponseComplete</code>
+messages until they finish.</p>
+<hr />
+<h2 id="scaling-workers"><a class="header" href="#scaling-workers">Scaling Workers</a></h2>
+<h3 id="adding-a-worker"><a class="header" href="#adding-a-worker">Adding a worker</a></h3>
+<p>Start a new <code>modelrelay-worker</code> instance pointing at the same proxy:</p>
+<pre><code class="language-bash">PROXY_URL=http://proxy:8080 \
+WORKER_SECRET=your-secret \
+WORKER_NAME=gpu-box-4 \
+BACKEND_URL=http://localhost:8000 \
+  modelrelay-worker --models llama3-8b
+</code></pre>
+<p>The proxy discovers it within seconds via the WebSocket registration
+handshake.  No proxy restart or config change needed.</p>
+<h3 id="removing-a-worker"><a class="header" href="#removing-a-worker">Removing a worker</a></h3>
+<p>Use the graceful drain procedure above.  The proxy automatically routes
+around disconnected workers.</p>
+<h3 id="scaling-the-proxy"><a class="header" href="#scaling-the-proxy">Scaling the proxy</a></h3>
+<p>The proxy is a single-process server.  To scale:</p>
+<ul>
+<li><strong>Vertical:</strong> increase <code>MAX_QUEUE_LEN</code> and system file descriptor limits.</li>
+<li><strong>Horizontal:</strong> run multiple proxy instances behind a load balancer,
+but note that each worker connects to one proxy.  Workers must be
+distributed across proxy instances manually or via DNS round-robin.</li>
+</ul>
+<hr />
+<h2 id="log-interpretation"><a class="header" href="#log-interpretation">Log Interpretation</a></h2>
+<h3 id="proxy-server-1"><a class="header" href="#proxy-server-1">Proxy Server</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Log pattern</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>worker registered</code> / <code>register_ack</code></td><td>Worker connected and authenticated</td></tr>
+<tr><td><code>request dispatched</code></td><td>Request sent to a worker</td></tr>
+<tr><td><code>response complete</code></td><td>Worker returned a result</td></tr>
+<tr><td><code>worker heartbeat timed out</code></td><td>Worker missed pings — WebSocket closed</td></tr>
+<tr><td><code>request requeued</code></td><td>Worker died mid-request, retrying on another worker</td></tr>
+<tr><td><code>requeue exhausted</code></td><td>Request failed after <code>MAX_REQUEUE_COUNT</code> (3) retries</td></tr>
+<tr><td><code>queue full</code></td><td>Rejected request — queue at <code>MAX_QUEUE_LEN</code> capacity</td></tr>
+<tr><td><code>queue timeout</code></td><td>Request sat in queue longer than <code>QUEUE_TIMEOUT_SECS</code></td></tr>
+<tr><td><code>graceful shutdown</code></td><td>Worker drain initiated</td></tr>
+</tbody></table>
+</div>
+<h3 id="worker-daemon-1"><a class="header" href="#worker-daemon-1">Worker Daemon</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Log pattern</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>connected to proxy</code></td><td>WebSocket connection established</td></tr>
+<tr><td><code>registered</code></td><td>Registration acknowledged by proxy</td></tr>
+<tr><td><code>forwarding request</code></td><td>Proxying a request to the local backend</td></tr>
+<tr><td><code>backend error</code></td><td>Local backend returned an error or is unreachable</td></tr>
+<tr><td><code>cancelled</code></td><td>Proxy sent a cancel for an in-flight request</td></tr>
+<tr><td><code>graceful shutdown</code></td><td>Drain in progress, finishing active requests</td></tr>
+</tbody></table>
+</div>
+<h3 id="adjusting-log-verbosity"><a class="header" href="#adjusting-log-verbosity">Adjusting log verbosity</a></h3>
+<p>Set <code>LOG_LEVEL</code> environment variable on either component:</p>
+<pre><code class="language-bash">LOG_LEVEL=debug modelrelay-server   # trace, debug, info (default), warn, error
+LOG_LEVEL=debug modelrelay-worker
+</code></pre>
+<hr />
+<h2 id="common-failure-modes"><a class="header" href="#common-failure-modes">Common Failure Modes</a></h2>
+<h3 id="worker-cant-connect-to-proxy"><a class="header" href="#worker-cant-connect-to-proxy">Worker can't connect to proxy</a></h3>
+<p><strong>Symptoms:</strong> Worker logs show connection refused or timeouts.</p>
+<p><strong>Checklist:</strong></p>
+<ol>
+<li>Is the proxy running?  <code>curl http://proxy:8080/v1/models</code></li>
+<li>Is <code>PROXY_URL</code> correct?  The worker connects to
+<code>{PROXY_URL}/v1/worker/connect</code> via WebSocket.</li>
+<li>Firewall / network: the worker makes an <em>outbound</em> connection to the
+proxy — no inbound ports needed on the worker machine.</li>
+<li>If using TLS (nginx/reverse proxy in front), ensure WebSocket upgrade
+headers are forwarded.  See the <a href="tls.html">TLS Setup guide</a>.</li>
+</ol>
+<h3 id="worker-registers-but-requests-fail"><a class="header" href="#worker-registers-but-requests-fail">Worker registers but requests fail</a></h3>
+<p><strong>Symptoms:</strong> <code>/v1/models</code> shows the model, but requests return 502 or
+timeout.</p>
+<p><strong>Checklist:</strong></p>
+<ol>
+<li>Is the local backend running?  <code>curl http://localhost:8000/v1/models</code>
+(or whatever <code>BACKEND_URL</code> is set to)</li>
+<li>Does the backend support the requested endpoint?
+(<code>/v1/chat/completions</code>, <code>/v1/messages</code>, <code>/v1/responses</code>)</li>
+<li>Check worker logs for <code>backend error</code> messages.</li>
+<li>Try a direct request to the backend to isolate the issue.</li>
+</ol>
+<h3 id="requests-queue-but-never-complete"><a class="header" href="#requests-queue-but-never-complete">Requests queue but never complete</a></h3>
+<p><strong>Symptoms:</strong> Clients hang, then get a timeout error after
+<code>QUEUE_TIMEOUT_SECS</code>.</p>
+<p><strong>Causes:</strong></p>
+<ul>
+<li>No workers are connected (check <code>/v1/models</code>)</li>
+<li>Workers are at capacity (<code>max_concurrent</code> reached on all workers)</li>
+<li>Workers are connected but not advertising the requested model</li>
+</ul>
+<p><strong>Fix:</strong> Add more workers, increase <code>max_concurrent</code> if the hardware
+allows, or reduce <code>QUEUE_TIMEOUT_SECS</code> to fail faster.</p>
+<h3 id="streaming-responses-arrive-corrupted"><a class="header" href="#streaming-responses-arrive-corrupted">Streaming responses arrive corrupted</a></h3>
+<p><strong>Symptoms:</strong> SSE chunks arrive garbled or out of order.</p>
+<p><strong>Checklist:</strong></p>
+<ol>
+<li>Ensure no intermediate proxy is buffering.  Disable response
+buffering in nginx:
+<pre><code>proxy_buffering off;
+</code></pre>
+</li>
+<li>If using a CDN or reverse proxy, ensure it supports chunked transfer
+encoding and doesn't aggregate small writes.</li>
+</ol>
+<h3 id="high-memory-usage-on-the-proxy"><a class="header" href="#high-memory-usage-on-the-proxy">High memory usage on the proxy</a></h3>
+<p><strong>Symptoms:</strong> Proxy RSS grows over time.</p>
+<p><strong>Causes:</strong></p>
+<ul>
+<li>Large queue of pending requests (each holds the full request body)</li>
+<li>Many concurrent streaming responses with large chunk buffers</li>
+</ul>
+<p><strong>Fix:</strong> Lower <code>MAX_QUEUE_LEN</code>, set <code>QUEUE_TIMEOUT_SECS</code> to a shorter
+value, or add workers to drain the queue faster.</p>
+<h3 id="worker-keeps-reconnecting"><a class="header" href="#worker-keeps-reconnecting">Worker keeps reconnecting</a></h3>
+<p><strong>Symptoms:</strong> Worker logs show repeated connect/disconnect cycles.</p>
+<p><strong>Causes:</strong></p>
+<ul>
+<li>Heartbeat timeout — the worker or network is too slow to respond to
+pings within <code>HEARTBEAT_INTERVAL</code></li>
+<li><code>WORKER_SECRET</code> mismatch — worker connects, fails auth, gets
+disconnected, retries</li>
+</ul>
+<p><strong>Fix:</strong> Check secrets match, check network latency between worker and
+proxy.</p>
+<hr />
+<h2 id="configuration-quick-reference"><a class="header" href="#configuration-quick-reference">Configuration Quick Reference</a></h2>
+<h3 id="proxy-server-2"><a class="header" href="#proxy-server-2">Proxy Server</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Env Var</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>LISTEN_ADDR</code></td><td><code>127.0.0.1:8080</code></td><td>HTTP listen address</td></tr>
+<tr><td><code>PROVIDER_NAME</code></td><td><code>local</code></td><td>Provider name for routing</td></tr>
+<tr><td><code>WORKER_SECRET</code></td><td><em>(required)</em></td><td>Shared secret for worker auth</td></tr>
+<tr><td><code>MAX_QUEUE_LEN</code></td><td><code>100</code></td><td>Max queued requests before rejecting</td></tr>
+<tr><td><code>QUEUE_TIMEOUT_SECS</code></td><td><code>30</code></td><td>How long a request can wait in queue</td></tr>
+<tr><td><code>REQUEST_TIMEOUT_SECS</code></td><td><code>300</code></td><td>Total request timeout (5 min)</td></tr>
+<tr><td><code>LOG_LEVEL</code></td><td><code>info</code></td><td>Log verbosity</td></tr>
+<tr><td><code>MODELRELAY_ADMIN_TOKEN</code></td><td><em>(none)</em></td><td>Bearer token for <code>/admin/*</code> endpoints (if unset, admin returns 403)</td></tr>
+<tr><td><code>MODELRELAY_REQUIRE_API_KEYS</code></td><td><code>false</code></td><td>When <code>true</code>, client requests require a valid API key</td></tr>
+</tbody></table>
+</div>
+<h3 id="worker-daemon-2"><a class="header" href="#worker-daemon-2">Worker Daemon</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Env Var</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>PROXY_URL</code></td><td><code>http://127.0.0.1:8080</code></td><td>Proxy server URL</td></tr>
+<tr><td><code>WORKER_SECRET</code></td><td><em>(required)</em></td><td>Must match proxy's secret</td></tr>
+<tr><td><code>WORKER_NAME</code></td><td><code>worker</code></td><td>Human-readable worker name</td></tr>
+<tr><td><code>BACKEND_URL</code></td><td><code>http://127.0.0.1:8000</code></td><td>Local model server URL</td></tr>
+<tr><td><code>LOG_LEVEL</code></td><td><code>info</code></td><td>Log verbosity</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="windows-service"><a class="header" href="#windows-service">Windows Service</a></h2>
+<h3 id="checking-service-status"><a class="header" href="#checking-service-status">Checking Service Status</a></h3>
+<pre><code class="language-powershell">Get-Service ModelRelayServer
+Get-Service ModelRelayWorker
+</code></pre>
+<h3 id="starting-and-stopping"><a class="header" href="#starting-and-stopping">Starting and Stopping</a></h3>
+<pre><code class="language-powershell">Start-Service ModelRelayServer
+Stop-Service ModelRelayServer
+
+Start-Service ModelRelayWorker
+Stop-Service ModelRelayWorker
+</code></pre>
+<p><code>Stop-Service</code> sends a stop control signal and waits for the process to
+exit.  ModelRelay handles this as a graceful shutdown — in-flight
+requests finish before the process terminates.  To set an explicit
+timeout:</p>
+<pre><code class="language-powershell"># Stop with a 60-second timeout (kills the process if it doesn't exit in time)
+Stop-Service ModelRelayServer -NoWait
+Start-Sleep -Seconds 60
+(Get-Service ModelRelayServer).WaitForStatus("Stopped", "00:00:05")
+</code></pre>
+<h3 id="logs"><a class="header" href="#logs">Logs</a></h3>
+<p>Windows Services don't write to stdout by default.  Two options:</p>
+<ol>
+<li>
+<p><strong>Windows Event Log</strong> — ModelRelay writes to the Application log.
+View with:</p>
+<pre><code class="language-powershell">Get-EventLog -LogName Application -Source ModelRelayServer -Newest 50
+</code></pre>
+</li>
+<li>
+<p><strong>File logging via <code>RUST_LOG</code></strong> — set <code>RUST_LOG</code> as a system
+environment variable and redirect output to a file by wrapping the
+binary in a small script, or use the <code>RUST_LOG_FILE</code> convention if
+supported.  The simplest approach:</p>
+<pre><code class="language-powershell">[Environment]::SetEnvironmentVariable("RUST_LOG", "info", "Machine")
+</code></pre>
+</li>
+</ol>
+<h3 id="draining-a-worker"><a class="header" href="#draining-a-worker">Draining a Worker</a></h3>
+<p>To drain a worker gracefully before maintenance:</p>
+<pre><code class="language-powershell"># Stop the service — this triggers graceful shutdown.
+Stop-Service ModelRelayWorker
+
+# Verify it has stopped.
+Get-Service ModelRelayWorker
+</code></pre>
+<p>The worker completes in-flight requests before exiting, identical to the
+<code>systemctl stop</code> behavior on Linux.</p>
+<hr />
+<h2 id="monitoring-checklist"><a class="header" href="#monitoring-checklist">Monitoring Checklist</a></h2>
+<p>For production deployments, monitor these signals:</p>
+<ul>
+<li><input disabled="" type="checkbox"/>
+<strong>Proxy process is up</strong> — HTTP health check on <code>/health</code></li>
+<li><input disabled="" type="checkbox"/>
+<strong>At least one worker registered</strong> — <code>/health</code> returns <code>workers_connected &gt; 0</code></li>
+<li><input disabled="" type="checkbox"/>
+<strong>Queue depth</strong> — <code>/health</code> returns <code>queue_depth</code>; watch for sustained growth</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Request latency</strong> — track time from client request to first byte</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Worker reconnect rate</strong> — frequent reconnects indicate network or auth issues</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Error rates</strong> — 4xx (client errors) vs 5xx (backend/proxy errors)</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Backend health</strong> — each worker's local model server should be independently monitored</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="behavior-contract.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="tls.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="behavior-contract.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="tls.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

@@ -1,0 +1,303 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Introduction - ModelRelay</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Central HTTP LLM proxy that routes inference requests to authenticated remote workers over WebSocket.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="index.html" class="active">Introduction</a></li><li class="chapter-item expanded affix "><a href="architecture.html">Architecture</a></li><li class="chapter-item expanded affix "><a href="protocol-walkthrough.html">Protocol Walkthrough</a></li><li class="chapter-item expanded affix "><a href="behavior-contract.html">Behavior Contract</a></li><li class="chapter-item expanded affix "><a href="runbook.html">Operational Runbook</a></li><li class="chapter-item expanded affix "><a href="tls.html">TLS Setup</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">ModelRelay</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/ericflo/modelrelay" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/ericflo/modelrelay/edit/main/docs/README.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="modelrelay"><a class="header" href="#modelrelay">ModelRelay</a></h1>
+<p><strong>Stop configuring clients for every GPU box. Workers connect out; requests route in.</strong></p>
+<p>You have GPU boxes running <code>llama-server</code> (or Ollama, or vLLM, or anything OpenAI-compatible). Today you either expose each one directly — port forwarding, DNS, firewall rules — or you stick a load balancer in front that doesn't understand LLM streaming or cancellation.</p>
+<p>ModelRelay flips the model: a central proxy receives standard inference requests while worker daemons on your GPU boxes connect <em>out</em> to it over WebSocket. The proxy handles queueing, routing, streaming pass-through, and cancellation propagation. Clients see one stable endpoint and never need to know about your hardware.</p>
+<pre><code>  Clients (curl, Claude Code, LiteLLM, Open WebUI, ...)
+         |
+         |  POST /v1/chat/completions
+         |  POST /v1/messages
+         v
+  +----------------------+
+  |   modelrelay-server  |&lt;--- workers connect out (WebSocket)
+  |   (one stable        |     no inbound ports needed on GPU boxes
+  |    endpoint)         |
+  +----------------------+
+         |  routes request to best available worker
+         v
+  +--------+  +--------+  +--------+
+  |worker-1|  |worker-2|  |worker-3|
+  | llama  |  | ollama |  | vllm   |  &lt;- your GPU boxes,
+  | server |  |        |  |        |    anywhere on any network
+  +--------+  +--------+  +--------+
+</code></pre>
+<h2 id="hosted-version"><a class="header" href="#hosted-version">Hosted Version</a></h2>
+<p>Don't want to run the infrastructure yourself? A fully-managed hosted version is available at <a href="https://modelrelay.io">modelrelay.io</a> — no server setup, no infrastructure to manage. Just get an API key, point your workers at it, and start routing requests. Same open protocol, zero ops burden.</p>
+<h2 id="who-is-this-for"><a class="header" href="#who-is-this-for">Who is this for?</a></h2>
+<ul>
+<li><strong>Home GPU users</strong> running local models who want a single API endpoint across multiple machines</li>
+<li><strong>Teams with on-prem hardware</strong> that need to pool GPU capacity without a service mesh</li>
+<li><strong>Researchers</strong> juggling models across heterogeneous boxes who are tired of updating client configs</li>
+</ul>
+<h2 id="features"><a class="header" href="#features">Features</a></h2>
+<ul>
+<li><strong>OpenAI + Anthropic compatible</strong> — <code>POST /v1/chat/completions</code>, <code>POST /v1/responses</code>, <code>POST /v1/messages</code>, <code>GET /v1/models</code></li>
+<li><strong>No inbound ports on GPU boxes</strong> — workers connect out to the proxy over WebSocket</li>
+<li><strong>Request queueing</strong> — configurable depth and timeout when all workers are busy</li>
+<li><strong>Streaming pass-through</strong> — SSE chunks forwarded with preserved ordering and termination</li>
+<li><strong>End-to-end cancellation</strong> — client disconnect propagates through the proxy to the worker to the backend</li>
+<li><strong>Automatic requeue</strong> — if a worker dies mid-request, the request is requeued to another worker</li>
+<li><strong>Heartbeat and load tracking</strong> — stale workers are cleaned up; workers report current load</li>
+<li><strong>Graceful drain</strong> — workers can shut down while replacement workers pick up queued work</li>
+<li><strong>Cross-platform</strong> — pre-built binaries for Linux, macOS, and Windows (x86_64 + arm64)</li>
+</ul>
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
+<p>The fastest way to get running is with Docker:</p>
+<pre><code class="language-bash"># 1. Run the proxy
+docker run -p 8080:8080 \
+  -e WORKER_SECRET=mysecret \
+  -e LISTEN_ADDR=0.0.0.0:8080 \
+  ghcr.io/ericflo/modelrelay/modelrelay-server:latest
+
+# 2. Run a worker (on a GPU box with llama-server or similar)
+docker run \
+  -e PROXY_URL=http://&lt;proxy-host&gt;:8080 \
+  -e WORKER_SECRET=mysecret \
+  -e BACKEND_URL=http://host.docker.internal:8000 \
+  -e MODELS=llama3.2:3b \
+  ghcr.io/ericflo/modelrelay/modelrelay-worker:latest
+
+# 3. Send a request
+curl http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "llama3.2:3b",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+</code></pre>
+<p>For more installation options (pre-built binaries, Docker Compose, building from source, systemd, Windows services), see the <a href="https://github.com/ericflo/modelrelay">GitHub README</a>.</p>
+<h2 id="documentation"><a class="header" href="#documentation">Documentation</a></h2>
+<ul>
+<li><strong><a href="architecture.html">Architecture</a></strong> — System design, component overview, and data flow</li>
+<li><strong><a href="protocol-walkthrough.html">Protocol Walkthrough</a></strong> — Wire-level protocol details with examples</li>
+<li><strong><a href="behavior-contract.html">Behavior Contract</a></strong> — The exact behavioral guarantees the system provides</li>
+<li><strong><a href="runbook.html">Operational Runbook</a></strong> — Deployment, configuration, monitoring, and troubleshooting</li>
+</ul>
+<h2 id="source--contributing"><a class="header" href="#source--contributing">Source &amp; Contributing</a></h2>
+<p>ModelRelay is MIT-licensed and developed at <a href="https://github.com/ericflo/modelrelay">github.com/ericflo/modelrelay</a>. Bug reports, feature requests, and PRs are welcome — see <a href="https://github.com/ericflo/modelrelay/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a> for details.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+                            <a rel="next prefetch" href="architecture.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+                    <a rel="next prefetch" href="architecture.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
