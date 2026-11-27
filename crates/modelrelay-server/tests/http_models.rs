@@ -568,7 +568,7 @@ async fn models_endpoint_legacy_probe_falls_back_from_v1_models_to_models() {
     );
     let (mut ws, _) = connect_async(req).await.expect("connect legacy worker");
 
-    let legacy_reg = r#"{"type":"register","worker_name":"ryzen-box","models":["inkling-2-mini"],"max_concurrent":2,"protocol_version":"2026-04-bridge-v1","current_load":0}"#;
+    let legacy_reg = r#"{"type":"register","worker_name":"ryzen-box","models":["inkling-2-mini"],"max_concurrent":2,"protocol_version":"2026-04-bridge-v1","current_load":0,"endpoint_prefixes":["/v1/chat/completions","/v1/messages","/v1/responses"]}"#;
     ws.send(Message::Text(legacy_reg.into()))
         .await
         .expect("send legacy register");

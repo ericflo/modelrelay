@@ -1518,8 +1518,6 @@ impl ProxyServerCore {
                 }
                 if worker.native_metadata_reported
                     || worker.is_draining
-                    || !(worker.supports_endpoint("/v1/models")
-                        || worker.supports_endpoint("/models"))
                     || !self.worker_notifiers.contains_key(worker_id)
                     || worker.selection_load() >= worker.max_concurrent
                 {
@@ -1556,7 +1554,6 @@ impl ProxyServerCore {
             if worker.is_draining
                 || worker.native_metadata_reported
                 || worker.selection_load() >= worker.max_concurrent
-                || !worker.supports_endpoint(endpoint_path)
                 || !self.worker_notifiers.contains_key(worker_id)
             {
                 return None;
