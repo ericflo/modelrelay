@@ -573,10 +573,11 @@ const BASE_CSS: &str = r#"
     .auth-value-sub { font-size: 1.02rem; color: var(--text-secondary); margin-bottom: 28px; max-width: 460px; }
     .auth-benefits { list-style: none; display: flex; flex-direction: column; gap: 12px; }
     .auth-benefits li {
-      display: flex; align-items: center; gap: 11px;
-      color: var(--text-primary); font-size: 0.94rem;
+      display: flex; align-items: flex-start; gap: 11px;
+      color: var(--text-primary); font-size: 0.94rem; line-height: 1.5;
     }
-    .auth-benefits li svg { flex-shrink: 0; }
+    .auth-benefits li svg { flex-shrink: 0; margin-top: 3px; }
+    .auth-benefits li > span { min-width: 0; flex: 1; }
     .auth-form-panel {
       background: var(--bg-surface); border: 1px solid var(--border);
       border-radius: var(--radius-xl); padding: 36px; box-shadow: var(--shadow-card);

@@ -227,9 +227,9 @@ fn login_form_html(error: Option<&str>, csrf_field: &str, next: Option<&str>) ->
     <h1 class="auth-value-headline">Welcome back.</h1>
     <p class="auth-value-sub">Log in to copy your API key for Pi <code>auth.json</code>, inspect connected GPU workers, and check live models on <code>api.modelrelay.io</code>.</p>
     <ul class="auth-benefits">
-      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill="var(--accent)" opacity="0.18"/><path d="M5.5 9.5l2 2 5-5" stroke="var(--accent-bright)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>One-click API key &amp; Pi <code>auth.json</code> copy</li>
-      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill="var(--accent)" opacity="0.18"/><path d="M5.5 9.5l2 2 5-5" stroke="var(--accent-bright)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Live worker telemetry, load bars, and model lists</li>
-      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill="var(--accent)" opacity="0.18"/><path d="M5.5 9.5l2 2 5-5" stroke="var(--accent-bright)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Pre-filled <code>curl</code> commands and Pi provider setup</li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill="var(--accent)" opacity="0.18"/><path d="M5.5 9.5l2 2 5-5" stroke="var(--accent-bright)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>One-click API key &amp; Pi <code>auth.json</code> copy</span></li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill="var(--accent)" opacity="0.18"/><path d="M5.5 9.5l2 2 5-5" stroke="var(--accent-bright)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Live worker telemetry, load bars, and model lists</span></li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill="var(--accent)" opacity="0.18"/><path d="M5.5 9.5l2 2 5-5" stroke="var(--accent-bright)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Pre-filled <code>curl</code> commands and Pi provider setup</span></li>
     </ul>
   </div>
   <div class="auth-form-panel">

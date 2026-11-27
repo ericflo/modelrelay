@@ -34,8 +34,8 @@ const PRICING_CSS: &str = r"
   .plan-amount span { font-size: 1rem; font-weight: 500; color: var(--text-muted); }
   .plan-desc { color: var(--text-secondary); font-size: 0.92rem; margin-bottom: 22px; }
   .plan-list { list-style: none; margin: 0 0 28px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
-  .plan-list li { display: flex; align-items: center; gap: 10px; color: var(--text-primary); font-size: 0.9rem; }
-  .plan-list li::before { content: '\2713'; color: var(--success); font-weight: 700; }
+  .plan-list li { position: relative; padding-left: 22px; color: var(--text-primary); font-size: 0.9rem; line-height: 1.5; }
+  .plan-list li::before { content: '\2713'; position: absolute; left: 0; top: 0; color: var(--success); font-weight: 700; }
 
   @media (max-width: 760px) {
     .plans-grid { grid-template-columns: 1fr; }
