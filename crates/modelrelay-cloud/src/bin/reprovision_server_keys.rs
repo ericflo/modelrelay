@@ -106,18 +106,32 @@ async fn main() {
         let hash = sha256_hash(key.raw_key.as_bytes());
         let prefix: String = key.raw_key.chars().take(PREFIX_LEN).collect();
 
-        // INSERT with ON CONFLICT on the unique hash to make this idempotent.
-        // The server table has an index on `hash WHERE revoked_at IS NULL`, but no
-        // UNIQUE constraint on hash itself. We use a CTE with an existence check
-        // instead of ON CONFLICT.
+        // Preserve the server-issued `key_id` UUID (NOT the cloud row PK `key.id`)
+        // so future `DELETE /admin/keys/{key_id}` revocations match the server row.
+        let server_key_id = match key.key_id.parse::<uuid::Uuid>() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!(
+                    "  ! FAILED: cloud row {} has non-UUID key_id '{}': {e}",
+                    key.id, key.key_id
+                );
+                failed += 1;
+                if !continue_on_error {
+                    eprintln!("FATAL: aborting (use --continue-on-error to keep going)");
+                    break;
+                }
+                continue;
+            }
+        };
+
         let result = sqlx::query(
             "INSERT INTO server_api_keys (id, name, prefix, hash, created_at) \
              SELECT $1, $2, $3, $4, $5 \
              WHERE NOT EXISTS ( \
-                 SELECT 1 FROM server_api_keys WHERE hash = $4 \
+                 SELECT 1 FROM server_api_keys WHERE id = $1 OR hash = $4 \
              )",
         )
-        .bind(key.id)
+        .bind(server_key_id)
         .bind(&key.name)
         .bind(&prefix)
         .bind(&hash)

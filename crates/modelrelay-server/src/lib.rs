@@ -3,13 +3,14 @@ pub mod http;
 pub mod worker_socket;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use modelrelay_protocol::{
     HeaderMap, ModelsUpdateMessage, PongMessage, ProviderRouting, RegisterAck, RegisterMessage,
     RequestMessage, ResponseCompleteMessage,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 #[cfg(feature = "postgres")]
 pub use api_keys::PostgresApiKeyStore;
@@ -18,6 +19,8 @@ pub use http::ProxyHttpApp;
 pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
 
 const MAX_REQUEUE_COUNT: usize = 3;
+const STREAM_CHANNEL_CAPACITY: usize = 64;
+const MAX_SELECTION_CURSORS: usize = 4_096;
 
 #[derive(Debug, Default)]
 pub struct ProxyServerCore {
@@ -25,9 +28,11 @@ pub struct ProxyServerCore {
     next_worker_id: usize,
     worker_order: Vec<String>,
     workers: HashMap<String, WorkerState>,
+    worker_notifiers: HashMap<String, Arc<Notify>>,
     provider_queues: HashMap<String, VecDeque<RequestRecord>>,
     provider_queue_policies: HashMap<String, ProviderQueuePolicy>,
-    selection_cursors: HashMap<SelectionKey, usize>,
+    default_queue_policy: ProviderQueuePolicy,
+    selection_cursors: HashMap<SelectionKey, String>,
     active_requests: HashMap<String, ActiveRequestState>,
     pending_worker_requests: HashMap<String, VecDeque<RequestMessage>>,
     pending_http_response_senders: HashMap<String, PendingHttpResponseSender>,
@@ -55,10 +60,71 @@ impl ProxyServerCore {
         self.provider_queue_policies.insert(provider.into(), policy);
     }
 
+    /// Set the fallback queue policy used for any provider queue that does not
+    /// have an explicit entry in `provider_queue_policies`.
+    pub fn set_default_queue_policy(&mut self, policy: ProviderQueuePolicy) {
+        self.default_queue_policy = policy;
+    }
+
+    /// Attach a [`Notify`] handle for a connected worker socket so the core can
+    /// wake the socket task immediately when requests, cancellations, refreshes,
+    /// or shutdown signals are queued for it.
+    pub fn register_worker_notifier(&mut self, worker_id: &str, notify: Arc<Notify>) {
+        if self.workers.contains_key(worker_id) {
+            self.worker_notifiers.insert(worker_id.to_string(), notify);
+            if self.worker_has_pending_outbound(worker_id) {
+                self.notify_worker(worker_id);
+            }
+        }
+    }
+
+    fn worker_has_pending_outbound(&self, worker_id: &str) -> bool {
+        self.pending_worker_requests
+            .get(worker_id)
+            .is_some_and(|q| !q.is_empty())
+            || self
+                .worker_cancel_signals
+                .iter()
+                .any(|s| s.worker_id == worker_id)
+            || self
+                .worker_graceful_shutdown_signals
+                .iter()
+                .any(|s| s.worker_id == worker_id)
+            || self
+                .worker_models_refresh_signals
+                .iter()
+                .any(|s| s.worker_id == worker_id)
+            || self
+                .graceful_shutdown_disconnect_reasons
+                .contains_key(worker_id)
+    }
+
+    fn notify_worker(&self, worker_id: &str) {
+        if let Some(notify) = self.worker_notifiers.get(worker_id) {
+            notify.notify_one();
+        }
+    }
+
+    fn queue_policy(&self, provider: &str) -> ProviderQueuePolicy {
+        self.provider_queue_policies
+            .get(provider)
+            .copied()
+            .unwrap_or(self.default_queue_policy)
+    }
+
     pub fn register_worker(
         &mut self,
         provider: impl Into<String>,
         register: RegisterMessage,
+    ) -> RegisteredWorker {
+        self.register_worker_for_owner(provider, register, None)
+    }
+
+    pub fn register_worker_for_owner(
+        &mut self,
+        provider: impl Into<String>,
+        register: RegisterMessage,
+        owner_key_id: Option<String>,
     ) -> RegisteredWorker {
         let provider = provider.into();
         let worker_id = format!("worker-{}", self.next_worker_id);
@@ -67,8 +133,19 @@ impl ProxyServerCore {
         let sanitized_models = sanitize_models(register.models);
         let warnings = registration_warnings(&register.worker_name, &sanitized_models);
         let current_load = register.current_load.unwrap_or(0) as usize;
+        let max_concurrent = register.max_concurrent.max(1) as usize;
 
         let endpoint_prefixes = register.endpoint_prefixes;
+
+        tracing::info!(
+            worker_id = %worker_id,
+            worker_name = %register.worker_name,
+            provider = %provider,
+            models = ?sanitized_models,
+            max_concurrent,
+            scoped = owner_key_id.is_some(),
+            "worker registered"
+        );
 
         self.worker_order.push(worker_id.clone());
         self.workers.insert(
@@ -76,15 +153,24 @@ impl ProxyServerCore {
             WorkerState {
                 provider,
                 worker_name: register.worker_name,
+                owner_key_id,
                 models: sanitized_models.clone(),
                 endpoint_prefixes: endpoint_prefixes.clone(),
-                max_concurrent: register.max_concurrent.max(1) as usize,
+                max_concurrent,
                 reported_load: current_load,
                 in_flight_requests: Vec::new(),
                 is_draining: false,
                 graceful_shutdown_deadline: None,
             },
         );
+
+        // Immediately drain any compatible queued requests so waiting clients do
+        // not sit stranded until a heartbeat or subsequent completion.
+        while self.worker_has_capacity(&worker_id) {
+            if self.dispatch_next_compatible(&worker_id).is_none() {
+                break;
+            }
+        }
 
         RegisteredWorker {
             worker_id: worker_id.clone(),
@@ -109,6 +195,13 @@ impl ProxyServerCore {
 
         worker.models = sanitize_models(update.models);
         worker.reported_load = update.current_load as usize;
+
+        tracing::debug!(
+            worker_id = %worker_id,
+            models = ?worker.models,
+            reported_load = worker.reported_load,
+            "worker models updated"
+        );
 
         let mut assignments = Vec::new();
         while self.worker_has_capacity(worker_id) {
@@ -172,10 +265,37 @@ impl ProxyServerCore {
         headers: HeaderMap,
         provider_routing: Option<ProviderRouting>,
     ) -> SubmissionOutcome {
+        self.submit_transport_request_for_owner(
+            provider,
+            model,
+            endpoint_path,
+            method,
+            is_streaming,
+            body,
+            headers,
+            provider_routing,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_transport_request_for_owner(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        method: impl Into<String>,
+        is_streaming: bool,
+        body: impl Into<String>,
+        headers: HeaderMap,
+        provider_routing: Option<ProviderRouting>,
+        owner_key_id: Option<String>,
+    ) -> SubmissionOutcome {
         let request = RequestRecord {
             request_id: format!("request-{}", self.next_request_id),
             provider: provider.into(),
             model: model.into(),
+            owner_key_id,
             queued_at: Instant::now(),
             transport: RequestTransport {
                 endpoint_path: endpoint_path.into(),
@@ -195,12 +315,15 @@ impl ProxyServerCore {
             },
         );
 
-        if let Some(worker_id) = self.find_eligible_worker_id(
-            &request.provider,
-            &request.model,
-            &request.transport.endpoint_path,
-            request.provider_routing.as_ref(),
-        ) {
+        if let Some(worker_id) = self.find_eligible_worker_id(&request) {
+            tracing::debug!(
+                request_id = %request.request_id,
+                worker_id = %worker_id,
+                model = %request.model,
+                endpoint = %request.transport.endpoint_path,
+                streaming = request.transport.is_streaming,
+                "request dispatched"
+            );
             self.assign_to_worker(&worker_id, request.clone());
             return SubmissionOutcome::Dispatched(DispatchAssignment {
                 request_id: request.request_id,
@@ -208,33 +331,48 @@ impl ProxyServerCore {
             });
         }
 
-        let queue = self
+        let policy = self.queue_policy(&request.provider);
+        let current_queue_len = self
             .provider_queues
-            .entry(request.provider.clone())
-            .or_default();
-        let policy = self
-            .provider_queue_policies
             .get(&request.provider)
-            .copied()
-            .unwrap_or_default();
+            .map_or(0, VecDeque::len);
 
-        if queue.len() >= policy.max_queue_len {
+        if current_queue_len >= policy.max_queue_len {
             self.active_requests.remove(&request.request_id);
-            let reason = if self.provider_has_compatible_worker(&request.provider, &request.model) {
+            let reason = if self.has_compatible_worker(&request) {
                 RequestFailureReason::QueueFull
             } else {
                 RequestFailureReason::NoWorkersAvailable
             };
+            tracing::warn!(
+                request_id = %request.request_id,
+                provider = %request.provider,
+                model = %request.model,
+                ?reason,
+                "request rejected"
+            );
             return SubmissionOutcome::Rejected(RequestFailure {
                 request_id: request.request_id,
                 reason,
             });
         }
 
+        let queue = self
+            .provider_queues
+            .entry(request.provider.clone())
+            .or_default();
         queue.push_back(request.clone());
+        let queue_len = queue.len();
+        tracing::debug!(
+            request_id = %request.request_id,
+            provider = %request.provider,
+            model = %request.model,
+            queue_len,
+            "request queued"
+        );
         SubmissionOutcome::Queued(QueuedAssignment {
             request_id: request.request_id,
-            queue_len: queue.len(),
+            queue_len,
         })
     }
 
@@ -254,12 +392,15 @@ impl ProxyServerCore {
             worker.is_draining && worker.in_flight_requests.is_empty()
         };
         self.active_requests.remove(request_id);
+        self.pending_http_response_senders.remove(request_id);
 
         if should_disconnect_after_finish {
+            tracing::info!(worker_id = %worker_id, "draining worker finished last request");
             self.graceful_shutdown_disconnect_reasons.insert(
                 worker_id.to_string(),
                 GracefulShutdownDisconnectReason::Completed,
             );
+            self.notify_worker(worker_id);
             self.remove_worker(worker_id);
             return None;
         }
@@ -284,8 +425,37 @@ impl ProxyServerCore {
         headers: HeaderMap,
         provider_routing: Option<ProviderRouting>,
     ) -> Result<PendingHttpResponse, RequestFailure> {
+        self.submit_http_response_request_for_owner(
+            provider,
+            model,
+            endpoint_path,
+            method,
+            body,
+            headers,
+            provider_routing,
+            None,
+        )
+    }
+
+    /// Submits an HTTP-backed request scoped to an optional API key owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestFailure`] when the underlying transport submission is rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_http_response_request_for_owner(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        method: impl Into<String>,
+        body: impl Into<String>,
+        headers: HeaderMap,
+        provider_routing: Option<ProviderRouting>,
+        owner_key_id: Option<String>,
+    ) -> Result<PendingHttpResponse, RequestFailure> {
         let (response_tx, response_rx) = oneshot::channel();
-        let outcome = self.submit_transport_request(
+        let outcome = self.submit_transport_request_for_owner(
             provider,
             model,
             endpoint_path,
@@ -294,6 +464,7 @@ impl ProxyServerCore {
             body,
             headers,
             provider_routing,
+            owner_key_id,
         );
 
         let request_id = match outcome {
@@ -330,8 +501,37 @@ impl ProxyServerCore {
         headers: HeaderMap,
         provider_routing: Option<ProviderRouting>,
     ) -> Result<PendingStreamingHttpResponse, RequestFailure> {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let outcome = self.submit_transport_request(
+        self.submit_http_streaming_request_for_owner(
+            provider,
+            model,
+            endpoint_path,
+            method,
+            body,
+            headers,
+            provider_routing,
+            None,
+        )
+    }
+
+    /// Submits an HTTP-backed streaming request scoped to an optional API key owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestFailure`] when the underlying transport submission is rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_http_streaming_request_for_owner(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        method: impl Into<String>,
+        body: impl Into<String>,
+        headers: HeaderMap,
+        provider_routing: Option<ProviderRouting>,
+        owner_key_id: Option<String>,
+    ) -> Result<PendingStreamingHttpResponse, RequestFailure> {
+        let (event_tx, event_rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let outcome = self.submit_transport_request_for_owner(
             provider,
             model,
             endpoint_path,
@@ -340,6 +540,7 @@ impl ProxyServerCore {
             body,
             headers,
             provider_routing,
+            owner_key_id,
         );
 
         let request_id = match outcome {
@@ -359,31 +560,79 @@ impl ProxyServerCore {
         })
     }
 
+    /// Prepares a bounded streaming sender for an incoming chunk from `worker_id`.
+    ///
+    /// Returns `Some(Some(sender))` when the chunk should be forwarded to the HTTP
+    /// client, `Some(None)` when the chunk is a benign late/post-cancellation frame
+    /// that should be dropped without disconnecting the worker, and `None` only
+    /// when `worker_id` is no longer registered.
+    pub fn prepare_stream_chunk_sender(
+        &mut self,
+        worker_id: &str,
+        request_id: &str,
+    ) -> Option<Option<mpsc::Sender<HttpResponseEvent>>> {
+        if !self.workers.contains_key(worker_id) {
+            return None;
+        }
+
+        let Some(ActiveRequestState::InFlight {
+            worker_id: active_worker_id,
+            cancellation,
+            has_emitted_chunk,
+            ..
+        }) = self.active_requests.get_mut(request_id)
+        else {
+            tracing::debug!(
+                worker_id = %worker_id,
+                request_id = %request_id,
+                "dropping late response chunk for inactive request"
+            );
+            return Some(None);
+        };
+
+        if active_worker_id != worker_id {
+            tracing::debug!(
+                worker_id = %worker_id,
+                active_worker_id = %active_worker_id,
+                request_id = %request_id,
+                "dropping chunk from non-owner worker"
+            );
+            return Some(None);
+        }
+
+        if cancellation.is_some() {
+            tracing::debug!(
+                worker_id = %worker_id,
+                request_id = %request_id,
+                "dropping chunk for cancelled request"
+            );
+            return Some(None);
+        }
+
+        let Some(PendingHttpResponseSender::Streaming(sender)) =
+            self.pending_http_response_senders.get(request_id)
+        else {
+            return Some(None);
+        };
+
+        *has_emitted_chunk = true;
+        Some(Some(sender.clone()))
+    }
+
     pub fn stream_http_response_chunk(
         &mut self,
         worker_id: &str,
         request_id: &str,
         chunk: String,
     ) -> bool {
-        let is_valid_request = matches!(
-            self.request_state(request_id),
-            Some(RequestState::InFlight {
-                worker_id: active_worker_id,
-                ..
-            }) if active_worker_id == worker_id
-        );
-
-        if !is_valid_request {
-            return false;
+        match self.prepare_stream_chunk_sender(worker_id, request_id) {
+            Some(Some(sender)) => {
+                let _ = sender.try_send(HttpResponseEvent::Chunk(chunk));
+                true
+            }
+            Some(None) => true,
+            None => false,
         }
-
-        if let Some(PendingHttpResponseSender::Streaming(sender)) =
-            self.pending_http_response_senders.get(request_id)
-        {
-            let _ = sender.send(HttpResponseEvent::Chunk(chunk));
-        }
-
-        true
     }
 
     pub fn complete_http_response(
@@ -391,23 +640,127 @@ impl ProxyServerCore {
         worker_id: &str,
         response: ResponseCompleteMessage,
     ) -> bool {
-        let request_id = response.request_id.clone();
-        let Some(sender) = self.pending_http_response_senders.remove(&request_id) else {
+        if !self.workers.contains_key(worker_id) {
             return false;
-        };
+        }
 
-        let finished = self.finish_request(worker_id, &request_id).is_some()
-            || self.request_state(&request_id).is_none();
+        let request_id = response.request_id.clone();
 
-        match sender {
-            PendingHttpResponseSender::Unary(sender) => {
-                let _ = sender.send(Ok(response));
-            }
-            PendingHttpResponseSender::Streaming(sender) => {
-                let _ = sender.send(HttpResponseEvent::Complete(response));
+        // Verify ownership BEFORE removing pending_http_response_senders so a
+        // stray completion from a non-owner worker cannot steal an active client.
+        let owned_by_worker = matches!(
+            self.active_requests.get(&request_id),
+            Some(ActiveRequestState::InFlight {
+                worker_id: active_worker_id,
+                ..
+            }) if active_worker_id == worker_id
+        );
+
+        if !owned_by_worker {
+            tracing::debug!(
+                worker_id = %worker_id,
+                request_id = %request_id,
+                "ignoring response_complete for unknown or non-owned request"
+            );
+            return true;
+        }
+
+        let sender = self.pending_http_response_senders.remove(&request_id);
+        let _ = self.finish_request(worker_id, &request_id);
+
+        if let Some(sender) = sender {
+            match sender {
+                PendingHttpResponseSender::Unary(sender) => {
+                    let _ = sender.send(Ok(response));
+                }
+                PendingHttpResponseSender::Streaming(sender) => {
+                    let _ = sender.try_send(HttpResponseEvent::Complete(response));
+                }
             }
         }
-        finished
+        true
+    }
+
+    /// Handle a worker-reported [`modelrelay_protocol::ErrorMessage`] without
+    /// tearing down the worker's WebSocket connection.
+    pub fn handle_worker_error(
+        &mut self,
+        worker_id: &str,
+        request_id: Option<&str>,
+        code: &str,
+        message: &str,
+    ) -> bool {
+        if !self.workers.contains_key(worker_id) {
+            return false;
+        }
+
+        let Some(request_id) = request_id else {
+            tracing::warn!(
+                worker_id = %worker_id,
+                code = %code,
+                message = %message,
+                "worker reported general error"
+            );
+            return true;
+        };
+
+        let owned_by_worker = matches!(
+            self.active_requests.get(request_id),
+            Some(ActiveRequestState::InFlight {
+                worker_id: active_worker_id,
+                ..
+            }) if active_worker_id == worker_id
+        );
+
+        if !owned_by_worker {
+            tracing::debug!(
+                worker_id = %worker_id,
+                request_id = %request_id,
+                code = %code,
+                "ignoring worker error for inactive request"
+            );
+            return true;
+        }
+
+        tracing::warn!(
+            worker_id = %worker_id,
+            request_id = %request_id,
+            code = %code,
+            message = %message,
+            "worker reported request error"
+        );
+
+        let sender = self.pending_http_response_senders.remove(request_id);
+        let _ = self.finish_request(worker_id, request_id);
+
+        if let Some(sender) = sender {
+            let error_body = serde_json::json!({
+                "error": {
+                    "type": code,
+                    "message": message,
+                }
+            })
+            .to_string();
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type".to_string(), "application/json".to_string());
+            let complete = ResponseCompleteMessage {
+                request_id: request_id.to_string(),
+                status_code: 502,
+                headers,
+                body: Some(error_body),
+                token_counts: None,
+            };
+            match sender {
+                PendingHttpResponseSender::Unary(tx) => {
+                    let _ = tx.send(Ok(complete));
+                }
+                PendingHttpResponseSender::Streaming(tx) => {
+                    let _ = tx.try_send(HttpResponseEvent::WorkerError(message.to_string()));
+                }
+            }
+        }
+
+        true
     }
 
     #[must_use]
@@ -474,8 +827,15 @@ impl ProxyServerCore {
                 drain_timeout,
             };
             self.worker_graceful_shutdown_signals.push(signal.clone());
+            self.notify_worker(&worker_id);
             signals.push(signal);
         }
+
+        tracing::info!(
+            draining_workers = signals.len(),
+            drain_timeout_secs = drain_timeout.as_secs(),
+            "initiated graceful worker shutdown"
+        );
 
         signals
     }
@@ -514,6 +874,7 @@ impl ProxyServerCore {
             reason: reason.map(ToOwned::to_owned),
         };
         self.worker_models_refresh_signals.push(signal.clone());
+        self.notify_worker(worker_id);
         Some(signal)
     }
 
@@ -573,6 +934,7 @@ impl ProxyServerCore {
                 worker_id.clone(),
                 GracefulShutdownDisconnectReason::TimedOut,
             );
+            self.notify_worker(&worker_id);
             self.remove_worker(&worker_id);
             disconnected_worker_ids.push(worker_id);
         }
@@ -583,17 +945,55 @@ impl ProxyServerCore {
         }
     }
 
+    /// Reap in-flight cancelled requests whose worker failed to acknowledge the
+    /// cancellation within `grace`. Prevents legacy or misbehaving workers from
+    /// leaking concurrency slots permanently.
+    #[must_use]
+    pub fn expire_cancelled_requests(&mut self, now: Instant, grace: Duration) -> Vec<String> {
+        let expired: Vec<(String, String)> = self
+            .active_requests
+            .iter()
+            .filter_map(|(request_id, state)| match state {
+                ActiveRequestState::InFlight {
+                    worker_id,
+                    cancelled_at: Some(cancelled_at),
+                    ..
+                } if now.saturating_duration_since(*cancelled_at) >= grace => {
+                    Some((worker_id.clone(), request_id.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut reaped = Vec::with_capacity(expired.len());
+        for (worker_id, request_id) in expired {
+            tracing::warn!(
+                worker_id = %worker_id,
+                request_id = %request_id,
+                "reaping unacknowledged cancelled request to free worker slot"
+            );
+            self.fail_pending_http_response(
+                &request_id,
+                RequestFailureReason::RequestAlreadyCanceled,
+            );
+            let _ = self.finish_request(&worker_id, &request_id);
+            reaped.push(request_id);
+        }
+        reaped
+    }
+
     #[must_use]
     pub fn expire_queue_timeouts(&mut self, now: Instant) -> Vec<RequestFailure> {
         let mut failures = Vec::new();
         let mut expired_request_ids = Vec::new();
+        let default_policy = self.default_queue_policy;
 
         for (provider, queue) in &mut self.provider_queues {
             let Some(timeout) = self
                 .provider_queue_policies
                 .get(provider)
                 .copied()
-                .unwrap_or_default()
+                .unwrap_or(default_policy)
                 .queue_timeout_ticks
                 .map(Duration::from_secs)
             else {
@@ -617,6 +1017,9 @@ impl ProxyServerCore {
 
             *queue = retained_queue;
         }
+
+        // Prune empty queues to avoid unbounded HashMap growth over time.
+        self.provider_queues.retain(|_, queue| !queue.is_empty());
 
         for request_id in expired_request_ids {
             self.fail_pending_http_response(&request_id, RequestFailureReason::QueueTimedOut);
@@ -664,12 +1067,21 @@ impl ProxyServerCore {
                 worker_id.clone(),
                 GracefulShutdownDisconnectReason::Completed,
             );
+            self.notify_worker(&worker_id);
             let _ = self.remove_worker(&worker_id);
         }
     }
 
     pub fn disconnect_worker(&mut self, worker_id: &str) -> Option<WorkerDisconnectOutcome> {
         let worker = self.remove_worker(worker_id)?;
+
+        tracing::info!(
+            worker_id = %worker_id,
+            worker_name = %worker.worker_name,
+            provider = %worker.provider,
+            in_flight = worker.in_flight_requests.len(),
+            "worker disconnected"
+        );
 
         let mut requeued_request_ids = Vec::new();
         let mut failed_requests = Vec::new();
@@ -683,6 +1095,7 @@ impl ProxyServerCore {
             let ActiveRequestState::InFlight {
                 mut request,
                 cancellation,
+                has_emitted_chunk,
                 ..
             } = active_request
             else {
@@ -701,7 +1114,32 @@ impl ProxyServerCore {
                 continue;
             }
 
+            // Never requeue a streaming request after chunks have already been
+            // flushed to the HTTP client — re-running it from scratch would glue
+            // two unrelated completions onto the same HTTP 200 SSE stream.
+            if has_emitted_chunk {
+                tracing::warn!(
+                    request_id = %request_id,
+                    worker_id = %worker_id,
+                    "failing streaming request after mid-stream worker disconnect"
+                );
+                self.fail_pending_http_response(
+                    &request_id,
+                    RequestFailureReason::WorkerDisconnectedMidStream,
+                );
+                failed_requests.push(RequestFailure {
+                    request_id,
+                    reason: RequestFailureReason::WorkerDisconnectedMidStream,
+                });
+                continue;
+            }
+
             if request.requeue_count >= MAX_REQUEUE_COUNT {
+                tracing::warn!(
+                    request_id = %request_id,
+                    worker_id = %worker_id,
+                    "request exhausted max requeue attempts"
+                );
                 self.fail_pending_http_response(
                     &request_id,
                     RequestFailureReason::MaxRequeuesExceeded,
@@ -714,6 +1152,12 @@ impl ProxyServerCore {
             }
 
             request.requeue_count += 1;
+            tracing::info!(
+                request_id = %request.request_id,
+                requeue_count = request.requeue_count,
+                provider = %request.provider,
+                "requeueing in-flight request after worker disconnect"
+            );
             requeued_request_ids.push(request.request_id.clone());
             requeued_requests.push(request.clone());
             self.active_requests.insert(
@@ -722,20 +1166,36 @@ impl ProxyServerCore {
             );
         }
 
-        let had_requeued_requests = !requeued_request_ids.is_empty();
-        if let Some(queue) = self.provider_queues.get_mut(&worker.provider) {
-            for request in requeued_requests.into_iter().rev() {
-                queue.push_front(request);
-            }
-        } else if had_requeued_requests {
+        // Re-insert each request under its ORIGINAL `request.provider` (not
+        // `worker.provider`) so queue timeouts and cancellations stay coherent
+        // even when cross-provider fallback dispatched the request.
+        for request in requeued_requests.into_iter().rev() {
             self.provider_queues
-                .insert(worker.provider, requeued_requests.into_iter().collect());
+                .entry(request.provider.clone())
+                .or_default()
+                .push_front(request);
+        }
+
+        // Immediately dispatch requeued work to any surviving idle workers.
+        if !requeued_request_ids.is_empty() {
+            self.dispatch_all_available();
         }
 
         Some(WorkerDisconnectOutcome {
             requeued_request_ids,
             failed_requests,
         })
+    }
+
+    fn dispatch_all_available(&mut self) {
+        let candidate_ids = self.worker_order.clone();
+        for worker_id in candidate_ids {
+            while self.worker_has_capacity(&worker_id) {
+                if self.dispatch_next_compatible(&worker_id).is_none() {
+                    break;
+                }
+            }
+        }
     }
 
     pub fn cancel_request(
@@ -745,13 +1205,27 @@ impl ProxyServerCore {
     ) -> Option<CancellationOutcome> {
         match self.active_requests.get(request_id)?.clone() {
             ActiveRequestState::Queued { request } => {
-                let queue = self.provider_queues.get_mut(&request.provider)?;
-                let index = queue
-                    .iter()
-                    .position(|queued_request| queued_request.request_id == request_id)?;
-                queue.remove(index)?;
+                if let Some(queue) = self.provider_queues.get_mut(&request.provider)
+                    && let Some(index) = queue
+                        .iter()
+                        .position(|queued_request| queued_request.request_id == request_id)
+                {
+                    queue.remove(index);
+                } else {
+                    // Defensive fallback: scan all queues in case of external mutation.
+                    for queue in self.provider_queues.values_mut() {
+                        if let Some(index) = queue
+                            .iter()
+                            .position(|queued_request| queued_request.request_id == request_id)
+                        {
+                            queue.remove(index);
+                            break;
+                        }
+                    }
+                }
                 self.active_requests.remove(request_id);
                 self.pending_http_response_senders.remove(request_id);
+                tracing::debug!(request_id = %request_id, ?reason, "removed queued request on cancel");
 
                 Some(CancellationOutcome::RemovedFromQueue {
                     request_id: request_id.to_string(),
@@ -764,16 +1238,30 @@ impl ProxyServerCore {
             } => {
                 let effective_reason = cancellation.unwrap_or(reason);
                 if cancellation.is_none() {
-                    if let Some(ActiveRequestState::InFlight { cancellation, .. }) =
-                        self.active_requests.get_mut(request_id)
+                    if let Some(ActiveRequestState::InFlight {
+                        cancellation,
+                        cancelled_at,
+                        ..
+                    }) = self.active_requests.get_mut(request_id)
                     {
                         *cancellation = Some(reason);
+                        *cancelled_at = Some(Instant::now());
+                    }
+                    if reason == CancelReason::ClientDisconnected {
+                        self.pending_http_response_senders.remove(request_id);
                     }
                     self.worker_cancel_signals.push(WorkerCancelSignal {
                         worker_id: worker_id.clone(),
                         request_id: request_id.to_string(),
                         reason,
                     });
+                    self.notify_worker(&worker_id);
+                    tracing::debug!(
+                        request_id = %request_id,
+                        worker_id = %worker_id,
+                        ?reason,
+                        "queued worker cancel signal"
+                    );
                 }
 
                 Some(CancellationOutcome::WorkerCancelSent(WorkerCancelSignal {
@@ -844,31 +1332,44 @@ impl ProxyServerCore {
 
     #[must_use]
     pub fn provider_models(&self, provider: &str) -> Vec<String> {
-        let mut seen = HashSet::new();
+        self.provider_models_for_owner(provider, None)
+    }
 
-        // Try exact provider match first; fall back to all workers if none match.
-        let exact: Vec<String> = self
-            .worker_order
-            .iter()
-            .filter_map(|worker_id| self.workers.get(worker_id))
-            .filter(|worker| worker.provider == provider)
-            .flat_map(|worker| worker.models.iter())
-            .filter(|model| model.as_str() != "*")
-            .filter(|model| seen.insert((*model).clone()))
-            .cloned()
-            .collect();
-        if !exact.is_empty() {
-            return exact;
+    #[must_use]
+    pub fn provider_models_for_owner(
+        &self,
+        provider: &str,
+        owner_key_id: Option<&str>,
+    ) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
+
+        // Exact provider workers first (for stable ordering), then union all
+        // other routable providers visible to this tenant so mixed provider
+        // names (e.g. "local" + "default") never hide models from /v1/models.
+        for exact_only in [true, false] {
+            for worker_id in &self.worker_order {
+                let Some(worker) = self.workers.get(worker_id) else {
+                    continue;
+                };
+                if !worker.visible_to_owner(owner_key_id) {
+                    continue;
+                }
+                if exact_only && worker.provider != provider {
+                    continue;
+                }
+                if !exact_only && worker.provider == provider {
+                    continue;
+                }
+                for model in &worker.models {
+                    if model != "*" && seen.insert(model.clone()) {
+                        models.push(model.clone());
+                    }
+                }
+            }
         }
-        // Fallback: return models from any provider
-        self.worker_order
-            .iter()
-            .filter_map(|worker_id| self.workers.get(worker_id))
-            .flat_map(|worker| worker.models.iter())
-            .filter(|model| model.as_str() != "*")
-            .filter(|model| seen.insert((*model).clone()))
-            .cloned()
-            .collect()
+
+        models
     }
 
     #[must_use]
@@ -911,6 +1412,13 @@ impl ProxyServerCore {
         self.workers
             .get(worker_id)
             .is_some_and(|worker| worker.is_draining)
+    }
+
+    #[must_use]
+    pub(crate) fn worker_graceful_shutdown_deadline(&self, worker_id: &str) -> Option<Instant> {
+        self.workers
+            .get(worker_id)
+            .and_then(|worker| worker.graceful_shutdown_deadline)
     }
 
     pub fn disconnect_drained_worker_if_idle(&mut self, worker_id: &str) -> bool {
@@ -965,41 +1473,43 @@ impl ProxyServerCore {
     }
 
     fn dispatch_next_compatible(&mut self, worker_id: &str) -> Option<DispatchAssignment> {
-        let (models, endpoint_prefixes) = {
-            let worker = self.workers.get(worker_id)?;
-            (worker.models.clone(), worker.endpoint_prefixes.clone())
-        };
-
         if !self.worker_has_capacity(worker_id) {
             return None;
         }
+        let worker = self.workers.get(worker_id)?.clone();
 
-        let supports_endpoint = |path: &str| -> bool {
-            if endpoint_prefixes.is_empty() {
-                return true;
-            }
-            endpoint_prefixes
-                .iter()
-                .any(|prefix| path.starts_with(prefix.as_str()))
-        };
-
-        // Search all provider queues — not just the worker's own provider —
-        // so requests dispatched under a different provider name still get served.
+        // Search all provider queues, enforcing model, endpoint, tenant owner,
+        // and ProviderRouting constraints (only/ignore/allow_fallbacks).
         let mut best_provider = None;
         let mut best_index = None;
         let mut best_queued_at = None;
         for (queue_provider, queue) in &self.provider_queues {
-            if let Some(idx) = queue.iter().position(|request| {
-                models
-                    .iter()
-                    .any(|model| model == "*" || model == &request.model)
-                    && supports_endpoint(&request.transport.endpoint_path)
-            }) {
+            if let Some(idx) = queue
+                .iter()
+                .position(|request| worker_matches_request(&worker, request, false))
+            {
                 let queued_at = queue[idx].queued_at;
                 if best_queued_at.is_none_or(|best| queued_at < best) {
                     best_provider = Some(queue_provider.clone());
                     best_index = Some(idx);
                     best_queued_at = Some(queued_at);
+                }
+            }
+        }
+
+        // Second pass for queued requests that allow fallback from `only`.
+        if best_provider.is_none() {
+            for (queue_provider, queue) in &self.provider_queues {
+                if let Some(idx) = queue
+                    .iter()
+                    .position(|request| worker_matches_request(&worker, request, true))
+                {
+                    let queued_at = queue[idx].queued_at;
+                    if best_queued_at.is_none_or(|best| queued_at < best) {
+                        best_provider = Some(queue_provider.clone());
+                        best_index = Some(idx);
+                        best_queued_at = Some(queued_at);
+                    }
                 }
             }
         }
@@ -1016,182 +1526,178 @@ impl ProxyServerCore {
         })
     }
 
-    fn find_eligible_worker_id(
-        &mut self,
-        provider: &str,
-        model: &str,
-        endpoint_path: &str,
-        provider_routing: Option<&ProviderRouting>,
-    ) -> Option<String> {
-        // Apply provider routing filters if present.
-        if let Some(routing) = provider_routing {
-            return self.find_eligible_worker_id_with_routing(
-                provider,
-                model,
-                endpoint_path,
-                routing,
-            );
+    fn find_eligible_worker_id(&mut self, request: &RequestRecord) -> Option<String> {
+        if let Some(routing) = &request.provider_routing {
+            return self.find_eligible_worker_id_with_routing(request, routing);
         }
-        // Try exact provider match first, then fall back to any provider.
-        // The fallback handles single-tenant hosted setups where the server's
-        // configured provider name may not match the worker's.
         if let Some(id) =
-            self.find_eligible_worker_id_for_provider(Some(provider), model, endpoint_path)
+            self.find_eligible_worker_id_for_provider(Some(&request.provider), request, false)
         {
             return Some(id);
         }
-        self.find_eligible_worker_id_for_provider(None, model, endpoint_path)
+        self.find_eligible_worker_id_for_provider(None, request, false)
     }
 
     fn find_eligible_worker_id_with_routing(
         &mut self,
-        provider: &str,
-        model: &str,
-        endpoint_path: &str,
+        request: &RequestRecord,
         routing: &ProviderRouting,
     ) -> Option<String> {
-        // Collect eligible workers with routing filters applied.
-        let eligible_workers = self
+        let eligible_workers: Vec<(String, usize, String)> = self
             .worker_order
             .iter()
-            .enumerate()
-            .filter_map(|(position, worker_id)| {
+            .filter_map(|worker_id| {
                 let worker = self.workers.get(worker_id)?;
-                let supports_model = worker.models.iter().any(|m| m == "*" || m == model);
-                let has_capacity = worker.selection_load() < worker.max_concurrent;
-                let supports_ep = worker.supports_endpoint(endpoint_path);
-
-                if !supports_model || !has_capacity || worker.is_draining || !supports_ep {
-                    return None;
-                }
-
-                // Apply only/ignore filters.
-                if let Some(only) = &routing.only
-                    && !only.iter().any(|p| p == &worker.provider)
+                if worker.selection_load() >= worker.max_concurrent
+                    || !worker_matches_request(worker, request, false)
                 {
                     return None;
                 }
-                if let Some(ignore) = &routing.ignore
-                    && ignore.iter().any(|p| p == &worker.provider)
-                {
-                    return None;
-                }
-
                 Some((
-                    position,
                     worker_id.clone(),
                     worker.selection_load(),
                     worker.provider.clone(),
                 ))
             })
-            .collect::<Vec<_>>();
+            .collect();
 
         if eligible_workers.is_empty() {
-            // If allow_fallbacks is true (or unset, defaulting to true), fall back
-            // to unfiltered selection.
             if routing.allow_fallbacks.unwrap_or(true) {
-                if let Some(id) =
-                    self.find_eligible_worker_id_for_provider(Some(provider), model, endpoint_path)
-                {
+                if let Some(id) = self.find_eligible_worker_id_for_provider(
+                    Some(&request.provider),
+                    request,
+                    true,
+                ) {
                     return Some(id);
                 }
-                return self.find_eligible_worker_id_for_provider(None, model, endpoint_path);
+                return self.find_eligible_worker_id_for_provider(None, request, true);
             }
             return None;
         }
 
-        // Apply ordering preference if specified.
+        let sort_round_robin = routing
+            .sort
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("round_robin"));
+
         if let Some(order) = &routing.order {
-            // Find the first provider in the order list that has eligible workers.
             for preferred in order {
-                let preferred_workers: Vec<_> = eligible_workers
+                let preferred_workers: Vec<(String, usize)> = eligible_workers
                     .iter()
-                    .filter(|(_, _, _, prov)| prov == preferred)
+                    .filter(|(_, _, prov)| prov == preferred)
+                    .map(|(id, load, _)| (id.clone(), *load))
                     .collect();
-                if let Some(best) = preferred_workers.iter().min_by_key(|(_, _, load, _)| *load) {
-                    let key = SelectionKey::new(preferred, model);
-                    self.selection_cursors.insert(key, best.0);
-                    return Some(best.1.clone());
+                if !preferred_workers.is_empty() {
+                    return self.pick_from_candidates(
+                        preferred,
+                        &request.model,
+                        &preferred_workers,
+                        sort_round_robin,
+                    );
                 }
             }
-            // Fall through to load-based selection if no ordered provider matched.
         }
 
-        // Default: lowest load, round-robin tiebreak.
-        let lowest_load = eligible_workers.iter().map(|(_, _, load, _)| *load).min()?;
-        let tied_workers: Vec<_> = eligible_workers
+        let candidates: Vec<(String, usize)> = eligible_workers
             .into_iter()
-            .filter(|(_, _, load, _)| *load == lowest_load)
+            .map(|(id, load, _)| (id, load))
             .collect();
-
-        let effective_provider = provider;
-        let key = SelectionKey::new(effective_provider, model);
-        let last_position = self.selection_cursors.get(&key).copied();
-
-        let (position, worker_id, _, _) = tied_workers
-            .iter()
-            .find(|(position, _, _, _)| last_position.is_none_or(|last| *position > last))
-            .or_else(|| tied_workers.first())?
-            .clone();
-
-        self.selection_cursors.insert(key, position);
-        Some(worker_id)
+        self.pick_from_candidates(
+            &request.provider,
+            &request.model,
+            &candidates,
+            sort_round_robin,
+        )
     }
 
     fn find_eligible_worker_id_for_provider(
         &mut self,
         provider_filter: Option<&str>,
-        model: &str,
-        endpoint_path: &str,
+        request: &RequestRecord,
+        allow_fallback_pass: bool,
     ) -> Option<String> {
-        let eligible_workers = self
+        let candidates: Vec<(String, usize)> = self
             .worker_order
             .iter()
-            .enumerate()
-            .filter_map(|(position, worker_id)| {
+            .filter_map(|worker_id| {
                 let worker = self.workers.get(worker_id)?;
-                let supports_exact_model = worker
-                    .models
-                    .iter()
-                    .any(|worker_model| worker_model == "*" || worker_model == model);
                 let selection_load = worker.selection_load();
                 let has_capacity = selection_load < worker.max_concurrent;
                 let provider_matches =
                     provider_filter.is_none_or(|provider| worker.provider == provider);
-                let supports_ep = worker.supports_endpoint(endpoint_path);
 
                 if provider_matches
-                    && supports_exact_model
                     && has_capacity
-                    && !worker.is_draining
-                    && supports_ep
+                    && worker_matches_request(worker, request, allow_fallback_pass)
                 {
-                    Some((position, worker_id.clone(), selection_load))
+                    Some((worker_id.clone(), selection_load))
                 } else {
                     None
                 }
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        let lowest_load = eligible_workers.iter().map(|(_, _, load)| *load).min()?;
-        let tied_workers = eligible_workers
-            .into_iter()
-            .filter(|(_, _, load)| *load == lowest_load)
-            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return None;
+        }
 
-        // Use the actual provider for the selection key when falling back
         let effective_provider = provider_filter.unwrap_or("_any");
+        self.pick_from_candidates(effective_provider, &request.model, &candidates, false)
+    }
+
+    fn pick_from_candidates(
+        &mut self,
+        effective_provider: &str,
+        model: &str,
+        candidates: &[(String, usize)],
+        pure_round_robin: bool,
+    ) -> Option<String> {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let pool: Vec<&str> = if pure_round_robin {
+            candidates.iter().map(|(id, _)| id.as_str()).collect()
+        } else {
+            let lowest_load = candidates.iter().map(|(_, load)| *load).min()?;
+            candidates
+                .iter()
+                .filter(|(_, load)| *load == lowest_load)
+                .map(|(id, _)| id.as_str())
+                .collect()
+        };
+
         let key = SelectionKey::new(effective_provider, model);
-        let last_position = self.selection_cursors.get(&key).copied();
+        let last_worker_id = self.selection_cursors.get(&key).map(String::as_str);
 
-        let (position, worker_id, _) = tied_workers
-            .iter()
-            .find(|(position, _, _)| last_position.is_none_or(|last| *position > last))
-            .or_else(|| tied_workers.first())?
-            .clone();
+        // Find the next candidate strictly after `last_worker_id` in `self.worker_order`.
+        let chosen = if let Some(last_id) = last_worker_id {
+            let last_pos = self.worker_order.iter().position(|id| id == last_id);
+            match last_pos {
+                Some(pos) => pool
+                    .iter()
+                    .find(|cand| {
+                        self.worker_order
+                            .iter()
+                            .position(|id| id == *cand)
+                            .is_some_and(|cand_pos| cand_pos > pos)
+                    })
+                    .or_else(|| pool.first())
+                    .copied()?,
+                None => *pool.first()?,
+            }
+        } else {
+            *pool.first()?
+        };
 
-        self.selection_cursors.insert(key, position);
-        Some(worker_id)
+        let chosen_owned = chosen.to_string();
+        if self.selection_cursors.len() >= MAX_SELECTION_CURSORS
+            && !self.selection_cursors.contains_key(&key)
+        {
+            self.selection_cursors.clear();
+        }
+        self.selection_cursors.insert(key, chosen_owned.clone());
+        Some(chosen_owned)
     }
 
     fn assign_to_worker(&mut self, worker_id: &str, request: RequestRecord) {
@@ -1209,8 +1715,11 @@ impl ProxyServerCore {
                 request,
                 worker_id: worker_id.to_string(),
                 cancellation: None,
+                cancelled_at: None,
+                has_emitted_chunk: false,
             },
         );
+        self.notify_worker(worker_id);
     }
 
     fn worker_has_capacity(&self, worker_id: &str) -> bool {
@@ -1219,14 +1728,14 @@ impl ProxyServerCore {
         })
     }
 
-    fn provider_has_compatible_worker(&self, _provider: &str, model: &str) -> bool {
-        // Check any provider — matches the fallback behavior in find_eligible_worker_id
+    fn has_compatible_worker(&self, request: &RequestRecord) -> bool {
+        let allow_fallback = request
+            .provider_routing
+            .as_ref()
+            .is_some_and(|r| r.allow_fallbacks.unwrap_or(true));
         self.workers.values().any(|worker| {
-            !worker.is_draining
-                && worker
-                    .models
-                    .iter()
-                    .any(|supported| supported == "*" || supported == model)
+            worker_matches_request(worker, request, false)
+                || (allow_fallback && worker_matches_request(worker, request, true))
         })
     }
 
@@ -1242,7 +1751,7 @@ impl ProxyServerCore {
         match sender {
             PendingHttpResponseSender::Unary(sender) => sender.send(Err(reason)).is_ok(),
             PendingHttpResponseSender::Streaming(sender) => {
-                sender.send(HttpResponseEvent::Failure(reason)).is_ok()
+                sender.try_send(HttpResponseEvent::Failure(reason)).is_ok()
             }
         }
     }
@@ -1251,13 +1760,58 @@ impl ProxyServerCore {
         let worker = self.workers.remove(worker_id)?;
         self.worker_order
             .retain(|registered_worker_id| registered_worker_id != worker_id);
+        self.worker_notifiers.remove(worker_id);
         self.pending_worker_requests.remove(worker_id);
         self.worker_cancel_signals
             .retain(|signal| signal.worker_id != worker_id);
         self.worker_graceful_shutdown_signals
             .retain(|signal| signal.worker_id != worker_id);
+        self.worker_models_refresh_signals
+            .retain(|signal| signal.worker_id != worker_id);
         Some(worker)
     }
+}
+
+fn worker_matches_request(
+    worker: &WorkerState,
+    request: &RequestRecord,
+    allow_fallback_pass: bool,
+) -> bool {
+    if worker.is_draining {
+        return false;
+    }
+    if !worker.visible_to_owner(request.owner_key_id.as_deref()) {
+        return false;
+    }
+    if !worker
+        .models
+        .iter()
+        .any(|supported| supported == "*" || supported == &request.model)
+    {
+        return false;
+    }
+    if !worker.supports_endpoint(&request.transport.endpoint_path) {
+        return false;
+    }
+
+    if let Some(routing) = &request.provider_routing {
+        // `ignore` is always honored, even during fallback passes.
+        if let Some(ignore) = &routing.ignore
+            && ignore.iter().any(|p| p == &worker.provider)
+        {
+            return false;
+        }
+        if let Some(only) = &routing.only
+            && !only.iter().any(|p| p == &worker.provider)
+        {
+            if allow_fallback_pass && routing.allow_fallbacks.unwrap_or(true) {
+                return true;
+            }
+            return false;
+        }
+    }
+
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1311,7 +1865,7 @@ pub struct PendingHttpResponse {
 #[derive(Debug)]
 pub struct PendingStreamingHttpResponse {
     pub request_id: String,
-    pub event_rx: mpsc::UnboundedReceiver<HttpResponseEvent>,
+    pub event_rx: mpsc::Receiver<HttpResponseEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1319,12 +1873,13 @@ pub enum HttpResponseEvent {
     Chunk(String),
     Complete(ResponseCompleteMessage),
     Failure(RequestFailureReason),
+    WorkerError(String),
 }
 
 #[derive(Debug)]
 enum PendingHttpResponseSender {
     Unary(oneshot::Sender<Result<ResponseCompleteMessage, RequestFailureReason>>),
-    Streaming(mpsc::UnboundedSender<HttpResponseEvent>),
+    Streaming(mpsc::Sender<HttpResponseEvent>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1414,12 +1969,14 @@ pub enum RequestFailureReason {
     ProviderDisabled,
     ProviderDeleted,
     GracefulShutdownTimedOut,
+    WorkerDisconnectedMidStream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkerState {
     provider: String,
     worker_name: String,
+    owner_key_id: Option<String>,
     models: Vec<String>,
     endpoint_prefixes: Vec<String>,
     max_concurrent: usize,
@@ -1432,6 +1989,19 @@ struct WorkerState {
 impl WorkerState {
     fn selection_load(&self) -> usize {
         self.reported_load.max(self.in_flight_requests.len())
+    }
+
+    /// Returns true if this worker can serve requests from `owner_key_id`.
+    ///
+    /// Shared fleet workers (`self.owner_key_id == None`) can serve any client.
+    /// Tenant-scoped workers (`self.owner_key_id == Some(w)`) only serve clients
+    /// with the matching API key (`Some(w)`), or unauthenticated requests when
+    /// API key enforcement is disabled (`None`).
+    fn visible_to_owner(&self, request_owner: Option<&str>) -> bool {
+        match (self.owner_key_id.as_deref(), request_owner) {
+            (Some(worker_owner), Some(req_owner)) => worker_owner == req_owner,
+            _ => true,
+        }
     }
 
     /// Returns true if this worker can handle requests to the given endpoint path.
@@ -1451,6 +2021,7 @@ struct RequestRecord {
     request_id: String,
     provider: String,
     model: String,
+    owner_key_id: Option<String>,
     queued_at: Instant,
     transport: RequestTransport,
     provider_routing: Option<ProviderRouting>,
@@ -1489,6 +2060,8 @@ enum ActiveRequestState {
         request: RequestRecord,
         worker_id: String,
         cancellation: Option<CancelReason>,
+        cancelled_at: Option<Instant>,
+        has_emitted_chunk: bool,
     },
 }
 
@@ -2068,25 +2641,53 @@ mod tests {
                 failed_requests: Vec::new(),
             })
         );
+        // Idle compatible replacement worker receives the requeued request immediately
+        // without waiting for an unrelated models update or completion event.
+        assert_eq!(
+            core.worker_in_flight_request_ids(&second),
+            vec!["request-1".to_string()]
+        );
+        assert!(core.queued_request_ids("openai").is_empty());
+    }
+
+    #[test]
+    fn disconnecting_only_worker_queues_request_until_replacement_registers() {
+        let mut core = ProxyServerCore::new();
+        let first = core
+            .register_worker(
+                "openai",
+                register_message("gpu-a", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
+
+        assert_eq!(
+            core.submit_request("openai", "llama-3.1-70b"),
+            SubmissionOutcome::Dispatched(DispatchAssignment {
+                request_id: "request-1".to_string(),
+                worker_id: first.clone(),
+            })
+        );
+
+        assert_eq!(
+            core.disconnect_worker(&first),
+            Some(WorkerDisconnectOutcome {
+                requeued_request_ids: vec!["request-1".to_string()],
+                failed_requests: Vec::new(),
+            })
+        );
         assert_eq!(core.request_state("request-1"), Some(RequestState::Queued));
         assert_eq!(
             core.queued_request_ids("openai"),
             vec!["request-1".to_string()]
         );
 
-        assert_eq!(
-            core.update_worker_models(
-                &second,
-                ModelsUpdateMessage {
-                    models: vec!["llama-3.1-70b".to_string()],
-                    current_load: 0,
-                }
-            ),
-            vec![DispatchAssignment {
-                request_id: "request-1".to_string(),
-                worker_id: second.clone(),
-            }]
-        );
+        // Registering a new compatible worker immediately drains the queued request.
+        let second = core
+            .register_worker(
+                "openai",
+                register_message("gpu-b", &["llama-3.1-70b"], 1, Some(0)),
+            )
+            .worker_id;
         assert_eq!(
             core.worker_in_flight_request_ids(&second),
             vec!["request-1".to_string()]
@@ -2185,17 +2786,8 @@ mod tests {
                 })
             );
             assert_eq!(
-                core.update_worker_models(
-                    &replacement_worker,
-                    ModelsUpdateMessage {
-                        models: vec!["llama-3.1-70b".to_string()],
-                        current_load: 0,
-                    }
-                ),
-                vec![DispatchAssignment {
-                    request_id: "request-1".to_string(),
-                    worker_id: replacement_worker.clone(),
-                }]
+                core.worker_in_flight_request_ids(&replacement_worker),
+                vec!["request-1".to_string()]
             );
         }
 

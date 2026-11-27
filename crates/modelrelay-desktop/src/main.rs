@@ -1,11 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::Arc;
+
 use modelrelay_desktop::{AppSettings, AppStatus, WorkerManager, updater};
+use modelrelay_worker::WorkerConnectionState;
 use tauri::{
     AppHandle, Emitter, Manager, RunEvent, WindowEvent,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+
+const TRAY_ID: &str = "main-tray";
 
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -15,10 +20,25 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+fn format_tray_tooltip(status: &AppStatus) -> String {
+    match status.state {
+        WorkerConnectionState::Connected => {
+            if status.active_requests > 0 {
+                format!("ModelRelay - Connected ({} active)", status.active_requests)
+            } else {
+                "ModelRelay - Connected".to_string()
+            }
+        }
+        WorkerConnectionState::Connecting => "ModelRelay - Connecting\u{2026}".to_string(),
+        WorkerConnectionState::Reconnecting => "ModelRelay - Reconnecting\u{2026}".to_string(),
+        WorkerConnectionState::AuthFailed => "ModelRelay - Auth Failed".to_string(),
+        WorkerConnectionState::Disconnected => "ModelRelay - Disconnected".to_string(),
+    }
+}
+
 #[tauri::command]
 async fn get_has_saved_settings(manager: tauri::State<'_, WorkerManager>) -> Result<bool, String> {
     let settings = manager.get_settings().await;
-    // Consider settings "saved" if the user has entered a worker secret
     Ok(!settings.worker_secret.is_empty())
 }
 
@@ -56,6 +76,11 @@ async fn stop_worker(manager: tauri::State<'_, WorkerManager>) -> Result<(), Str
     Ok(())
 }
 
+#[tauri::command]
+async fn refresh_models(manager: tauri::State<'_, WorkerManager>) -> Result<(), String> {
+    manager.refresh_models().await
+}
+
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let show = MenuItemBuilder::with_id("show", "Open Dashboard").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
@@ -72,52 +97,48 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .item(&quit)
         .build()?;
 
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("ModelRelay - Disconnected")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_tray_icon_event(|tray, event| {
-            // Belt-and-suspenders fallback: even if the platform fails to pop
-            // the menu on left-click (seen on macOS in v0.1.3), reveal the main
-            // window so the tray is never a dead UI element.
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                show_main_window(tray.app_handle());
             }
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
+                show_main_window(app);
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
                     let _ = window.emit("navigate-tab", "dashboard");
                 }
             }
             "settings" => {
+                show_main_window(app);
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
                     let _ = window.emit("navigate-tab", "settings");
                 }
             }
             "check_updates" => {
+                show_main_window(app);
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
                     let _ = window.emit("navigate-tab", "settings");
                 }
                 let _ = app.emit("updater-manual-check", ());
             }
             "quit" => {
-                app.exit(0);
+                // Gracefully stop the worker (sending WS Close) before exiting.
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let manager = app_handle.state::<WorkerManager>();
+                    manager.stop_worker().await;
+                    app_handle.exit(0);
+                });
             }
             _ => {}
         })
@@ -157,13 +178,11 @@ fn main() {
             save_settings,
             start_worker,
             stop_worker,
+            refresh_models,
             check_for_update,
             install_update,
         ])
         .on_window_event(|window, event| {
-            // Hide-to-tray on close so the app keeps running and the user can
-            // re-open via the tray or (on macOS) the Dock. Quit is still reachable
-            // via the tray menu and Cmd+Q, which go through RunEvent::ExitRequested.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -176,35 +195,30 @@ fn main() {
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             let settings_path = app_data_dir.join("settings.json");
 
-            let manager = WorkerManager::new(settings_path.clone());
-
-            let auto_start_worker = std::fs::read_to_string(&settings_path)
-                .ok()
-                .and_then(|json| serde_json::from_str::<AppSettings>(&json).ok())
-                .is_some_and(|s| s.auto_start && !s.worker_secret.is_empty());
+            let manager = WorkerManager::new(settings_path);
+            let auto_start_worker = manager.initial_auto_start();
 
             app.manage(manager);
-
-            if auto_start_worker {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let manager = handle.state::<WorkerManager>();
-                    if let Err(e) = manager.start_worker().await {
-                        tracing::error!(error = %e, "auto-start failed");
-                    }
-                });
-            }
-
-            // Always show the window on launch. Auto-start controls the worker,
-            // not window visibility — previously these were conflated, which meant
-            // every wizard-completed user (auto_start defaulted to true) became a
-            // silent-tray user on subsequent launches and appeared to have a dead app.
-            show_main_window(app.handle());
-
             build_tray(app)?;
 
-            // Kick off a silent update check shortly after launch. Errors are
-            // logged and never block startup.
+            let tray_app_handle = app.handle().clone();
+            let setup_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let manager = setup_handle.state::<WorkerManager>();
+                manager
+                    .set_on_status_change(Arc::new(move |status| {
+                        if let Some(tray) = tray_app_handle.tray_by_id(TRAY_ID) {
+                            let _ = tray.set_tooltip(Some(format_tray_tooltip(status)));
+                        }
+                    }))
+                    .await;
+
+                if auto_start_worker && let Err(e) = manager.start_worker().await {
+                    tracing::error!(error = %e, "auto-start failed");
+                }
+            });
+
+            show_main_window(app.handle());
             updater::spawn_launch_check(app.handle().clone());
 
             Ok(())
@@ -217,10 +231,6 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn handle_run_event(app: &AppHandle, event: &RunEvent) {
-    // macOS sends Reopen when the user clicks the Dock icon or re-launches the
-    // app from Finder while a copy is already running. Without handling it, the
-    // second launch does nothing visible — exactly the "busted if you're authed"
-    // symptom reported in v0.1.4.
     if let RunEvent::Reopen { .. } = event {
         show_main_window(app);
     }

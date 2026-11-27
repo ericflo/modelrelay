@@ -1,18 +1,12 @@
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::middleware;
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
-
-use axum::extract::Request;
-use axum::middleware::Next;
 
 use crate::state::CloudState;
 
@@ -69,7 +63,10 @@ pub fn router(state: Arc<CloudState>) -> Router {
         .route("/icon-512.png", get(icon_512_png))
         .route("/og-image.png", get(og_image))
         .fallback(not_found)
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            security_headers,
+        ))
         .layer(middleware::from_fn(csrf::csrf_middleware))
         .layer(middleware::from_fn(session_guard))
         .with_state(state)
@@ -299,44 +296,51 @@ async fn session_guard(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-/// Middleware that sets standard HTTP security headers on every response.
-async fn security_headers(request: Request, next: Next) -> Response {
+/// Middleware that sets standard HTTP security headers on every response,
+/// including the configured public relay origin in `connect-src` so browser
+/// inference tests on `/setup` and `/integrate` are allowed.
+async fn security_headers(
+    State(state): State<Arc<CloudState>>,
+    request: Request,
+    next: Next,
+) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-    headers.insert("x-frame-options", "DENY".parse().unwrap());
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert(
         "referrer-policy",
-        "strict-origin-when-cross-origin".parse().unwrap(),
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
     headers.insert(
         "permissions-policy",
-        "camera=(), microphone=(), geolocation=()".parse().unwrap(),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
-    headers.insert(
-        "content-security-policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline' https://js.stripe.com; frame-src https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.stripe.com; font-src 'self'"
-            .parse()
-            .unwrap(),
-    );
+    let relay_origin = state.public_relay_url.trim().trim_end_matches('/');
+    let csp = if relay_origin.starts_with("http://") || relay_origin.starts_with("https://") {
+        format!(
+            "default-src 'self'; script-src 'self' 'unsafe-inline' https://js.stripe.com; \
+             frame-src https://js.stripe.com; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; connect-src 'self' https://api.stripe.com {relay_origin}; \
+             font-src 'self'"
+        )
+    } else {
+        "default-src 'self'; script-src 'self' 'unsafe-inline' https://js.stripe.com; \
+         frame-src https://js.stripe.com; style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data:; connect-src 'self' https://api.stripe.com; font-src 'self'"
+            .to_string()
+    };
+    if let Ok(value) = HeaderValue::from_str(&csp) {
+        headers.insert("content-security-policy", value);
+    }
     response
 }
 
-/// GitHub releases API URL used to look up desktop release assets.
-const DESKTOP_RELEASES_URL: &str = "https://api.github.com/repos/ericflo/modelrelay/releases";
-
 /// Fallback redirect when the GitHub API is unreachable or no asset matches.
 const DESKTOP_FALLBACK_URL: &str = "https://github.com/ericflo/modelrelay/releases/latest";
-
-/// How long to cache the GitHub release lookup before refetching.
-const DESKTOP_CACHE_TTL: Duration = Duration::from_secs(300);
-
-/// Map of `platform -> browser_download_url` cached alongside its fetch time.
-type DesktopAssetCache = Option<(Instant, HashMap<String, String>)>;
-
-/// Process-wide cache for the resolved desktop asset URLs.
-static DESKTOP_DOWNLOAD_CACHE: LazyLock<RwLock<DesktopAssetCache>> =
-    LazyLock::new(|| RwLock::new(None));
 
 /// Map a `/download/desktop/{platform}` slug to the asset filename suffix
 /// produced by the Tauri release workflow.
@@ -350,72 +354,28 @@ fn desktop_asset_suffix(platform: &str) -> Option<&'static str> {
     }
 }
 
-/// Look up the latest desktop release on GitHub and return a map of
-/// `platform -> browser_download_url`. Results are cached for
-/// [`DESKTOP_CACHE_TTL`] to avoid hammering the GitHub API.
-async fn latest_desktop_assets() -> Option<HashMap<String, String>> {
-    if let Some((fetched_at, assets)) = DESKTOP_DOWNLOAD_CACHE.read().await.as_ref()
-        && fetched_at.elapsed() < DESKTOP_CACHE_TTL
-    {
-        return Some(assets.clone());
-    }
-
-    let client = reqwest::Client::builder()
-        .user_agent("modelrelay-cloud (+https://modelrelay.io)")
-        .timeout(Duration::from_secs(10))
-        .build()
-        .ok()?;
-
-    let releases: Vec<Value> = client
-        .get(DESKTOP_RELEASES_URL)
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-
-    let latest = releases.into_iter().find(|r| {
-        r.get("tag_name")
-            .and_then(Value::as_str)
-            .is_some_and(|tag| tag.starts_with("desktop-v"))
-    })?;
-
-    let assets = latest.get("assets").and_then(Value::as_array)?;
-    let mut map: HashMap<String, String> = HashMap::new();
-    for platform in ["macos", "macos-intel", "linux", "linux-deb", "windows"] {
-        let suffix = desktop_asset_suffix(platform).unwrap_or("");
-        if let Some(url) = assets.iter().find_map(|a| {
-            let name = a.get("name").and_then(Value::as_str)?;
-            let url = a.get("browser_download_url").and_then(Value::as_str)?;
-            name.ends_with(suffix).then(|| url.to_owned())
-        }) {
-            map.insert(platform.to_owned(), url);
-        }
-    }
-
-    if map.is_empty() {
-        return None;
-    }
-
-    *DESKTOP_DOWNLOAD_CACHE.write().await = Some((Instant::now(), map.clone()));
-    Some(map)
-}
-
 /// Redirect `/download/desktop/{platform}` to the matching asset on the latest
-/// `desktop-v*` GitHub release, with a 5-minute cache and a graceful fallback
-/// to the releases landing page.
-async fn desktop_download_redirect(Path(platform): Path<String>) -> Redirect {
-    if desktop_asset_suffix(&platform).is_none() {
+/// `desktop-v*` GitHub release (using the shared updater cache), with a
+/// graceful fallback to the releases landing page.
+async fn desktop_download_redirect(
+    State(state): State<Arc<CloudState>>,
+    Path(platform): Path<String>,
+) -> Redirect {
+    let Some(suffix) = desktop_asset_suffix(&platform) else {
         return Redirect::temporary(DESKTOP_FALLBACK_URL);
-    }
+    };
 
-    match latest_desktop_assets()
+    let url = updater::latest_release(&state.http_client)
         .await
-        .and_then(|m| m.get(&platform).cloned())
-    {
+        .and_then(|release| {
+            release
+                .assets
+                .into_iter()
+                .find(|a| a.name.ends_with(suffix))
+                .map(|a| a.url)
+        });
+
+    match url {
         Some(url) => Redirect::temporary(&url),
         None => Redirect::temporary(DESKTOP_FALLBACK_URL),
     }

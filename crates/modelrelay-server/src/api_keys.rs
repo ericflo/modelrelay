@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use rand::RngExt;
@@ -64,11 +65,22 @@ pub trait ApiKeyStore: Send + Sync + 'static {
 struct StoredApiKey {
     metadata: ApiKeyMetadata,
     hash: [u8; 32],
+    last_used_at: AtomicU64,
+}
+
+impl StoredApiKey {
+    fn snapshot_metadata(&self) -> ApiKeyMetadata {
+        let mut meta = self.metadata.clone();
+        let last = self.last_used_at.load(Ordering::Relaxed);
+        meta.last_used_at = (last > 0).then_some(last);
+        meta
+    }
 }
 
 #[derive(Debug, Default)]
 struct InMemoryInner {
     keys: HashMap<String, StoredApiKey>,
+    hash_to_id: HashMap<[u8; 32], String>,
 }
 
 /// In-memory API key store backed by an `Arc<RwLock<HashMap>>`.
@@ -111,33 +123,49 @@ impl ApiKeyStore for InMemoryApiKeyStore {
         let stored = StoredApiKey {
             metadata: metadata.clone(),
             hash,
+            last_used_at: AtomicU64::new(0),
         };
 
-        self.inner.write().await.keys.insert(id, stored);
+        let mut store = self.inner.write().await;
+        store.hash_to_id.insert(hash, id.clone());
+        store.keys.insert(id, stored);
 
         Ok((metadata, raw_secret))
     }
 
     async fn validate_key(&self, raw_key: &str) -> Result<Option<String>, StoreError> {
         let hash = sha256_hash(raw_key.as_bytes());
-        let mut store = self.inner.write().await;
+        let store = self.inner.read().await;
 
-        for stored in store.keys.values_mut() {
-            if stored.metadata.revoked {
-                continue;
-            }
-            if subtle::ConstantTimeEq::ct_eq(&stored.hash[..], &hash[..]).into() {
-                stored.metadata.last_used_at = Some(now_epoch());
-                return Ok(Some(stored.metadata.id.clone()));
-            }
+        let Some(id) = store.hash_to_id.get(&hash) else {
+            return Ok(None);
+        };
+        let Some(stored) = store.keys.get(id) else {
+            return Ok(None);
+        };
+        if stored.metadata.revoked {
+            return Ok(None);
+        }
+        if subtle::ConstantTimeEq::ct_eq(&stored.hash[..], &hash[..]).into() {
+            stored.last_used_at.store(now_epoch(), Ordering::Relaxed);
+            return Ok(Some(stored.metadata.id.clone()));
         }
         Ok(None)
     }
 
     async fn revoke_key(&self, id: &str) -> Result<bool, StoreError> {
         let mut store = self.inner.write().await;
-        if let Some(stored) = store.keys.get_mut(id) {
+        let hash_to_remove = if let Some(stored) = store.keys.get_mut(id) {
+            if stored.metadata.revoked {
+                return Ok(false);
+            }
             stored.metadata.revoked = true;
+            Some(stored.hash)
+        } else {
+            None
+        };
+        if let Some(hash) = hash_to_remove {
+            store.hash_to_id.remove(&hash);
             Ok(true)
         } else {
             Ok(false)
@@ -146,7 +174,11 @@ impl ApiKeyStore for InMemoryApiKeyStore {
 
     async fn list_keys(&self) -> Result<Vec<ApiKeyMetadata>, StoreError> {
         let store = self.inner.read().await;
-        Ok(store.keys.values().map(|s| s.metadata.clone()).collect())
+        Ok(store
+            .keys
+            .values()
+            .map(StoredApiKey::snapshot_metadata)
+            .collect())
     }
 }
 
@@ -156,10 +188,29 @@ impl ApiKeyStore for InMemoryApiKeyStore {
 
 #[cfg(feature = "postgres")]
 mod postgres_store {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::RwLock;
+
     use super::{
         API_KEY_PREFIX, ApiKeyMetadata, ApiKeyStore, StoreError, generate_api_key, sha256_hash,
         valid_api_key,
     };
+
+    const VALIDATION_CACHE_TTL: Duration = Duration::from_secs(15);
+    const VALIDATION_CACHE_MAX_ENTRIES: usize = 10_000;
+    const LAST_USED_UPDATE_DEBOUNCE_SECS: i64 = 300;
+    /// Fixed advisory transaction lock key for serializing bootstrap key imports
+    /// without taking a table-level lock that blocks concurrent `validate_key` calls.
+    const BOOTSTRAP_IMPORT_ADVISORY_LOCK_ID: i64 = 0x4D52_4B45_595F_494D;
+
+    #[derive(Clone)]
+    struct CachedValidation {
+        key_id: String,
+        expires_at: Instant,
+    }
 
     /// Row shape for `SELECT ... FROM server_api_keys`.
     #[derive(sqlx::FromRow)]
@@ -190,12 +241,16 @@ mod postgres_store {
     /// Postgres-backed API key store for multi-replica correctness.
     pub struct PostgresApiKeyStore {
         pool: sqlx::PgPool,
+        validation_cache: Arc<RwLock<HashMap<[u8; 32], CachedValidation>>>,
     }
 
     impl PostgresApiKeyStore {
         #[must_use]
         pub fn new(pool: sqlx::PgPool) -> Self {
-            Self { pool }
+            Self {
+                pool,
+                validation_cache: Arc::new(RwLock::new(HashMap::new())),
+            }
         }
 
         /// Ensure a pre-existing raw key is represented in the persistent
@@ -227,9 +282,11 @@ mod postgres_store {
                 .await
                 .map_err(|error| StoreError::Internal(error.to_string()))?;
 
-            // Serialize bootstrap imports so two starting replicas cannot
-            // insert the same key independently.
-            sqlx::query("LOCK TABLE server_api_keys IN SHARE ROW EXCLUSIVE MODE")
+            // Serialize bootstrap imports with an advisory transaction lock so
+            // concurrent starting replicas cannot duplicate rows while live
+            // validation queries on other replicas remain completely unblocked.
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(BOOTSTRAP_IMPORT_ADVISORY_LOCK_ID)
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| StoreError::Internal(error.to_string()))?;
@@ -304,26 +361,72 @@ mod postgres_store {
 
         async fn validate_key(&self, raw_key: &str) -> Result<Option<String>, StoreError> {
             let hash = sha256_hash(raw_key.as_bytes());
+            let now = Instant::now();
 
-            // Single atomic UPDATE+RETURNING: looks up by full hash (indexed),
-            // restricted to non-revoked keys, and bumps last_used_at in one
-            // roundtrip. No SELECT-then-UPDATE race across replicas.
-            //
-            // Timing-attack note: the WHERE clause uses full-hash equality via
-            // the btree index. Postgres does not expose timing differences that
-            // an attacker could measure over a network — the query plan is a
-            // single index scan regardless of whether zero or one row matches.
-            let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-                "UPDATE server_api_keys SET last_used_at = now() \
+            {
+                let cache = self.validation_cache.read().await;
+                if let Some(entry) = cache.get(&hash)
+                    && entry.expires_at > now
+                {
+                    return Ok(Some(entry.key_id.clone()));
+                }
+            }
+
+            // Read-only lookup avoids serializing concurrent inference requests
+            // behind a Postgres row-level UPDATE lock on the same key row.
+            let row: Option<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+                "SELECT id, last_used_at FROM server_api_keys \
                  WHERE hash = $1 AND revoked_at IS NULL \
-                 RETURNING id",
+                 LIMIT 1",
             )
             .bind(&hash[..])
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-            Ok(row.map(|(id,)| id.to_string()))
+            let Some((id, last_used_at)) = row else {
+                return Ok(None);
+            };
+            let key_id = id.to_string();
+
+            {
+                let mut cache = self.validation_cache.write().await;
+                if cache.len() >= VALIDATION_CACHE_MAX_ENTRIES {
+                    cache.retain(|_, entry| entry.expires_at > now);
+                    if cache.len() >= VALIDATION_CACHE_MAX_ENTRIES {
+                        cache.clear();
+                    }
+                }
+                cache.insert(
+                    hash,
+                    CachedValidation {
+                        key_id: key_id.clone(),
+                        expires_at: now + VALIDATION_CACHE_TTL,
+                    },
+                );
+            }
+
+            // Debounce last_used_at writes asynchronously so high-concurrency
+            // traffic does not create row-lock contention or WAL bloat.
+            let should_bump = last_used_at.is_none_or(|ts| {
+                chrono::Utc::now().signed_duration_since(ts).num_seconds()
+                    >= LAST_USED_UPDATE_DEBOUNCE_SECS
+            });
+            if should_bump {
+                let pool = self.pool.clone();
+                tokio::spawn(async move {
+                    let _ = sqlx::query(
+                        "UPDATE server_api_keys SET last_used_at = now() \
+                         WHERE id = $1 AND revoked_at IS NULL \
+                           AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')",
+                    )
+                    .bind(id)
+                    .execute(&pool)
+                    .await;
+                });
+            }
+
+            Ok(Some(key_id))
         }
 
         async fn revoke_key(&self, id: &str) -> Result<bool, StoreError> {
@@ -338,7 +441,13 @@ mod postgres_store {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-            Ok(result.rows_affected() > 0)
+            if result.rows_affected() > 0 {
+                let mut cache = self.validation_cache.write().await;
+                cache.retain(|_, entry| entry.key_id != id);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
 
         async fn list_keys(&self) -> Result<Vec<ApiKeyMetadata>, StoreError> {

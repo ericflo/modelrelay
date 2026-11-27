@@ -1,7 +1,11 @@
 //! Session-based CSRF token generation and validation.
 //!
-//! Tokens are stored in the user's session under the key `_csrf_token`.
-//! POST form handlers validate the `_csrf` form field against the session value.
+//! Tokens are stored in the user's session under the key `_csrf_token` and
+//! remain stable across concurrent tabs within a session (rotated when a new
+//! session is created on login). ALL non-exempt POST requests require a valid
+//! CSRF token either in the `X-CSRF-Token` header or in an
+//! `application/x-www-form-urlencoded` `_csrf` form field, closing
+//! `text/plain` and `multipart/form-data` Content-Type bypasses.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -12,6 +16,7 @@ use tower_sessions::Session;
 use uuid::Uuid;
 
 const CSRF_SESSION_KEY: &str = "_csrf_token";
+const CSRF_HEADER: &str = "x-csrf-token";
 
 /// Generate a fresh CSRF token, store it in the session, and return it.
 /// If a token already exists in the session, return that instead.
@@ -20,7 +25,6 @@ pub async fn get_or_create_token(session: &Session) -> String {
         return existing;
     }
     let token = Uuid::new_v4().to_string();
-    // Best-effort insert — if session is broken we still return a token
     let _ = session.insert(CSRF_SESSION_KEY, &token).await;
     token
 }
@@ -31,31 +35,35 @@ pub async fn hidden_field(session: &Session) -> String {
     format!(r#"<input type="hidden" name="_csrf" value="{token}">"#)
 }
 
+/// Constant-time comparison to avoid timing side-channels on CSRF tokens.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0_u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 /// Validate a submitted CSRF token against the session value.
-/// Returns `true` if valid. Consumes and rotates the token on success.
+/// Returns `true` if valid. Keeps the token stable across concurrent tabs in
+/// the same session so opening multiple dashboard pages does not break forms.
 pub async fn validate(session: &Session, form_token: &str) -> bool {
     let Ok(Some(expected)) = session.get::<String>(CSRF_SESSION_KEY).await else {
         return false;
     };
-    if expected != form_token {
-        return false;
-    }
-    // Rotate the token after successful validation
-    let new_token = Uuid::new_v4().to_string();
-    let _ = session.insert(CSRF_SESSION_KEY, &new_token).await;
-    true
+    constant_time_eq(&expected, form_token)
 }
 
-/// Axum middleware that rejects POST requests with invalid or missing CSRF
-/// tokens. Skips paths that use their own auth (e.g. `/webhook/stripe`).
+/// Axum middleware that rejects ALL non-exempt POST requests with invalid or
+/// missing CSRF tokens regardless of `Content-Type`. Skips paths that use their
+/// own authentication (e.g. `/webhook/stripe`) or logout.
 pub async fn csrf_middleware(request: Request, next: Next) -> Response {
-    // Only validate POST requests
     if request.method() != axum::http::Method::POST {
         return next.run(request).await;
     }
 
-    // Skip webhook endpoint — it uses HMAC signature verification
-    // Skip logout — low-risk (only clears session) and form is in shared template
     let path = request.uri().path().to_owned();
     if path.starts_with("/webhook/") || path == "/logout" {
         return next.run(request).await;
@@ -67,19 +75,38 @@ pub async fn csrf_middleware(request: Request, next: Next) -> Response {
         return next.run(request).await;
     };
 
-    // Read the content-type to determine if this is a form submission
+    // 1. Accept X-CSRF-Token header for any Content-Type (JSON, fetch, etc.).
+    if let Some(header_token) = request
+        .headers()
+        .get(CSRF_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        if validate(&session, header_token.trim()).await {
+            return next.run(request).await;
+        }
+        return (StatusCode::FORBIDDEN, "CSRF token invalid").into_response();
+    }
+
+    // 2. Otherwise require `application/x-www-form-urlencoded` with `_csrf` field.
+    // Rejects `text/plain`, `multipart/form-data`, and missing `Content-Type`
+    // browser cross-origin form POSTs that lack `X-CSRF-Token`.
     let content_type = request
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !content_type.starts_with("application/x-www-form-urlencoded") {
-        // Non-form POSTs (JSON API, etc.) are not subject to CSRF here
-        return next.run(request).await;
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    if media_type != "application/x-www-form-urlencoded" {
+        return (StatusCode::FORBIDDEN, "CSRF token missing").into_response();
     }
 
-    // Read the body to extract the _csrf field
     let (parts, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, 1_048_576).await else {
         return StatusCode::BAD_REQUEST.into_response();
@@ -100,7 +127,6 @@ pub async fn csrf_middleware(request: Request, next: Next) -> Response {
         return (StatusCode::FORBIDDEN, "CSRF token invalid").into_response();
     }
 
-    // Reconstruct the request with the consumed body
     let request = Request::from_parts(parts, Body::from(bytes));
     next.run(request).await
 }
@@ -112,5 +138,12 @@ mod tests {
     #[test]
     fn csrf_session_key_is_stable() {
         assert_eq!(CSRF_SESSION_KEY, "_csrf_token");
+    }
+
+    #[test]
+    fn constant_time_eq_compares_correctly() {
+        assert!(constant_time_eq("abc-123", "abc-123"));
+        assert!(!constant_time_eq("abc-123", "abc-124"));
+        assert!(!constant_time_eq("abc", "abcd"));
     }
 }

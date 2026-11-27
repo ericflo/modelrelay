@@ -107,6 +107,8 @@ pub async fn download_and_install<R: Runtime>(app: &AppHandle<R>) -> Result<(), 
         .show(move |restart| {
             if restart {
                 app_for_restart.restart();
+            } else {
+                let _ = app_for_restart.emit("updater-restart-deferred", ());
             }
         });
 

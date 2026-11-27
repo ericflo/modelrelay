@@ -1,13 +1,18 @@
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{
         HeaderMap as AxumHeaderMap, HeaderName, HeaderValue, Method, StatusCode,
-        header::{CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST},
+        header::{
+            ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH,
+            CONTENT_TYPE, HOST, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER,
+            TRANSFER_ENCODING, UPGRADE,
+        },
     },
     response::{IntoResponse, Response},
     routing::{delete, get},
@@ -15,8 +20,10 @@ use axum::{
 use futures_util::stream;
 use modelrelay_protocol::admin_api::{AdminKeysResponse, CreateKeyRequest, CreateKeyResponse};
 use modelrelay_protocol::{HeaderMap, ProviderRouting, ResponseCompleteMessage};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::Value;
 use tokio::sync::Mutex;
+use tower_http::cors::CorsLayer;
 
 use crate::{
     AdminWorkerInfo, CancelReason, HttpResponseEvent, PendingHttpResponse,
@@ -25,8 +32,11 @@ use crate::{
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
+const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024; // 64 MiB (supports vision/multimodal payloads)
 const MAX_STREAM_RESPONSE_BYTES: usize = 10 * 1024 * 1024 * 1024; // 10 GB
 const OVERSIZED_STREAM_ERROR_SSE: &str = "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":\"stream exceeded size limit\"}}\n\n";
+const STREAM_TIMEOUT_ERROR_SSE: &str = "event: error\ndata: {\"error\":{\"type\":\"timeout\",\"message\":\"stream timed out waiting for worker\"}}\n\n";
+const STREAM_DISCONNECTED_ERROR_SSE: &str = "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":\"worker disconnected mid-stream\"}}\n\n";
 
 #[derive(Clone)]
 pub struct ProxyHttpApp {
@@ -37,6 +47,10 @@ pub struct ProxyHttpApp {
     admin_token: Option<String>,
     require_api_keys: bool,
     api_key_store: Arc<dyn ApiKeyStore>,
+    request_timeout: Option<Duration>,
+    max_body_bytes: usize,
+    public_cors: Option<CorsLayer>,
+    admin_cors: Option<CorsLayer>,
 }
 
 impl ProxyHttpApp {
@@ -50,6 +64,10 @@ impl ProxyHttpApp {
             admin_token: None,
             require_api_keys: false,
             api_key_store: Arc::new(crate::api_keys::InMemoryApiKeyStore::new()),
+            request_timeout: None,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            public_cors: None,
+            admin_cors: None,
         }
     }
 
@@ -89,6 +107,38 @@ impl ProxyHttpApp {
         self
     }
 
+    /// Set the request timeout for unary responses and per-chunk idle timeout for
+    /// streaming responses. Applied inside the HTTP handlers rather than an outer
+    /// middleware so WebSocket upgrades and healthy long-running streams are never
+    /// prematurely killed.
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Override the maximum accepted HTTP request body size (default: 64 MiB).
+    #[must_use]
+    pub fn with_max_body_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_body_bytes = max_bytes;
+        self
+    }
+
+    /// Configure CORS for public inference & health routes (`/v1/*`, `/health`, fallback).
+    #[must_use]
+    pub fn with_public_cors(mut self, cors: Option<CorsLayer>) -> Self {
+        self.public_cors = cors;
+        self
+    }
+
+    /// Configure CORS specifically for `/admin/*` routes. When `None`, `/admin/*`
+    /// does not emit permissive cross-origin headers.
+    #[must_use]
+    pub fn with_admin_cors(mut self, cors: Option<CorsLayer>) -> Self {
+        self.admin_cors = cors;
+        self
+    }
+
     pub fn router(self) -> Router {
         let state = HttpState {
             core: self.core,
@@ -98,11 +148,10 @@ impl ProxyHttpApp {
             admin_token: self.admin_token,
             require_api_keys: self.require_api_keys,
             api_key_store: self.api_key_store,
+            request_timeout: self.request_timeout,
         };
 
-        let router = Router::new()
-            .route("/health", get(health_handler))
-            .route("/v1/models", get(models_handler))
+        let mut admin_router = Router::new()
             .route("/admin/workers", get(admin_workers_handler))
             .route("/admin/stats", get(admin_stats_handler))
             .route(
@@ -110,8 +159,24 @@ impl ProxyHttpApp {
                 get(admin_keys_handler).post(admin_keys_create_handler),
             )
             .route("/admin/keys/{id}", delete(admin_keys_revoke_handler))
+            .with_state(state.clone());
+
+        if let Some(admin_cors) = self.admin_cors {
+            admin_router = admin_router.layer(admin_cors);
+        }
+
+        let mut public_router = Router::new()
+            .route("/health", get(health_handler))
+            .route("/v1/models", get(models_handler))
             .fallback(wildcard_handler)
+            .layer(DefaultBodyLimit::max(self.max_body_bytes))
             .with_state(state);
+
+        if let Some(public_cors) = self.public_cors {
+            public_router = public_router.layer(public_cors);
+        }
+
+        let router = public_router.merge(admin_router);
 
         match self.worker_socket_app {
             Some(worker_socket_app) => router.merge(worker_socket_app.router()),
@@ -129,6 +194,7 @@ struct HttpState {
     admin_token: Option<String>,
     require_api_keys: bool,
     api_key_store: Arc<dyn ApiKeyStore>,
+    request_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -166,34 +232,30 @@ struct ModelObject {
     owned_by: &'static str,
 }
 
-/// A minimal parse of the JSON body to extract model, stream, and optional provider routing.
-#[derive(Debug, Deserialize)]
-struct ProxyRequestBody {
-    model: Option<String>,
-    #[serde(default)]
-    stream: bool,
-    /// OpenRouter-compatible provider routing preferences.
-    #[serde(default)]
-    provider: Option<ProviderRouting>,
-}
-
 async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> {
     let (workers_connected, queue_depth, workers) = {
         let core = state.core.lock().await;
-        let worker_infos: Vec<WorkerHealthInfo> = core
-            .worker_debug_info()
-            .into_iter()
-            .map(
-                |(id, provider, models, in_flight, max_concurrent, is_draining)| WorkerHealthInfo {
-                    id,
-                    provider,
-                    models,
-                    in_flight,
-                    max_concurrent,
-                    is_draining,
-                },
-            )
-            .collect();
+        // In multi-tenant hosted mode (`require_api_keys = true`), avoid leaking
+        // per-worker provider/model topology on the unauthenticated /health endpoint.
+        let worker_infos: Vec<WorkerHealthInfo> = if state.require_api_keys {
+            Vec::new()
+        } else {
+            core.worker_debug_info()
+                .into_iter()
+                .map(
+                    |(id, provider, models, in_flight, max_concurrent, is_draining)| {
+                        WorkerHealthInfo {
+                            id,
+                            provider,
+                            models,
+                            in_flight,
+                            max_concurrent,
+                            is_draining,
+                        }
+                    },
+                )
+                .collect()
+        };
         (
             core.connected_worker_count(),
             core.total_queue_depth(),
@@ -212,10 +274,15 @@ async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> 
     })
 }
 
-async fn models_handler(State(state): State<HttpState>) -> Json<ModelsResponse> {
+async fn models_handler(State(state): State<HttpState>, headers: AxumHeaderMap) -> Response {
+    let owner_key_id = match check_client_api_key(&state, &headers).await {
+        Ok(owner_key_id) => owner_key_id,
+        Err(response) => return response,
+    };
+
     let models = {
         let core = state.core.lock().await;
-        core.provider_models(&state.models_provider)
+        core.provider_models_for_owner(&state.models_provider, owner_key_id.as_deref())
     };
 
     Json(ModelsResponse {
@@ -229,6 +296,7 @@ async fn models_handler(State(state): State<HttpState>) -> Json<ModelsResponse> 
             })
             .collect(),
     })
+    .into_response()
 }
 
 fn check_admin_auth(state: &HttpState, headers: &AxumHeaderMap) -> Result<(), StatusCode> {
@@ -342,38 +410,82 @@ async fn admin_keys_revoke_handler(
     }
 }
 
-async fn check_client_api_key(state: &HttpState, headers: &AxumHeaderMap) -> Result<(), Response> {
-    if !state.require_api_keys {
-        return Ok(());
+/// Extract client API key from `Authorization: Bearer <key>` or `x-api-key: <key>`
+/// (supporting Anthropic SDKs and `OpenAI` SDKs equally).
+fn extract_client_api_key(headers: &AxumHeaderMap) -> Result<Option<&str>, &'static str> {
+    if let Some(auth_header) = headers.get(AUTHORIZATION) {
+        let Ok(auth_str) = auth_header.to_str() else {
+            return Err("Invalid authorization header");
+        };
+        let token = auth_str
+            .strip_prefix("Bearer ")
+            .or_else(|| auth_str.strip_prefix("bearer "))
+            .unwrap_or(auth_str)
+            .trim();
+        if !token.is_empty() {
+            return Ok(Some(token));
+        }
     }
 
-    let Some(auth_header) = headers.get("authorization") else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(
-                serde_json::json!({"error": {"type": "auth_error", "message": "API key required"}}),
-            ),
-        )
-            .into_response());
-    };
+    if let Some(api_key_header) = headers.get("x-api-key") {
+        let Ok(key_str) = api_key_header.to_str() else {
+            return Err("Invalid x-api-key header");
+        };
+        let token = key_str.trim();
+        if !token.is_empty() {
+            return Ok(Some(token));
+        }
+    }
 
-    let Ok(auth_str) = auth_header.to_str() else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": {"type": "auth_error", "message": "Invalid authorization header"}})),
-        )
-            .into_response());
-    };
+    Ok(None)
+}
 
-    let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
+async fn check_client_api_key(
+    state: &HttpState,
+    headers: &AxumHeaderMap,
+) -> Result<Option<String>, Response> {
+    if !state.require_api_keys {
+        return Ok(None);
+    }
+
+    let token = match extract_client_api_key(headers) {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "auth_error",
+                        "message": "API key required"
+                    }
+                })),
+            )
+                .into_response());
+        }
+        Err(message) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "auth_error",
+                        "message": message
+                    }
+                })),
+            )
+                .into_response());
+        }
+    };
 
     match state.api_key_store.validate_key(token).await {
-        Ok(Some(_)) => Ok(()),
+        Ok(Some(key_id)) => Ok(Some(key_id)),
         Ok(None) => Err((
             StatusCode::UNAUTHORIZED,
-            Json(
-                serde_json::json!({"error": {"type": "auth_error", "message": "Invalid API key"}}),
-            ),
+            Json(serde_json::json!({
+                "error": {
+                    "type": "auth_error",
+                    "message": "Invalid API key"
+                }
+            })),
         )
             .into_response()),
         Err(e) => {
@@ -383,11 +495,44 @@ async fn check_client_api_key(state: &HttpState, headers: &AxumHeaderMap) -> Res
     }
 }
 
+/// Resiliently parse `model`, `stream`, and `provider` from a JSON request body.
+/// Tolerates `"stream": null` and non-object `"provider"` values (e.g., string
+/// shorthands) without failing the entire parse.
+fn parse_proxy_body_metadata(body: &str) -> (Option<String>, bool, Option<ProviderRouting>) {
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(body) else {
+        return (None, false, None);
+    };
+
+    let model = map
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+
+    let is_streaming = map.get("stream").and_then(Value::as_bool).unwrap_or(false);
+
+    let provider_routing = match map.get("provider") {
+        Some(Value::Object(_)) => map
+            .get("provider")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ProviderRouting>(value).ok()),
+        Some(Value::String(name)) if !name.trim().is_empty() => Some(ProviderRouting {
+            only: Some(vec![name.trim().to_string()]),
+            ..Default::default()
+        }),
+        _ => None,
+    };
+
+    (model, is_streaming, provider_routing)
+}
+
 /// Catch-all handler that proxies any path/method to a worker.
 ///
 /// Extracts the model from the JSON body's `model` field, or from the
 /// `X-Model` header. Provider routing can come from the body's `provider`
 /// field or the `X-Provider` header (as a provider name filter).
+#[allow(clippy::too_many_lines)]
 async fn wildcard_handler(
     State(state): State<HttpState>,
     method: Method,
@@ -395,37 +540,42 @@ async fn wildcard_handler(
     headers: AxumHeaderMap,
     body: String,
 ) -> Response {
-    if let Err(response) = check_client_api_key(&state, &headers).await {
-        return response;
-    }
+    let owner_key_id = match check_client_api_key(&state, &headers).await {
+        Ok(owner_key_id) => owner_key_id,
+        Err(response) => return response,
+    };
 
     if !state.provider_enabled {
         return availability_failure_response(RequestFailureReason::ProviderDisabled);
     }
 
-    let endpoint_path = uri.path().to_string();
+    // Preserve query parameters (e.g. Azure OpenAI `?api-version=...`).
+    let endpoint_path = uri
+        .path_and_query()
+        .map_or_else(|| uri.path().to_string(), ToString::to_string);
     let method_str = method.as_str().to_string();
 
-    // Try to extract model and streaming flag from JSON body.
-    let (model, is_streaming, provider_routing) =
-        if let Ok(parsed) = serde_json::from_str::<ProxyRequestBody>(&body) {
-            (parsed.model, parsed.stream, parsed.provider)
-        } else {
-            (None, false, None)
-        };
+    let (model, is_streaming, provider_routing) = parse_proxy_body_metadata(&body);
 
     // Fall back to X-Model header if not in body.
     let model = model.or_else(|| {
         headers
             .get("x-model")
             .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(String::from)
     });
 
     let Some(model) = model else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": {"type": "invalid_request", "message": "model is required (in JSON body or X-Model header)"}})),
+            Json(serde_json::json!({
+                "error": {
+                    "type": "invalid_request",
+                    "message": "model is required (in JSON body or X-Model header)"
+                }
+            })),
         )
             .into_response();
     };
@@ -435,6 +585,8 @@ async fn wildcard_handler(
         headers
             .get("x-provider")
             .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(|provider_name| ProviderRouting {
                 only: Some(vec![provider_name.to_string()]),
                 ..Default::default()
@@ -445,6 +597,7 @@ async fn wildcard_handler(
         return stream_worker_backed_http_response(
             state,
             headers,
+            owner_key_id,
             model,
             body,
             endpoint_path,
@@ -456,37 +609,56 @@ async fn wildcard_handler(
 
     let pending = {
         let mut core = state.core.lock().await;
-        match core.submit_http_response_request(
+        match core.submit_http_response_request_for_owner(
             &state.models_provider,
             model,
             &endpoint_path,
             &method_str,
             body,
-            forwarded_request_headers(&headers),
+            forwarded_request_headers(&headers, state.require_api_keys),
             provider_routing,
+            owner_key_id,
         ) {
             Ok(pending) => pending,
             Err(failure) => return availability_failure_response(failure.reason),
         }
     };
 
+    let request_id = pending.request_id.clone();
     let mut cancellation_guard = HttpRequestCancellationGuard::new(state.core.clone(), &pending);
-    match pending.response_rx.await {
-        Ok(Ok(response)) => {
+    let wait_result = match state.request_timeout {
+        Some(limit) => tokio::time::timeout(limit, pending.response_rx).await.ok(),
+        None => Some(pending.response_rx.await),
+    };
+
+    match wait_result {
+        Some(Ok(Ok(response))) => {
             cancellation_guard.disarm();
             response_complete_to_http_response(response)
         }
-        Ok(Err(reason)) => {
+        Some(Ok(Err(reason))) => {
             cancellation_guard.disarm();
             availability_failure_response(reason)
         }
-        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+        Some(Err(_)) => {
+            cancellation_guard.disarm();
+            bad_gateway_json_response("Worker response channel closed unexpectedly")
+        }
+        None => {
+            cancellation_guard.disarm();
+            let mut core = state.core.lock().await;
+            let _ = core.cancel_request(&request_id, CancelReason::RequestTimedOut);
+            tracing::warn!(request_id = %request_id, "unary HTTP request timed out");
+            gateway_timeout_json_response("Request timed out waiting for worker response")
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_worker_backed_http_response(
     state: HttpState,
     headers: AxumHeaderMap,
+    owner_key_id: Option<String>,
     model: String,
     body: String,
     endpoint_path: String,
@@ -499,40 +671,106 @@ async fn stream_worker_backed_http_response(
 
     let mut pending = {
         let mut core = state.core.lock().await;
-        match core.submit_http_streaming_request(
+        match core.submit_http_streaming_request_for_owner(
             &state.models_provider,
             model,
             &endpoint_path,
             &method,
             body,
-            forwarded_request_headers(&headers),
+            forwarded_request_headers(&headers, state.require_api_keys),
             provider_routing,
+            owner_key_id,
         ) {
             Ok(pending) => pending,
             Err(failure) => return availability_failure_response(failure.reason),
         }
     };
 
-    let cancellation_guard =
+    let request_id = pending.request_id.clone();
+    let mut cancellation_guard =
         HttpRequestCancellationGuard::new_streaming(state.core.clone(), &pending);
-    match pending.event_rx.recv().await {
-        Some(HttpResponseEvent::Chunk(first_chunk)) => {
-            streaming_http_response(first_chunk, pending, cancellation_guard)
-        }
-        Some(HttpResponseEvent::Complete(response)) => {
-            let mut guard = cancellation_guard;
-            guard.disarm();
+    let first_event = match state.request_timeout {
+        Some(limit) => tokio::time::timeout(limit, pending.event_rx.recv())
+            .await
+            .ok(),
+        None => Some(pending.event_rx.recv().await),
+    };
+
+    match first_event {
+        Some(Some(HttpResponseEvent::Chunk(first_chunk))) => streaming_http_response(
+            first_chunk,
+            pending,
+            cancellation_guard,
+            state.core,
+            state.request_timeout,
+        ),
+        Some(Some(HttpResponseEvent::Complete(response))) => {
+            cancellation_guard.disarm();
             response_complete_to_http_response(response)
         }
-        Some(HttpResponseEvent::Failure(reason)) => availability_failure_response(reason),
-        None => StatusCode::BAD_GATEWAY.into_response(),
+        Some(Some(HttpResponseEvent::Failure(reason))) => {
+            cancellation_guard.disarm();
+            availability_failure_response(reason)
+        }
+        Some(Some(HttpResponseEvent::WorkerError(message))) => {
+            cancellation_guard.disarm();
+            bad_gateway_json_response(&message)
+        }
+        Some(None) => {
+            cancellation_guard.disarm();
+            bad_gateway_json_response("Worker response stream closed before sending any data")
+        }
+        None => {
+            cancellation_guard.disarm();
+            let mut core = state.core.lock().await;
+            let _ = core.cancel_request(&request_id, CancelReason::RequestTimedOut);
+            tracing::warn!(request_id = %request_id, "streaming request timed out before first chunk");
+            gateway_timeout_json_response("Request timed out waiting for first streaming chunk")
+        }
     }
 }
 
-fn forwarded_request_headers(headers: &AxumHeaderMap) -> HeaderMap {
+fn is_hop_by_hop_header(name: &HeaderName, connection_tokens: &HashSet<String>) -> bool {
+    *name == CONNECTION
+        || *name == TRANSFER_ENCODING
+        || *name == UPGRADE
+        || *name == TE
+        || *name == TRAILER
+        || *name == PROXY_AUTHENTICATE
+        || *name == PROXY_AUTHORIZATION
+        || name.as_str().eq_ignore_ascii_case("keep-alive")
+        || name.as_str().eq_ignore_ascii_case("trailers")
+        || connection_tokens.contains(&name.as_str().to_ascii_lowercase())
+}
+
+fn parse_connection_header_tokens(headers: &AxumHeaderMap) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    for value in headers.get_all(CONNECTION) {
+        if let Ok(raw) = value.to_str() {
+            for token in raw.split(',') {
+                let trimmed = token.trim().to_ascii_lowercase();
+                if !trimmed.is_empty() {
+                    tokens.insert(trimmed);
+                }
+            }
+        }
+    }
+    tokens
+}
+
+fn forwarded_request_headers(headers: &AxumHeaderMap, strip_client_auth: bool) -> HeaderMap {
+    let connection_tokens = parse_connection_header_tokens(headers);
+
     headers
         .iter()
-        .filter(|(name, _)| *name != CONTENT_LENGTH && *name != CONNECTION && *name != HOST)
+        .filter(|(name, _)| {
+            *name != CONTENT_LENGTH
+                && *name != HOST
+                && *name != ACCEPT_ENCODING
+                && !is_hop_by_hop_header(name, &connection_tokens)
+                && (!strip_client_auth
+                    || (*name != AUTHORIZATION && !name.as_str().eq_ignore_ascii_case("x-api-key")))
+        })
         .filter_map(|(name, value)| {
             value
                 .to_str()
@@ -542,66 +780,128 @@ fn forwarded_request_headers(headers: &AxumHeaderMap) -> HeaderMap {
         .collect()
 }
 
+fn format_sse_error(error_type: &str, message: &str) -> Bytes {
+    let payload = serde_json::json!({
+        "error": {
+            "type": error_type,
+            "message": message,
+        }
+    });
+    Bytes::from(format!("event: error\ndata: {payload}\n\n"))
+}
+
+struct StreamState {
+    next_chunk: Option<String>,
+    event_rx: tokio::sync::mpsc::Receiver<HttpResponseEvent>,
+    cancellation_guard: HttpRequestCancellationGuard,
+    core: Arc<Mutex<ProxyServerCore>>,
+    request_id: String,
+    stream_idle_timeout: Option<Duration>,
+    streamed_bytes: usize,
+    terminated: bool,
+}
+
+#[allow(clippy::too_many_lines)]
 fn streaming_http_response(
     first_chunk: String,
     pending: PendingStreamingHttpResponse,
     cancellation_guard: HttpRequestCancellationGuard,
+    core: Arc<Mutex<ProxyServerCore>>,
+    stream_idle_timeout: Option<Duration>,
 ) -> Response {
-    let stream = stream::unfold(
-        (
-            Some(first_chunk),
-            pending.event_rx,
-            cancellation_guard,
-            0_usize,
-            false,
-        ),
-        |(next_chunk, mut event_rx, mut cancellation_guard, streamed_bytes, terminated)| async move {
-            if terminated {
-                return None;
-            }
+    let state = StreamState {
+        next_chunk: Some(first_chunk),
+        event_rx: pending.event_rx,
+        cancellation_guard,
+        core,
+        request_id: pending.request_id,
+        stream_idle_timeout,
+        streamed_bytes: 0,
+        terminated: false,
+    };
 
-            if let Some(chunk) = next_chunk {
-                let next_total = streamed_bytes.saturating_add(chunk.len());
-                if next_total > MAX_STREAM_RESPONSE_BYTES {
-                    cancellation_guard.disarm();
-                    return Some((
-                        Ok::<_, std::convert::Infallible>(Bytes::from_static(
-                            OVERSIZED_STREAM_ERROR_SSE.as_bytes(),
-                        )),
-                        (None, event_rx, cancellation_guard, streamed_bytes, true),
-                    ));
-                }
+    let stream = stream::unfold(state, |mut st| async move {
+        if st.terminated {
+            return None;
+        }
 
+        if let Some(chunk) = st.next_chunk.take() {
+            let next_total = st.streamed_bytes.saturating_add(chunk.len());
+            if next_total > MAX_STREAM_RESPONSE_BYTES {
+                // Cancel worker immediately so it aborts upstream generation.
+                st.cancellation_guard
+                    .cancel_now(CancelReason::ClientDisconnected);
+                st.terminated = true;
                 return Some((
-                    Ok::<_, std::convert::Infallible>(Bytes::from(chunk)),
-                    (None, event_rx, cancellation_guard, next_total, false),
+                    Ok::<_, std::convert::Infallible>(Bytes::from_static(
+                        OVERSIZED_STREAM_ERROR_SSE.as_bytes(),
+                    )),
+                    st,
                 ));
             }
+            st.streamed_bytes = next_total;
+            return Some((Ok::<_, std::convert::Infallible>(Bytes::from(chunk)), st));
+        }
 
-            match event_rx.recv().await {
-                Some(HttpResponseEvent::Chunk(chunk)) => {
-                    let next_total = streamed_bytes.saturating_add(chunk.len());
-                    if next_total > MAX_STREAM_RESPONSE_BYTES {
-                        cancellation_guard.disarm();
-                        Some((
-                            Ok(Bytes::from_static(OVERSIZED_STREAM_ERROR_SSE.as_bytes())),
-                            (None, event_rx, cancellation_guard, streamed_bytes, true),
-                        ))
-                    } else {
-                        Some((
-                            Ok(Bytes::from(chunk)),
-                            (None, event_rx, cancellation_guard, next_total, false),
-                        ))
-                    }
+        let next_event = match st.stream_idle_timeout {
+            Some(limit) => tokio::time::timeout(limit, st.event_rx.recv()).await.ok(),
+            None => Some(st.event_rx.recv().await),
+        };
+
+        match next_event {
+            Some(Some(HttpResponseEvent::Chunk(chunk))) => {
+                let next_total = st.streamed_bytes.saturating_add(chunk.len());
+                if next_total > MAX_STREAM_RESPONSE_BYTES {
+                    st.cancellation_guard
+                        .cancel_now(CancelReason::ClientDisconnected);
+                    st.terminated = true;
+                    Some((
+                        Ok(Bytes::from_static(OVERSIZED_STREAM_ERROR_SSE.as_bytes())),
+                        st,
+                    ))
+                } else {
+                    st.streamed_bytes = next_total;
+                    Some((Ok(Bytes::from(chunk)), st))
                 }
-                Some(HttpResponseEvent::Complete(_) | HttpResponseEvent::Failure(_)) => {
-                    cancellation_guard.disarm();
-                    None
-                }
-                None => None,
             }
-        },
-    );
+            Some(Some(HttpResponseEvent::Complete(_)) | None) => {
+                st.cancellation_guard.disarm();
+                None
+            }
+            Some(Some(HttpResponseEvent::Failure(reason))) => {
+                st.cancellation_guard.disarm();
+                st.terminated = true;
+                let sse = match reason {
+                    RequestFailureReason::WorkerDisconnectedMidStream => {
+                        Bytes::from_static(STREAM_DISCONNECTED_ERROR_SSE.as_bytes())
+                    }
+                    other => format_sse_error("stream_error", failure_reason_message(other)),
+                };
+                Some((Ok(sse), st))
+            }
+            Some(Some(HttpResponseEvent::WorkerError(message))) => {
+                st.cancellation_guard.disarm();
+                st.terminated = true;
+                Some((Ok(format_sse_error("backend_error", &message)), st))
+            }
+            None => {
+                st.cancellation_guard.disarm();
+                {
+                    let mut core = st.core.lock().await;
+                    let _ = core.cancel_request(&st.request_id, CancelReason::RequestTimedOut);
+                }
+                tracing::warn!(
+                    request_id = %st.request_id,
+                    "streaming HTTP response timed out waiting for next chunk"
+                );
+                st.terminated = true;
+                Some((
+                    Ok(Bytes::from_static(STREAM_TIMEOUT_ERROR_SSE.as_bytes())),
+                    st,
+                ))
+            }
+        }
+    });
 
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = StatusCode::OK;
@@ -619,10 +919,25 @@ fn response_complete_to_http_response(response: ResponseCompleteMessage) -> Resp
     *http_response.status_mut() =
         StatusCode::from_u16(response.status_code).unwrap_or(StatusCode::BAD_GATEWAY);
 
+    let connection_tokens: HashSet<String> = response
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
+        .flat_map(|(_, value)| {
+            value
+                .split(',')
+                .map(|token| token.trim().to_ascii_lowercase())
+                .filter(|token| !token.is_empty())
+        })
+        .collect();
+
     for (name, value) in response.headers {
         let Ok(header_name) = HeaderName::try_from(name) else {
             continue;
         };
+        if header_name == CONTENT_LENGTH || is_hop_by_hop_header(&header_name, &connection_tokens) {
+            continue;
+        }
         let Ok(header_value) = HeaderValue::from_str(&value) else {
             continue;
         };
@@ -634,8 +949,34 @@ fn response_complete_to_http_response(response: ResponseCompleteMessage) -> Resp
     http_response
 }
 
-fn availability_failure_response(reason: RequestFailureReason) -> Response {
-    let message = match reason {
+fn bad_gateway_json_response(message: &str) -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({
+            "error": {
+                "type": "backend_error",
+                "message": message,
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn gateway_timeout_json_response(message: &str) -> Response {
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(serde_json::json!({
+            "error": {
+                "type": "timeout",
+                "message": message,
+            }
+        })),
+    )
+        .into_response()
+}
+
+const fn failure_reason_message(reason: RequestFailureReason) -> &'static str {
+    match reason {
         RequestFailureReason::QueueTimedOut => "Request timed out waiting for worker",
         RequestFailureReason::QueueFull => "Service temporarily at capacity, please retry",
         RequestFailureReason::NoWorkersAvailable => "No workers available to handle request",
@@ -648,10 +989,19 @@ fn availability_failure_response(reason: RequestFailureReason) -> Response {
             "Service temporarily unavailable while workers shut down"
         }
         RequestFailureReason::RequestAlreadyCanceled => "Request was canceled",
+        RequestFailureReason::WorkerDisconnectedMidStream => "Worker disconnected mid-stream",
+    }
+}
+
+fn availability_failure_response(reason: RequestFailureReason) -> Response {
+    let status = match reason {
+        RequestFailureReason::WorkerDisconnectedMidStream => StatusCode::BAD_GATEWAY,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
     };
+    let message = failure_reason_message(reason);
 
     (
-        StatusCode::SERVICE_UNAVAILABLE,
+        status,
         [
             (
                 CONTENT_TYPE,
@@ -695,6 +1045,19 @@ impl HttpRequestCancellationGuard {
 
     fn disarm(&mut self) {
         self.armed = false;
+    }
+
+    fn cancel_now(&mut self, reason: CancelReason) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let core = self.core.clone();
+        let request_id = self.request_id.clone();
+        tokio::spawn(async move {
+            let mut core = core.lock().await;
+            let _ = core.cancel_request(&request_id, reason);
+        });
     }
 }
 

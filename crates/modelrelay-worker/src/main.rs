@@ -1,9 +1,11 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
 use modelrelay_worker::{WorkerDaemon, WorkerDaemonConfig};
 use serde::Deserialize;
+use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 /// Configuration file format for `--config config.toml`.
@@ -21,6 +23,7 @@ struct FileConfig {
     backend_url: Option<String>,
     log_level: Option<String>,
     endpoint_prefixes: Option<Vec<String>>,
+    models_poll_interval_secs: Option<u64>,
 }
 
 /// Remote LLM worker daemon.
@@ -76,6 +79,10 @@ struct Args {
     #[arg(long, env = "ENDPOINT_PREFIXES")]
     endpoint_prefixes: Option<String>,
 
+    /// Seconds between periodic `/v1/models` polls when `models` contains `*` (0 = disabled)
+    #[arg(long, env = "MODELS_POLL_INTERVAL_SECS")]
+    models_poll_interval: Option<u64>,
+
     /// Generate shell completion script for the given shell and exit
     #[arg(long, value_name = "SHELL", hide = true)]
     completions: Option<Shell>,
@@ -120,19 +127,32 @@ async fn main() {
     let proxy_url = args
         .proxy_url
         .or(file_cfg.proxy_url)
-        .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+        .unwrap_or_else(|| "http://127.0.0.1:8080".to_string())
+        .trim()
+        .to_string();
     let provider = args
         .provider
         .or(file_cfg.provider)
-        .unwrap_or_else(|| "local".to_string());
-    let worker_secret = args.worker_secret.or(file_cfg.worker_secret).unwrap_or_else(|| {
-        eprintln!("error: worker secret is required (--worker-secret, WORKER_SECRET env, or config file)");
-        std::process::exit(1);
-    });
+        .unwrap_or_else(|| "local".to_string())
+        .trim()
+        .to_string();
+    let worker_secret = args
+        .worker_secret
+        .or(file_cfg.worker_secret)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            eprintln!(
+                "error: worker secret is required (--worker-secret, WORKER_SECRET env, or config file)"
+            );
+            std::process::exit(1);
+        });
     let worker_name = args
         .worker_name
         .or(file_cfg.worker_name)
-        .unwrap_or_else(|| "worker".to_string());
+        .unwrap_or_else(|| "worker".to_string())
+        .trim()
+        .to_string();
     let models_str = args.models;
     let models: Vec<String> = if let Some(ref s) = models_str {
         s.split(',')
@@ -140,18 +160,24 @@ async fn main() {
             .filter(|s| !s.is_empty())
             .collect()
     } else if let Some(ref v) = file_cfg.models {
-        v.clone()
+        v.iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     } else {
         vec!["default".to_string()]
     };
     let max_concurrency = args
         .max_concurrency
         .or(file_cfg.max_concurrency)
-        .unwrap_or(1);
+        .unwrap_or(1)
+        .max(1);
     let backend_url = args
         .backend_url
         .or(file_cfg.backend_url)
-        .unwrap_or_else(|| "http://127.0.0.1:8000".to_string());
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_string())
+        .trim()
+        .to_string();
     let endpoint_prefixes: Vec<String> = if let Some(ref s) = args.endpoint_prefixes {
         s.split(',')
             .map(|s| s.trim().to_string())
@@ -162,6 +188,10 @@ async fn main() {
     } else {
         vec![]
     };
+    let models_poll_interval_secs = args
+        .models_poll_interval
+        .or(file_cfg.models_poll_interval_secs)
+        .unwrap_or(30);
     let log_level = args
         .log_level
         .or(file_cfg.log_level)
@@ -173,6 +203,7 @@ async fn main() {
         )
         .init();
 
+    let wildcard_discovery = models.iter().any(|m| m.trim() == "*");
     let mut config = WorkerDaemonConfig {
         proxy_base_url: proxy_url.clone(),
         provider: provider.clone(),
@@ -184,7 +215,8 @@ async fn main() {
         endpoint_prefixes: endpoint_prefixes.clone(),
     };
 
-    // If configured with wildcard models, discover actual models from backend.
+    // Perform initial wildcard discovery so startup logs reflect real models,
+    // while retaining `wildcard_discovery = true` for reconnect & periodic re-polling.
     config.resolve_wildcard_models().await;
 
     tracing::info!(
@@ -194,22 +226,31 @@ async fn main() {
         models = %config.models.join(","),
         concurrency = max_concurrency,
         backend = %backend_url,
+        wildcard_discovery,
+        models_poll_interval_secs,
         "modelrelay-worker starting"
     );
 
-    let daemon = WorkerDaemon::new(config);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
 
-    tokio::select! {
-        result = daemon.run_with_reconnect() => {
-            if let Err(e) = result {
-                tracing::error!(error = %e, "modelrelay-worker error");
-                std::process::exit(1);
-            }
-        }
-        () = shutdown_signal() => {
-            tracing::info!("modelrelay-worker shutting down gracefully");
-        }
+    let poll_interval =
+        (models_poll_interval_secs > 0).then(|| Duration::from_secs(models_poll_interval_secs));
+
+    let daemon = WorkerDaemon::new(config)
+        .with_wildcard_discovery(wildcard_discovery)
+        .with_models_poll_interval(poll_interval)
+        .with_shutdown_rx(shutdown_rx);
+
+    if let Err(e) = daemon.run_with_reconnect().await {
+        tracing::error!(error = %e, "modelrelay-worker error");
+        std::process::exit(1);
     }
+
+    tracing::info!("modelrelay-worker exited cleanly");
 }
 
 async fn shutdown_signal() {
@@ -235,5 +276,5 @@ async fn shutdown_signal() {
         () = sigterm => {},
     }
 
-    tracing::info!("shutting down gracefully");
+    tracing::info!("shutdown signal received");
 }

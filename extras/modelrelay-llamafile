@@ -36,7 +36,7 @@ LOG_DIR="$MODELRELAY_HOME/logs"
 CONFIG_FILE="$MODELRELAY_HOME/config"
 CATALOG_FILE="$MODELRELAY_HOME/catalog.txt"
 CUSTOM_FILE="$MODELRELAY_HOME/custom.txt"
-MODELRELAY_RELEASE="v0.2.1"
+MODELRELAY_RELEASE="${MODELRELAY_RELEASE:-v0.2.10}"
 
 # --- Colors (disabled if not a terminal) ---
 if [ -t 1 ]; then

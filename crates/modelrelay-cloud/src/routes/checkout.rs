@@ -82,7 +82,6 @@ pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> R
         None
     };
 
-    let client = reqwest::Client::new();
     let mut params = vec![
         ("mode".to_string(), "subscription".to_string()),
         (
@@ -101,7 +100,8 @@ pub async fn create(session: Session, State(state): State<Arc<CloudState>>) -> R
         params.push(("customer_email".to_string(), email.clone()));
     }
 
-    let resp = client
+    let resp = state
+        .http_client
         .post("https://api.stripe.com/v1/checkout/sessions")
         .bearer_auth(key)
         .form(&params)
@@ -174,25 +174,41 @@ pub async fn success(
     Query(query): Query<SuccessQuery>,
     State(state): State<Arc<CloudState>>,
 ) -> Response {
-    // Try to identify the user from the Stripe session and set a cookie session
     if let (Some(session_id), Some(key), Some(pool)) =
         (&query.session_id, &state.stripe_key, &state.db)
-        && let Ok(user_id) = resolve_user_from_stripe(session_id, key, pool).await
-        && let Err(e) = session.insert("user_id", user_id.to_string()).await
+        && let Ok(user_id) =
+            resolve_user_from_stripe(&state.http_client, session_id, key, pool).await
     {
-        tracing::error!("failed to store user_id in session: {e}");
+        if let Err(e) = session.cycle_id().await {
+            tracing::warn!("failed to cycle session id on checkout success: {e}");
+        }
+        if let Err(e) = session.insert("user_id", user_id.to_string()).await {
+            tracing::error!("failed to store user_id in session: {e}");
+        }
     }
 
     Html(success_page()).into_response()
 }
 
-/// Retrieve the Stripe checkout session, extract the customer email, and find the user.
+fn is_valid_stripe_session_id(session_id: &str) -> bool {
+    session_id.starts_with("cs_")
+        && session_id.len() <= 128
+        && session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Retrieve the Stripe checkout session, verify payment completion, and find the user.
 async fn resolve_user_from_stripe(
+    client: &reqwest::Client,
     session_id: &str,
     stripe_key: &str,
     pool: &sqlx::PgPool,
 ) -> Result<uuid::Uuid, String> {
-    let client = reqwest::Client::new();
+    if !is_valid_stripe_session_id(session_id) {
+        return Err("invalid stripe session_id format".to_string());
+    }
+
     let url = format!("https://api.stripe.com/v1/checkout/sessions/{session_id}");
     let resp = client
         .get(&url)
@@ -211,13 +227,20 @@ async fn resolve_user_from_stripe(
         .await
         .map_err(|e| format!("stripe parse error: {e}"))?;
 
-    let email = body["customer_email"]
+    let paid = body["payment_status"].as_str() == Some("paid")
+        || body["status"].as_str() == Some("complete");
+    if !paid {
+        return Err("checkout session is not paid/complete".to_string());
+    }
+
+    let raw_email = body["customer_email"]
         .as_str()
         .or_else(|| body["customer_details"]["email"].as_str())
         .ok_or("no email in checkout session")?;
+    let email = raw_email.trim().to_lowercase();
 
-    let user_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
-        .bind(email)
+    let user_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM users WHERE lower(email) = $1")
+        .bind(&email)
         .fetch_optional(pool)
         .await
         .map_err(|e| format!("user query error: {e}"))?

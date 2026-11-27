@@ -1,15 +1,18 @@
-# ModelRelay — Install modelrelay-worker as a Windows Service
+﻿# ModelRelay — Install modelrelay-worker as a Windows Service
 #
 # Prerequisites:
 #   - Download modelrelay-worker-windows-amd64.exe from a GitHub release
 #   - Place it somewhere permanent (e.g. C:\ModelRelay\modelrelay-worker.exe)
+#   - Install NSSM (https://nssm.cc) or WinSW — modelrelay-worker is a standard
+#     console executable rather than a native Win32 SCM service binary, so a
+#     service wrapper such as NSSM is required to avoid SCM Error 1053 on start.
 #   - Run this script as Administrator
 #
 # Usage:
 #   .\install-windows-service-worker.ps1
 #
-# The script installs a Windows Service named "ModelRelayWorker" that starts
-# automatically on boot. After installation, configure your environment
+# The script installs a Windows Service named "ModelRelayWorker" via NSSM that
+# starts automatically on boot. After installation, configure your environment
 # variables (PROXY_URL, WORKER_SECRET, BACKEND_URL, MODELS) and start the
 # service.
 #
@@ -36,8 +39,8 @@ $Description = "ModelRelay worker daemon — connects to the proxy and forwards 
 
 # Command-line arguments. Models are required; everything else can come from
 # environment variables. Example:
-#   $Arguments = "--models llama3-8b,codellama-13b --max-concurrent 2"
-$Arguments = "--models llama3-8b"
+#   $Arguments = "--models llama3-8b,codellama-13b --max-concurrency 2"
+$Arguments = "--models *"
 
 # ---------------------------------------------------------------------------
 # Install
@@ -47,24 +50,26 @@ if (-not (Test-Path $BinaryPath)) {
     Write-Error "Binary not found at $BinaryPath — download it from https://github.com/ericflo/modelrelay/releases"
 }
 
-if ($Arguments) {
-    $BinPathValue = "`"$BinaryPath`" $Arguments"
-} else {
-    $BinPathValue = "`"$BinaryPath`""
+$Nssm = Get-Command nssm -ErrorAction SilentlyContinue
+if (-not $Nssm) {
+    Write-Error "NSSM is required to run modelrelay-worker as a Windows Service (avoids SCM Error 1053). Install via 'winget install NSSM.NSSM' or https://nssm.cc and re-run."
 }
 
-Write-Host "Creating service '$ServiceName'..." -ForegroundColor Cyan
+Write-Host "Creating service '$ServiceName' via NSSM..." -ForegroundColor Cyan
 
-sc.exe create $ServiceName `
-    binPath= $BinPathValue `
-    start= auto `
-    DisplayName= $DisplayName
+if ($Arguments) {
+    & $Nssm.Source install $ServiceName $BinaryPath $Arguments
+} else {
+    & $Nssm.Source install $ServiceName $BinaryPath
+}
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Failed to create service (exit code $LASTEXITCODE). Is it already installed?"
 }
 
-sc.exe description $ServiceName $Description | Out-Null
+& $Nssm.Source set $ServiceName DisplayName $DisplayName | Out-Null
+& $Nssm.Source set $ServiceName Description $Description | Out-Null
+& $Nssm.Source set $ServiceName Start SERVICE_AUTO_START | Out-Null
 
 Write-Host ""
 Write-Host "Service installed successfully." -ForegroundColor Green

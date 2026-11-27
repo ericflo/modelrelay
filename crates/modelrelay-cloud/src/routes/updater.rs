@@ -1,21 +1,17 @@
-//! Tauri v2 auto-updater endpoint.
+//! Tauri v2 auto-updater endpoint and shared GitHub desktop release cache.
 //!
-//! The desktop app is configured to hit
-//! `https://modelrelay.io/updater/desktop/{target}/{arch}/{current_version}`
-//! on launch and when the user clicks "Check for Updates". This module serves
-//! the JSON payload Tauri's updater plugin expects, or returns 204 No Content
-//! when the caller is already on the latest version.
-//!
-//! The GitHub release lookup and per-release asset list are cached for five
-//! minutes (shared with the `/download/desktop/{platform}` redirect), so we
-//! won't hammer the GitHub API even if every desktop instance checks in at
-//! roughly the same time after a release lands.
+//! Serves `https://modelrelay.io/updater/desktop/{target}/{arch}/{current_version}`
+//! and shares a single 5-minute GitHub release cache with
+//! `/download/desktop/{platform}`. Supports optional `GITHUB_TOKEN`, requests
+//! `per_page=100`, skips drafts/prereleases, and falls back to stale cache data
+//! when GitHub is rate-limited or transiently unavailable.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http::header};
@@ -23,33 +19,33 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
+use crate::state::CloudState;
+
 /// GitHub releases API URL used to look up desktop release assets.
-const RELEASES_URL: &str = "https://api.github.com/repos/ericflo/modelrelay/releases";
+const RELEASES_URL: &str = "https://api.github.com/repos/ericflo/modelrelay/releases?per_page=100";
 
 /// How long to cache the GitHub release lookup before refetching.
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
-/// Cached latest release info. The assets vector is the raw GitHub API asset
-/// list for the most recent `desktop-v*` release.
+/// Cached latest release info.
 #[derive(Clone)]
-struct LatestRelease {
-    version: String,
-    published_at: Option<String>,
-    body: Option<String>,
-    assets: Vec<Asset>,
+pub(super) struct LatestRelease {
+    pub(super) version: String,
+    pub(super) published_at: Option<String>,
+    pub(super) body: Option<String>,
+    pub(super) assets: Vec<Asset>,
 }
 
 #[derive(Clone)]
-struct Asset {
-    name: String,
-    url: String,
+pub(super) struct Asset {
+    pub(super) name: String,
+    pub(super) url: String,
 }
 
 static LATEST_CACHE: LazyLock<RwLock<Option<(Instant, LatestRelease)>>> =
     LazyLock::new(|| RwLock::new(None));
 
-/// Tauri v2 dynamic updater JSON response. Matches the shape documented at
-/// <https://v2.tauri.app/plugin/updater/>.
+/// Tauri v2 dynamic updater JSON response.
 #[derive(Serialize)]
 struct UpdateManifest {
     version: String,
@@ -61,23 +57,44 @@ struct UpdateManifest {
     notes: Option<String>,
 }
 
-/// Public entry point: returns the latest release (cached), or `None` if the
-/// GitHub API can't be reached or no `desktop-v*` release exists.
-async fn latest_release() -> Option<LatestRelease> {
-    if let Some((fetched_at, release)) = LATEST_CACHE.read().await.as_ref()
-        && fetched_at.elapsed() < CACHE_TTL
-    {
-        return Some(release.clone());
+/// Shared release lookup used by both `/updater/desktop/...` and `/download/desktop/...`.
+/// Falls back to a previously cached release if GitHub is rate-limited or unreachable.
+pub(super) async fn latest_release(client: &reqwest::Client) -> Option<LatestRelease> {
+    let stale_fallback = {
+        let guard = LATEST_CACHE.read().await;
+        if let Some((fetched_at, release)) = guard.as_ref() {
+            if fetched_at.elapsed() < CACHE_TTL {
+                return Some(release.clone());
+            }
+            Some(release.clone())
+        } else {
+            None
+        }
+    };
+
+    if let Some(release) = fetch_latest_release_from_github(client).await {
+        *LATEST_CACHE.write().await = Some((Instant::now(), release.clone()));
+        Some(release)
+    } else {
+        if stale_fallback.is_some() {
+            tracing::warn!("GitHub releases lookup failed; serving stale cached release");
+        }
+        stale_fallback
+    }
+}
+
+async fn fetch_latest_release_from_github(client: &reqwest::Client) -> Option<LatestRelease> {
+    let mut req = client
+        .get(RELEASES_URL)
+        .header(header::ACCEPT, "application/vnd.github+json");
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        let token = token.trim();
+        if !token.is_empty() {
+            req = req.bearer_auth(token);
+        }
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent("modelrelay-cloud (+https://modelrelay.io)")
-        .timeout(Duration::from_secs(10))
-        .build()
-        .ok()?;
-
-    let releases: Vec<Value> = client
-        .get(RELEASES_URL)
+    let releases: Vec<Value> = req
         .send()
         .await
         .ok()?
@@ -88,9 +105,16 @@ async fn latest_release() -> Option<LatestRelease> {
         .ok()?;
 
     let latest_value = releases.into_iter().find(|r| {
-        r.get("tag_name")
-            .and_then(Value::as_str)
-            .is_some_and(|tag| tag.starts_with("desktop-v"))
+        let is_draft = r.get("draft").and_then(Value::as_bool).unwrap_or(false);
+        let is_prerelease = r
+            .get("prerelease")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        !is_draft
+            && !is_prerelease
+            && r.get("tag_name")
+                .and_then(Value::as_str)
+                .is_some_and(|tag| tag.starts_with("desktop-v"))
     })?;
 
     let tag = latest_value.get("tag_name").and_then(Value::as_str)?;
@@ -119,64 +143,74 @@ async fn latest_release() -> Option<LatestRelease> {
         })
         .collect();
 
-    let release = LatestRelease {
+    Some(LatestRelease {
         version,
         published_at,
         body,
         assets,
-    };
-
-    *LATEST_CACHE.write().await = Some((Instant::now(), release.clone()));
-    Some(release)
+    })
 }
 
-/// Decide whether the server version strictly beats the client version.
-///
-/// We do a best-effort semver compare on the first three dot-separated numeric
-/// components. Any parse failure falls back to a lexicographic comparison so a
-/// malformed tag never locks clients out of updates.
+/// Decide whether the server version strictly beats the client version using
+/// `SemVer` 2.0.0 precedence (including pre-release ordering: `0.1.1 > 0.1.1-alpha.1`,
+/// `0.1.1-alpha.2 > 0.1.1-alpha.1`).
 fn is_newer(server: &str, client: &str) -> bool {
-    fn parse3(v: &str) -> Option<(u32, u32, u32)> {
-        // Strip a leading `v` if present.
+    type ParsedSemver<'a> = ((u32, u32, u32), Option<&'a str>);
+
+    fn parse_semver(v: &str) -> Option<ParsedSemver<'_>> {
         let v = v.strip_prefix('v').unwrap_or(v);
-        // Drop any pre-release / build-metadata suffix so "0.1.1-alpha.2"
-        // parses as (0, 1, 1).
-        let core = v.split(['-', '+']).next().unwrap_or(v);
+        // Strip build metadata (+...)
+        let without_build = v.split('+').next().unwrap_or(v);
+        let (core, pre) = match without_build.split_once('-') {
+            Some((c, p)) if !p.is_empty() => (c, Some(p)),
+            _ => (without_build, None),
+        };
         let mut it = core.split('.');
         let a = it.next()?.parse().ok()?;
         let b = it.next()?.parse().ok()?;
         let c = it.next()?.parse().ok()?;
-        Some((a, b, c))
+        if it.next().is_some() {
+            return None;
+        }
+        Some(((a, b, c), pre))
     }
-    match (parse3(server), parse3(client)) {
-        (Some(s), Some(c)) => s > c,
+
+    fn compare_pre(a: &str, b: &str) -> Ordering {
+        for (pa, pb) in a.split('.').zip(b.split('.')) {
+            let ord = match (pa.parse::<u64>(), pb.parse::<u64>()) {
+                (Ok(na), Ok(nb)) => na.cmp(&nb),
+                (Ok(_), Err(_)) => Ordering::Less,
+                (Err(_), Ok(_)) => Ordering::Greater,
+                (Err(_), Err(_)) => pa.cmp(pb),
+            };
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        a.split('.').count().cmp(&b.split('.').count())
+    }
+
+    match (parse_semver(server), parse_semver(client)) {
+        (Some((s_core, s_pre)), Some((c_core, c_pre))) => match s_core.cmp(&c_core) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => match (s_pre, c_pre) {
+                (None, Some(_)) => true, // stable beats prerelease of same core
+                (Some(_) | None, None) => false,
+                (Some(sp), Some(cp)) => compare_pre(sp, cp) == Ordering::Greater,
+            },
+        },
         _ => server > client,
     }
 }
 
 /// For a given Tauri `{target}/{arch}` pair, return the filename suffix of the
-/// updater-signed artifact we expect the release workflow to upload. If
-/// `createUpdaterArtifacts: true` is set in `tauri.conf.json`, the Tauri v2
-/// bundler produces:
-///
-/// | Platform | Artifact served as `url`       | Sig file               |
-/// |----------|--------------------------------|------------------------|
-/// | macOS    | `*.app.tar.gz`                 | `*.app.tar.gz.sig`     |
-/// | Linux    | `*.AppImage`                   | `*.AppImage.sig`       |
-/// | Windows  | `*-setup.exe` (NSIS installer) | `*-setup.exe.sig`      |
-///
-/// We match by suffix plus an architecture hint so a future universal or
-/// multi-arch release doesn't cross-serve the wrong binary.
+/// updater-signed artifact we expect the release workflow to upload.
 fn artifact_suffixes(target: &str, arch: &str) -> Option<&'static [&'static str]> {
     match (target, arch) {
-        // macOS: Tauri's app bundle tarball. The arch appears as either
-        // `aarch64` or `x64` in the filename (Tauri keeps historical `x64`
-        // for Intel even though the target triple is `x86_64`).
         ("darwin", "aarch64") => Some(&["_aarch64.app.tar.gz", "-aarch64.app.tar.gz"]),
         ("darwin", "x86_64") => Some(&["_x64.app.tar.gz", "-x64.app.tar.gz"]),
-        // Linux: AppImage is the canonical auto-updatable artifact.
         ("linux", "x86_64") => Some(&["_amd64.AppImage", "-amd64.AppImage", "_x86_64.AppImage"]),
-        // Windows: the NSIS installer is what `createUpdaterArtifacts` signs.
         ("windows", "x86_64") => Some(&["_x64-setup.exe", "-x64-setup.exe"]),
         _ => None,
     }
@@ -192,14 +226,8 @@ fn find_pair(assets: &[Asset], suffixes: &[&str]) -> Option<(String, String)> {
     Some((bundle.url.clone(), sig.url.clone()))
 }
 
-/// Download the raw base64 contents of a `.sig` file from a GitHub release
-/// asset URL. Tauri expects this exact string inlined into the JSON.
-async fn fetch_signature(url: &str) -> Option<String> {
-    let client = reqwest::Client::builder()
-        .user_agent("modelrelay-cloud (+https://modelrelay.io)")
-        .timeout(Duration::from_secs(10))
-        .build()
-        .ok()?;
+/// Download the raw base64 contents of a `.sig` file from a GitHub release asset URL.
+async fn fetch_signature(client: &reqwest::Client, url: &str) -> Option<String> {
     let resp = client
         .get(url)
         .header(header::ACCEPT, "application/octet-stream")
@@ -217,36 +245,33 @@ async fn fetch_signature(url: &str) -> Option<String> {
     }
 }
 
-/// Signature cache keyed by the asset's download URL. Signatures don't change
-/// for a released artifact, so we can cache them indefinitely for the lifetime
-/// of the process.
+/// Signature cache keyed by the asset's download URL.
 static SIGNATURE_CACHE: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
-async fn fetch_signature_cached(url: &str) -> Option<String> {
+async fn fetch_signature_cached(client: &reqwest::Client, url: &str) -> Option<String> {
     if let Some(sig) = SIGNATURE_CACHE.read().await.get(url) {
         return Some(sig.clone());
     }
-    let sig = fetch_signature(url).await?;
-    SIGNATURE_CACHE
-        .write()
-        .await
-        .insert(url.to_owned(), sig.clone());
+    let sig = fetch_signature(client, url).await?;
+    let mut cache = SIGNATURE_CACHE.write().await;
+    if cache.len() >= 256 {
+        cache.clear();
+    }
+    cache.insert(url.to_owned(), sig.clone());
     Some(sig)
 }
 
 /// Route handler: `GET /updater/desktop/{target}/{arch}/{current_version}`.
 pub async fn desktop_update_check(
+    State(state): State<Arc<CloudState>>,
     Path((target, arch, current_version)): Path<(String, String, String)>,
 ) -> Response {
     let Some(suffixes) = artifact_suffixes(&target, &arch) else {
-        // Unknown platform — tell the client to look elsewhere.
         return StatusCode::NO_CONTENT.into_response();
     };
 
-    let Some(release) = latest_release().await else {
-        // Can't reach GitHub — treat as "no update available". The client
-        // will retry on the next check.
+    let Some(release) = latest_release(&state.http_client).await else {
         return StatusCode::NO_CONTENT.into_response();
     };
 
@@ -255,12 +280,10 @@ pub async fn desktop_update_check(
     }
 
     let Some((bundle_url, sig_url)) = find_pair(&release.assets, suffixes) else {
-        // Release exists but no matching artifact for this platform — don't
-        // error, just tell the client there's nothing to install.
         return StatusCode::NO_CONTENT.into_response();
     };
 
-    let Some(signature) = fetch_signature_cached(&sig_url).await else {
+    let Some(signature) = fetch_signature_cached(&state.http_client, &sig_url).await else {
         return StatusCode::NO_CONTENT.into_response();
     };
 
@@ -297,9 +320,12 @@ mod tests {
     }
 
     #[test]
-    fn prerelease_suffixes_are_ignored() {
-        // Versions with suffixes still compare by their semver core.
-        assert!(!is_newer("0.1.1", "0.1.1-alpha.1"));
+    fn prerelease_precedence_follows_semver() {
+        // Stable release beats prerelease of the same core version.
+        assert!(is_newer("0.1.1", "0.1.1-alpha.1"));
+        assert!(!is_newer("0.1.1-alpha.1", "0.1.1"));
+        assert!(is_newer("0.1.1-alpha.2", "0.1.1-alpha.1"));
+        assert!(is_newer("0.1.1-rc.1", "0.1.1-beta.9"));
         assert!(is_newer("0.1.2", "0.1.1-rc.5"));
     }
 
@@ -342,8 +368,6 @@ mod tests {
 
     #[test]
     fn find_pair_requires_a_matching_sig() {
-        // Missing .sig → no match, so the endpoint returns 204 instead of
-        // serving a bundle the client can't verify.
         let assets = vec![a("ModelRelay_0.1.2_aarch64.app.tar.gz")];
         let suffixes = artifact_suffixes("darwin", "aarch64").unwrap();
         assert!(find_pair(&assets, suffixes).is_none());

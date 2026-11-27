@@ -8,8 +8,7 @@ use tracing_subscriber::EnvFilter;
 
 use modelrelay_cloud::db;
 use modelrelay_cloud::routes;
-use modelrelay_cloud::state;
-use modelrelay_cloud::state::CloudState;
+use modelrelay_cloud::state::{self, CloudState, DEFAULT_PUBLIC_RELAY_URL};
 
 #[tokio::main]
 async fn main() {
@@ -46,10 +45,20 @@ async fn main() {
         );
     }
 
+    let public_relay_url = std::env::var("PUBLIC_RELAY_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_PUBLIC_RELAY_URL.to_string());
+
     // Parse admin emails from env var
     let admin_emails =
         state::parse_admin_emails(&std::env::var("ADMIN_EMAILS").unwrap_or_default());
-    tracing::info!(admin_count = admin_emails.len(), "admin emails configured");
+    tracing::info!(
+        admin_count = admin_emails.len(),
+        public_relay_url = %public_relay_url,
+        "cloud configuration loaded"
+    );
 
     // Backfill admin flag for existing users (grant-only, never demote)
     if !admin_emails.is_empty()
@@ -91,8 +100,10 @@ async fn main() {
         webhook_secret,
         admin_url,
         admin_token,
+        public_relay_url,
+        http_client: state::default_http_client(),
         admin_emails,
-        rate_limiter: std::sync::Arc::new(crate::state::RateLimiter::new(
+        rate_limiter: std::sync::Arc::new(state::RateLimiter::new(
             5,
             std::time::Duration::from_secs(15 * 60),
         )),
@@ -125,8 +136,27 @@ async fn main() {
 }
 
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install CTRL+C handler");
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install CTRL+C handler");
+    };
+
+    #[cfg(unix)]
+    let sigterm = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = sigterm => {},
+    }
+
     tracing::info!("shutdown signal received");
 }

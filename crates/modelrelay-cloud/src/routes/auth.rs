@@ -99,11 +99,29 @@ pub async fn login_submit(
     let email = form.email.trim().to_lowercase();
 
     let row: Option<(uuid::Uuid, Option<String>)> =
-        sqlx::query_as("SELECT id, password_hash FROM users WHERE email = $1")
+        match sqlx::query_as("SELECT id, password_hash FROM users WHERE lower(email) = $1")
             .bind(&email)
             .fetch_optional(pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("login database query failed: {e}");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Html(modelrelay_web::templates::page_shell(
+                        "Log In",
+                        "/login",
+                        &login_form_html(
+                            Some("Service temporarily unavailable. Please try again in a moment."),
+                            &csrf_field,
+                        ),
+                        false,
+                    )),
+                )
+                    .into_response();
+            }
+        };
 
     let Some((user_id, Some(stored_hash))) = row else {
         state.rate_limiter.record_attempt(ip);
@@ -127,6 +145,9 @@ pub async fn login_submit(
         .into_response();
     }
 
+    if let Err(e) = session.cycle_id().await {
+        tracing::warn!("session cycle_id error: {e}");
+    }
     if let Err(e) = session.insert("user_id", user_id.to_string()).await {
         tracing::error!("session insert error: {e}");
     }

@@ -28,8 +28,8 @@ services:
       REQUEST_TIMEOUT_SECS: "${REQUEST_TIMEOUT_SECS:-300}"
       RUST_LOG: "${PROXY_LOG_LEVEL:-info}"
     healthcheck:
-      # /health returns JSON with version, worker count, queue depth, and uptime.
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      # Built-in healthcheck probe (works in minimal images without wget/curl).
+      test: ["CMD", "modelrelay-server", "--healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3

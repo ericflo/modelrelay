@@ -21,6 +21,8 @@ fn test_state() -> Arc<CloudState> {
         webhook_secret: Some("whsec_test_secret".into()),
         admin_url: None,
         admin_token: None,
+        public_relay_url: modelrelay_cloud::state::DEFAULT_PUBLIC_RELAY_URL.into(),
+        http_client: modelrelay_cloud::state::default_http_client(),
         admin_emails: vec![],
         rate_limiter: std::sync::Arc::new(modelrelay_cloud::state::RateLimiter::new(
             5,
@@ -722,6 +724,8 @@ async fn webhook_without_secret_configured_returns_500() {
         webhook_secret: None, // no secret configured
         admin_url: None,
         admin_token: None,
+        public_relay_url: modelrelay_cloud::state::DEFAULT_PUBLIC_RELAY_URL.into(),
+        http_client: modelrelay_cloud::state::default_http_client(),
         admin_emails: vec![],
         rate_limiter: std::sync::Arc::new(modelrelay_cloud::state::RateLimiter::new(
             5,
@@ -746,5 +750,75 @@ async fn webhook_without_secret_configured_returns_500() {
         resp.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
         "webhook with no secret configured should return 500"
+    );
+}
+
+// ─── CSRF Content-Type bypass regression (F-28) ───────────────────────────
+
+#[tokio::test]
+async fn csrf_rejects_text_plain_and_multipart_posts_without_token() {
+    let app = app_with_session();
+
+    for content_type in [
+        "text/plain",
+        "multipart/form-data; boundary=----abc",
+        "application/json",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/dashboard/keys/generate")
+                    .header("content-type", content_type)
+                    .body(Body::from("x=1"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "POST with content-type `{content_type}` and no CSRF token must be rejected"
+        );
+    }
+}
+
+// ─── Public relay URL & CSP regression (F-21) ─────────────────────────────
+
+#[tokio::test]
+async fn csp_connect_src_includes_public_relay_origin() {
+    let state = Arc::new(CloudState {
+        db: None,
+        stripe_key: None,
+        webhook_secret: None,
+        admin_url: Some("http://proxy.internal:8080".into()),
+        admin_token: Some("secret".into()),
+        public_relay_url: "https://relay.example.com".into(),
+        http_client: modelrelay_cloud::state::default_http_client(),
+        admin_emails: vec![],
+        rate_limiter: std::sync::Arc::new(modelrelay_cloud::state::RateLimiter::new(
+            5,
+            std::time::Duration::from_secs(15 * 60),
+        )),
+    });
+
+    let resp = routes::router(state)
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    let csp = resp
+        .headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        csp.contains("https://relay.example.com"),
+        "CSP connect-src must include public relay origin: {csp}"
+    );
+    assert!(
+        !csp.contains("proxy.internal"),
+        "CSP must never expose internal admin_url: {csp}"
     );
 }

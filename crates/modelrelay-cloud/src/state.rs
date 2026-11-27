@@ -1,24 +1,40 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sqlx::PgPool;
+
+const MAX_TRACKED_RATE_LIMIT_IPS: usize = 10_000;
+pub const DEFAULT_PUBLIC_RELAY_URL: &str = "https://api.modelrelay.io";
+
+/// Build the shared outbound HTTP client used by cloud routes with sane
+/// connection and overall request timeouts.
+#[must_use]
+pub fn default_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("modelrelay-cloud (+https://modelrelay.io)")
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// In-memory IP-based rate limiter.
 ///
 /// Tracks timestamps of recent attempts per IP address and rejects requests
-/// that exceed `max_attempts` within `window` duration.
+/// that exceed `max_attempts` within `window` duration. Bounded to prevent
+/// unbounded memory growth under distributed brute-force attacks.
 pub struct RateLimiter {
     attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     max_attempts: usize,
-    window: std::time::Duration,
+    window: Duration,
 }
 
 impl RateLimiter {
     /// Create a new rate limiter with the given limits.
     #[must_use]
-    pub fn new(max_attempts: usize, window: std::time::Duration) -> Self {
+    pub fn new(max_attempts: usize, window: Duration) -> Self {
         Self {
             attempts: Mutex::new(HashMap::new()),
             max_attempts,
@@ -36,7 +52,11 @@ impl RateLimiter {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(timestamps) = map.get_mut(&ip) {
             timestamps.retain(|t| now.duration_since(*t) < self.window);
-            timestamps.len() >= self.max_attempts
+            let is_over = timestamps.len() >= self.max_attempts;
+            if timestamps.is_empty() {
+                map.remove(&ip);
+            }
+            is_over
         } else {
             false
         }
@@ -49,6 +69,15 @@ impl RateLimiter {
             .attempts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if map.len() >= MAX_TRACKED_RATE_LIMIT_IPS && !map.contains_key(&ip) {
+            map.retain(|_, timestamps| {
+                timestamps.retain(|t| now.duration_since(*t) < self.window);
+                !timestamps.is_empty()
+            });
+            if map.len() >= MAX_TRACKED_RATE_LIMIT_IPS {
+                map.clear();
+            }
+        }
         let timestamps = map.entry(ip).or_default();
         timestamps.retain(|t| now.duration_since(*t) < self.window);
         timestamps.push(now);
@@ -64,10 +93,15 @@ pub struct CloudState {
     pub stripe_key: Option<String>,
     /// Stripe webhook signing secret — `None` when `STRIPE_WEBHOOK_SECRET` is not set.
     pub webhook_secret: Option<String>,
-    /// Base URL of the modelrelay-server admin API (e.g. `http://modelrelay-server:8080`).
+    /// Internal base URL of the modelrelay-server admin API (e.g. `http://modelrelay-server:8080`).
     pub admin_url: Option<String>,
     /// Bearer token for authenticating with the modelrelay-server admin API.
     pub admin_token: Option<String>,
+    /// Publicly reachable relay URL shown to end users in `/setup`, `/integrate`,
+    /// and allowed by CSP `connect-src` (e.g. `https://api.modelrelay.io`).
+    pub public_relay_url: String,
+    /// Shared outbound HTTP client with timeouts.
+    pub http_client: reqwest::Client,
     /// Lowercase, trimmed admin email addresses from `ADMIN_EMAILS` env var.
     pub admin_emails: Vec<String>,
     /// IP-based rate limiter for auth endpoints (login/signup).
@@ -120,50 +154,48 @@ mod tests {
 
     #[test]
     fn rate_limiter_allows_under_limit() {
-        let limiter = RateLimiter::new(3, std::time::Duration::from_secs(60));
+        let limiter = RateLimiter::new(3, Duration::from_secs(60));
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         assert!(!limiter.is_limited(ip));
         limiter.record_attempt(ip);
         limiter.record_attempt(ip);
-        assert!(!limiter.is_limited(ip)); // 2 attempts, limit is 3
+        assert!(!limiter.is_limited(ip));
     }
 
     #[test]
     fn rate_limiter_blocks_at_limit() {
-        let limiter = RateLimiter::new(3, std::time::Duration::from_secs(60));
+        let limiter = RateLimiter::new(3, Duration::from_secs(60));
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         limiter.record_attempt(ip);
         limiter.record_attempt(ip);
         limiter.record_attempt(ip);
-        assert!(limiter.is_limited(ip)); // 3 attempts = blocked
+        assert!(limiter.is_limited(ip));
     }
 
     #[test]
     fn rate_limiter_different_ips_independent() {
-        let limiter = RateLimiter::new(2, std::time::Duration::from_secs(60));
+        let limiter = RateLimiter::new(2, Duration::from_secs(60));
         let ip1: IpAddr = "1.2.3.4".parse().unwrap();
         let ip2: IpAddr = "5.6.7.8".parse().unwrap();
         limiter.record_attempt(ip1);
         limiter.record_attempt(ip1);
         assert!(limiter.is_limited(ip1));
-        assert!(!limiter.is_limited(ip2)); // different IP, no attempts
+        assert!(!limiter.is_limited(ip2));
     }
 
     #[test]
     fn rate_limiter_expired_entries_not_counted() {
-        // Use a very short window so entries expire immediately
-        let limiter = RateLimiter::new(2, std::time::Duration::from_nanos(1));
+        let limiter = RateLimiter::new(2, Duration::from_nanos(1));
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         limiter.record_attempt(ip);
         limiter.record_attempt(ip);
-        // Entries should have expired by now (1ns window)
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(1));
         assert!(!limiter.is_limited(ip));
     }
 
     #[test]
     fn rate_limiter_ipv6() {
-        let limiter = RateLimiter::new(2, std::time::Duration::from_secs(60));
+        let limiter = RateLimiter::new(2, Duration::from_secs(60));
         let ip: IpAddr = "::1".parse().unwrap();
         limiter.record_attempt(ip);
         limiter.record_attempt(ip);

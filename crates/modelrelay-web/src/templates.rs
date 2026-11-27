@@ -209,17 +209,17 @@ pub fn dashboard_page() -> String {
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
       const qd = d.queue_depth || {};
-      const models = Object.keys(qd);
+      const providers = Object.keys(qd);
       let html = '<div style="margin-bottom:12px;color:#8b949e;font-size:0.9rem;">Active workers: <strong style="color:#e6edf3;">' + (d.active_workers||0) + '</strong></div>';
-      if (models.length === 0) {
-        html += '<div class="empty-state">No models queued.</div>';
+      if (providers.length === 0) {
+        html += '<div class="empty-state">No requests queued.</div>';
       } else {
-        const maxQ = Math.max(1, ...models.map(m => qd[m]));
-        for (const m of models) {
-          const pct = Math.round((qd[m] / maxQ) * 100);
-          html += '<div class="stat-row"><span class="stat-label">' + escHtml(m) + '</span>'
+        const maxQ = Math.max(1, ...providers.map(p => qd[p]));
+        for (const p of providers) {
+          const pct = Math.round((qd[p] / maxQ) * 100);
+          html += '<div class="stat-row"><span class="stat-label">' + escHtml(p) + '</span>'
             + '<div class="stat-bar"><div class="stat-fill" style="width:' + pct + '%"></div></div>'
-            + '<span class="stat-num">' + qd[m] + '</span></div>';
+            + '<span class="stat-num">' + qd[p] + '</span></div>';
         }
       }
       el.innerHTML = html;
@@ -253,7 +253,7 @@ pub fn dashboard_page() -> String {
         const status = k.revoked
           ? '<span class="badge badge-cancel">Revoked</span>'
           : '<span class="badge badge-active">Active</span>';
-        const revokeBtn = k.revoked ? '' : '<button class="btn-sm danger" onclick="window.__revokeKey(\'' + escHtml(k.id) + '\',\'' + escHtml(k.name) + '\')">Revoke</button>';
+        const revokeBtn = k.revoked ? '' : '<button class="btn-sm danger js-revoke-key" data-key-id="' + escHtml(k.id) + '" data-key-name="' + escHtml(k.name) + '">Revoke</button>';
         html += '<tr><td>' + escHtml(k.name) + '</td><td><code>' + escHtml(k.prefix) + '...</code></td>'
           + '<td>' + fmtTimestamp(k.created_at) + '</td>'
           + '<td>' + fmtTimestamp(k.last_used_at) + '</td>'
@@ -261,6 +261,9 @@ pub fn dashboard_page() -> String {
       }
       html += '</tbody></table>';
       el.innerHTML = html;
+      el.querySelectorAll('.js-revoke-key').forEach(btn => {
+        btn.addEventListener('click', () => window.__revokeKey(btn.dataset.keyId, btn.dataset.keyName));
+      });
     } catch(e) {
       el.innerHTML = '<div class="empty-state" style="color:#f87171;">Failed to load keys.</div>';
     }
@@ -279,10 +282,22 @@ pub fn dashboard_page() -> String {
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
       nameInput.value = '';
-      $('#new-key-secret').innerHTML = '<div class="secret-box">'
-        + '<button class="copy-btn" onclick="navigator.clipboard.writeText(\'' + escHtml(d.secret) + '\')">Copy</button>'
-        + escHtml(d.secret)
-        + '<span class="warn">&#9888; This secret will not be shown again. Copy it now.</span></div>';
+      const secretBox = document.createElement('div');
+      secretBox.className = 'secret-box';
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'copy-btn';
+      copyBtn.type = 'button';
+      copyBtn.textContent = 'Copy';
+      copyBtn.addEventListener('click', () => navigator.clipboard.writeText(d.secret));
+      secretBox.appendChild(copyBtn);
+      secretBox.appendChild(document.createTextNode(d.secret));
+      const warn = document.createElement('span');
+      warn.className = 'warn';
+      warn.textContent = '\u26A0 This secret will not be shown again. Copy it now.';
+      secretBox.appendChild(warn);
+      const container = $('#new-key-secret');
+      container.textContent = '';
+      container.appendChild(secretBox);
       pollKeys();
     } catch(e) {
       alert('Failed to create key: ' + e.message);
@@ -608,6 +623,7 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
   let detectedPlatform = 'linux';
   let selectedBackend = 'lmstudio';
   let workerPollInterval = null;
+  let workerPollSession = 0;
   let troubleshootTimer = null;
   let initialWorkerIds = new Set();
   let detectedModels = [];
@@ -769,9 +785,9 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     } catch(e) {}
   }
 
-  function startWorkerPoll() {
+  async function startWorkerPoll() {
     stopWorkerPoll();
-    snapshotWorkers();
+    const pollSession = ++workerPollSession;
     const pulse = $('#worker-pulse');
     const statusText = $('#worker-status-text');
     const troubleshoot = $('#troubleshoot-hints');
@@ -781,23 +797,19 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
     if (troubleshoot) troubleshoot.style.display = 'none';
     if (skipBtn) skipBtn.style.display = 'none';
 
-    // Show troubleshooting after 15s, skip button after 30s
-    let elapsed = 0;
-    troubleshootTimer = setInterval(() => {
-      elapsed += 1;
-      if (elapsed >= 15 && troubleshoot) troubleshoot.style.display = 'block';
-      if (elapsed >= 30 && skipBtn) skipBtn.style.display = 'inline-block';
-    }, 1000);
-
-    workerPollInterval = setInterval(async () => {
+    const checkWorkers = async () => {
       try {
         const pollUrl = getWorkersPollUrl();
         const opts = cloudCfg ? { credentials: 'same-origin' } : { headers: authHeaders() };
         const r = await fetch(pollUrl, opts);
-        if (!r.ok) return;
+        if (!r.ok || pollSession !== workerPollSession) return false;
         const d = await r.json();
         const workers = d.workers || [];
-        const newWorker = workers.find(w => !initialWorkerIds.has(w.worker_id));
+        // Prefer a newly connected worker, or detect an already-connected matching worker.
+        const configuredName = ($('#worker-name') && $('#worker-name').value.trim()) || '';
+        const newWorker = workers.find(w => !initialWorkerIds.has(w.worker_id))
+          || (configuredName && workers.find(w => w.worker_name === configuredName))
+          || (workers.length > 0 && initialWorkerIds.size === 0 ? workers[0] : null);
         if (newWorker) {
           stopWorkerPoll();
           if (pulse) pulse.className = 'pulse connected';
@@ -813,17 +825,34 @@ pub fn setup_wizard_page_with_config(cloud_config: Option<&CloudWizardConfig>) -
           if (skipBtn) skipBtn.style.display = 'none';
           const nextBtn = $('#step6-next');
           if (nextBtn) { nextBtn.disabled = false; nextBtn.style.opacity = '1'; }
-          // Pre-fill test model from detected models
           const testModel = $('#test-model');
           if (testModel && detectedModels.length > 0 && !testModel.value) {
             testModel.value = detectedModels[0];
           }
+          return true;
         }
       } catch(e) {}
-    }, 3000);
+      return false;
+    };
+
+    // Wait for initial snapshot BEFORE starting poll interval (eliminates race condition).
+    await snapshotWorkers();
+    if (pollSession !== workerPollSession) return;
+    if (await checkWorkers()) return;
+
+    // Show troubleshooting after 15s, skip button after 30s
+    let elapsed = 0;
+    troubleshootTimer = setInterval(() => {
+      elapsed += 1;
+      if (elapsed >= 15 && troubleshoot) troubleshoot.style.display = 'block';
+      if (elapsed >= 30 && skipBtn) skipBtn.style.display = 'inline-block';
+    }, 1000);
+
+    workerPollInterval = setInterval(checkWorkers, 3000);
   }
 
   function stopWorkerPoll() {
+    workerPollSession += 1;
     if (workerPollInterval) { clearInterval(workerPollInterval); workerPollInterval = null; }
     if (troubleshootTimer) { clearInterval(troubleshootTimer); troubleshootTimer = null; }
   }

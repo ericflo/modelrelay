@@ -134,6 +134,8 @@
       font-weight: 600;
     }
     .status-text.connected { color: var(--success); }
+    .status-text.connecting { color: var(--warning); }
+    .status-text.error { color: var(--danger); }
     .status-text.disconnected { color: var(--text-muted); }
 
     /* Stats grid */
@@ -650,7 +652,7 @@
         <div class="form-row">
           <div class="form-group">
             <label for="provider">Provider</label>
-            <input type="text" id="provider" placeholder="default">
+            <input type="text" id="provider" placeholder="local">
           </div>
           <div class="form-group">
             <label for="workerName">Worker Name</label>
@@ -760,11 +762,27 @@
         const dot = document.getElementById("statusDot");
         const text = document.getElementById("statusText");
 
-        if (status.connected) {
+        const state = status.state || (status.connected ? "connected" : "disconnected");
+        if (state === "connected") {
           dot.className = "status-dot connected";
           dot.title = "Worker is connected to relay";
           text.className = "status-text connected";
           text.textContent = "Connected";
+        } else if (state === "connecting") {
+          dot.className = "status-dot connecting";
+          dot.title = "Connecting to relay server";
+          text.className = "status-text connecting";
+          text.textContent = "Connecting\u2026";
+        } else if (state === "reconnecting") {
+          dot.className = "status-dot connecting";
+          dot.title = "Connection lost — reconnecting";
+          text.className = "status-text connecting";
+          text.textContent = "Reconnecting\u2026";
+        } else if (state === "auth_failed") {
+          dot.className = "status-dot";
+          dot.title = "Authentication failed — check your worker secret or API key";
+          text.className = "status-text error";
+          text.textContent = "Authentication Failed";
         } else {
           dot.className = "status-dot";
           dot.title = "Worker is disconnected";
@@ -782,7 +800,7 @@
             '<div class="models-grid">' +
             status.models.map(m => '<span class="model-tag">' + escapeHtml(m) + '</span>').join("") +
             '</div>';
-        } else if (status.connected) {
+        } else if (status.connected || status.running) {
           modelsEl.innerHTML = '<div class="models-loading"><div class="spinner"></div>Discovering models\u2026</div>';
         } else {
           modelsEl.innerHTML =
@@ -804,7 +822,7 @@
           errorEl.innerHTML = "";
         }
 
-        workerRunning = status.connected;
+        workerRunning = Boolean(status.running || status.connected);
         document.getElementById("startBtn").disabled = workerRunning;
         document.getElementById("stopBtn").disabled = !workerRunning;
       } catch (e) {
@@ -821,6 +839,11 @@
     async function doRefresh() {
       const btn = document.getElementById("refreshBtn");
       btn.classList.add("spinning");
+      try {
+        await invoke("refresh_models");
+      } catch (e) {
+        console.warn("Model refresh failed:", e);
+      }
       await refreshStatus();
       setTimeout(() => btn.classList.remove("spinning"), 600);
     }
@@ -935,16 +958,18 @@
         const models = modelsRaw.split(",").map(m => m.trim()).filter(m => m.length > 0);
         if (models.length === 0) models.push("*");
 
+        const maxConcurrentRaw = parseInt(document.getElementById("maxConcurrent").value, 10);
+        const pollIntervalRaw = parseInt(document.getElementById("pollInterval").value, 10);
         const settings = {
-          backend_url: document.getElementById("backendUrl").value || "http://localhost:11434",
-          relay_url: document.getElementById("relayUrlSetting").value || "https://api.modelrelay.io",
-          worker_secret: document.getElementById("workerSecret").value,
-          provider: document.getElementById("provider").value || "default",
-          worker_name: document.getElementById("workerName").value || "my-worker",
+          backend_url: (document.getElementById("backendUrl").value || "http://localhost:11434").trim(),
+          relay_url: (document.getElementById("relayUrlSetting").value || "https://api.modelrelay.io").trim(),
+          worker_secret: document.getElementById("workerSecret").value.trim(),
+          provider: (document.getElementById("provider").value || "local").trim() || "local",
+          worker_name: (document.getElementById("workerName").value || "my-worker").trim() || "my-worker",
           models: models,
-          max_concurrent: parseInt(document.getElementById("maxConcurrent").value, 10) || 4,
+          max_concurrent: Number.isFinite(maxConcurrentRaw) ? Math.min(64, Math.max(1, maxConcurrentRaw)) : 4,
           auto_start: document.getElementById("autoStart").checked,
-          poll_interval_secs: parseInt(document.getElementById("pollInterval").value, 10) || 30,
+          poll_interval_secs: Number.isFinite(pollIntervalRaw) ? Math.min(3600, Math.max(1, pollIntervalRaw)) : 30,
         };
 
         await invoke("save_settings", { settings });
@@ -1030,10 +1055,10 @@
 
       try {
         const settings = {
-          backend_url: document.getElementById("wizBackendUrl").value || "http://localhost:11434",
-          relay_url: document.getElementById("wizRelayUrl").value || "https://api.modelrelay.io",
-          worker_secret: document.getElementById("wizWorkerSecret").value,
-          provider: "default",
+          backend_url: (document.getElementById("wizBackendUrl").value || "http://localhost:11434").trim(),
+          relay_url: (document.getElementById("wizRelayUrl").value || "https://api.modelrelay.io").trim(),
+          worker_secret: document.getElementById("wizWorkerSecret").value.trim(),
+          provider: "local",
           worker_name: "my-worker",
           models: ["*"],
           max_concurrent: 4,
@@ -1044,9 +1069,17 @@
         await invoke("save_settings", { settings });
         await invoke("start_worker");
 
-        // Wait briefly for connection
-        await new Promise(r => setTimeout(r, 3000));
-        const status = await invoke("get_status");
+        // Poll until we receive a real RegisterAck (connected) or fail fast on auth/connect error.
+        resultEl.textContent = "Connecting and authenticating with relay\u2026";
+        let status = await invoke("get_status");
+        const deadline = Date.now() + 12000;
+        while (Date.now() < deadline && !status.connected && status.state !== "auth_failed") {
+          await new Promise(r => setTimeout(r, 300));
+          status = await invoke("get_status");
+          if (status.state === "reconnecting" && status.error) {
+            break;
+          }
+        }
 
         if (status.connected) {
           resultEl.className = "test-result success";
@@ -1057,7 +1090,7 @@
           finishBtn.disabled = false;
         } else {
           resultEl.className = "test-result failure";
-          resultEl.textContent = "Connection failed. " + (status.error || "Check your settings and try again.");
+          resultEl.textContent = "Connection failed. " + (status.error || "Timed out waiting for relay registration. Check your URL and API key.");
           testBtn.disabled = false;
         }
       } catch (e) {
@@ -1161,8 +1194,10 @@
 
       try {
         await invoke("install_update");
-        // Normally the app restarts before we see this; if not, tell the user.
-        progressText.textContent = "Install complete.";
+        progressText.textContent = "Install complete. Restart ModelRelay to finish updating.";
+        btn.disabled = false;
+        btn.textContent = "Install Update";
+        checkBtn.disabled = false;
       } catch (e) {
         setUpdateStatus("Install failed: " + escapeHtml(String(e)), "error");
         btn.disabled = false;
@@ -1206,6 +1241,12 @@
       });
       win.listen("updater-manual-check", () => {
         doCheckUpdate();
+      });
+      win.listen("updater-restart-deferred", () => {
+        const btn = document.getElementById("installUpdateBtn");
+        const checkBtn = document.getElementById("checkUpdateBtn");
+        if (btn) { btn.disabled = false; btn.textContent = "Install Update"; }
+        if (checkBtn) { checkBtn.disabled = false; }
       });
     } catch (e) {
       console.error("Failed to set up updater listeners:", e);

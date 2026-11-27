@@ -1,47 +1,125 @@
-use std::{collections::HashMap, error::Error, io, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    io,
+    sync::Arc,
+    time::SystemTime,
+};
 
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use modelrelay_protocol::{
-    ModelsUpdateMessage, PongMessage, RegisterMessage, RequestMessage, ResponseChunkMessage,
-    ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+    ErrorMessage, ModelsUpdateMessage, PongMessage, RegisterMessage, RequestMessage,
+    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
 };
-use reqwest::header::{CONNECTION, CONTENT_LENGTH, HOST, HeaderMap as ReqwestHeaderMap};
+use reqwest::header::{
+    ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, HOST, HeaderMap as ReqwestHeaderMap, HeaderName,
+    PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+};
+use serde::{Deserialize, Serialize};
 use tokio::{
     select,
-    sync::mpsc,
+    sync::{Notify, mpsc, watch},
     task::JoinHandle,
-    time::{Duration, Instant, sleep},
+    time::{Duration, Instant, sleep, timeout},
 };
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{Bytes, Message, client::IntoClientRequest},
+    tungstenite::{
+        Bytes, Message,
+        client::IntoClientRequest,
+        protocol::{CloseFrame, frame::coding::CloseCode},
+    },
 };
 
 /// How long the worker waits without receiving any message from the server
-/// (including pings) before assuming the connection is dead and reconnecting.
-/// The server sends application-level pings every 30 s, and we now also send
-/// client-initiated WebSocket pings every `CLIENT_PING_INTERVAL`, so 60 s
-/// (3–4× the fastest signal) is plenty of margin for transient delays while
-/// catching truly dead connections within a minute rather than 90 s.
+/// before assuming the connection is dead and reconnecting.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often the worker sends a protocol-level WebSocket Ping frame to the
-/// server. This matters because some middleboxes (NAT, load balancers,
-/// Kubernetes ingresses) silently drop idle connections, leaving both sides
-/// with a half-open TCP socket that never surfaces a read error. Proactively
-/// writing to the socket detects those breakages via `socket_write.send`
-/// returning an error, triggering an immediate reconnect.
+/// server to detect silently-half-open TCP connections through middleboxes.
 const CLIENT_PING_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Maximum time to establish the WebSocket handshake to the proxy server.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Maximum time to wait for `RegisterAck` after sending `Register`.
+const REGISTER_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum time allowed for a single WebSocket write before assuming the socket
+/// is wedged and reconnecting.
+const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum time to wait for a clean WebSocket close frame on local shutdown.
+const WS_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Maximum time to drain in-flight requests after receiving a local shutdown signal.
+const LOCAL_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum time to wait for the next chunk from the local backend during streaming.
+const STREAM_CHUNK_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Maximum time to wait for backend `/v1/models` discovery.
+const MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Capacity of the bounded internal event channel between request tasks and the
+/// WebSocket writer loop.
+const EVENT_CHANNEL_CAPACITY: usize = 128;
+
+/// WebSocket policy violation close code returned by the proxy on auth failure.
+const CLOSE_CODE_POLICY_VIOLATION: u16 = 1008;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type WebSocketStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 type WebSocketWrite = SplitSink<WebSocketStream, Message>;
 
+/// Live connection phase reported by [`WorkerDaemon`] over a `watch` channel.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerConnectionState {
+    #[default]
+    Disconnected,
+    Connecting,
+    Connected,
+    Reconnecting,
+    AuthFailed,
+}
+
+/// Snapshot of live [`WorkerDaemon`] telemetry for desktop/CLI UIs.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerStatusSnapshot {
+    pub state: WorkerConnectionState,
+    pub active_requests: u32,
+    pub models: Vec<String>,
+    pub last_error: Option<String>,
+    pub worker_id: Option<String>,
+}
+
 enum DaemonEvent {
     Outbound(WorkerToServerMessage),
-    RequestFinished(String),
-    RequestFailed { request_id: String, error: String },
+    RequestCompleted(ResponseCompleteMessage),
+    RequestFailed {
+        request_id: String,
+        error: String,
+    },
+    ModelsDiscovered {
+        models: Vec<String>,
+        force_send: bool,
+    },
+}
+
+enum SessionOutcome {
+    /// Proxy initiated graceful shutdown (e.g. rolling deploy); reconnect after a short delay.
+    ProxyGracefulShutdown,
+    /// Local shutdown signal fired; exit cleanly without reconnecting.
+    LocalShutdown,
+    /// Server rejected authentication (WS close 1008); surface error and back off.
+    AuthRejected { reason: String, registered: bool },
+    /// Unexpected disconnect or timeout; reconnect with backoff.
+    Disconnected {
+        reason: Option<String>,
+        registered: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,14 +139,14 @@ pub struct WorkerDaemonConfig {
 impl WorkerDaemonConfig {
     /// If the configured models list contains `"*"`, queries the backend's
     /// `/v1/models` endpoint and replaces the wildcard with the actual model
-    /// IDs reported by the backend.  Falls back to the original list when the
+    /// IDs reported by the backend. Falls back to the original list when the
     /// backend does not support the endpoint or returns an error.
     pub async fn resolve_wildcard_models(&mut self) {
         if !self.models.iter().any(|m| m.trim() == "*") {
             return;
         }
 
-        let client = reqwest::Client::new();
+        let client = build_http_client();
         match discover_backend_models(&client, self).await {
             Ok(discovered) if !discovered.is_empty() => {
                 tracing::info!(
@@ -92,7 +170,7 @@ impl WorkerDaemonConfig {
 
     #[must_use]
     pub fn websocket_url(&self) -> String {
-        let base = self.proxy_base_url.trim_end_matches('/');
+        let base = self.proxy_base_url.trim().trim_end_matches('/');
         let scheme = if let Some(stripped) = base.strip_prefix("http://") {
             format!("ws://{stripped}")
         } else if let Some(stripped) = base.strip_prefix("https://") {
@@ -101,41 +179,193 @@ impl WorkerDaemonConfig {
             base.to_string()
         };
 
-        format!(
-            "{scheme}/v1/worker/connect?provider={}",
-            self.provider.as_str()
-        )
+        let encoded_provider = percent_encode_query_component(self.provider.trim());
+        format!("{scheme}/v1/worker/connect?provider={encoded_provider}")
     }
 
     #[must_use]
     pub fn backend_url(&self, endpoint_path: &str) -> String {
-        format!(
-            "{}{}",
-            self.backend_base_url.trim_end_matches('/'),
+        let base = self.backend_base_url.trim().trim_end_matches('/');
+        // Avoid doubling `/v1` when backend_base_url already ends with `/v1`
+        // (e.g. `http://localhost:11434/v1` + `/v1/chat/completions`).
+        let normalized_path = if base.ends_with("/v1")
+            && (endpoint_path == "/v1" || endpoint_path.starts_with("/v1/"))
+        {
+            &endpoint_path[3..]
+        } else {
             endpoint_path
-        )
+        };
+        format!("{base}{normalized_path}")
+    }
+}
+
+/// Build the shared `reqwest::Client` with connection timeouts and TCP keepalive.
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .tcp_keepalive(Duration::from_secs(15))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// RFC 3986 percent-encoding for URL query parameter values.
+fn percent_encode_query_component(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        let is_unreserved =
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
+        if is_unreserved {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+/// Incremental UTF-8 decoder that buffers up to 3 incomplete trailing bytes
+/// across network chunk boundaries so multi-byte characters (em-dash, CJK,
+/// emoji) split across TCP segments never abort the stream.
+struct Utf8StreamDecoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8StreamDecoder {
+    fn new() -> Self {
+        Self {
+            pending: Vec::with_capacity(8),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> String {
+        if bytes.is_empty() && self.pending.is_empty() {
+            return String::new();
+        }
+        self.pending.extend_from_slice(bytes);
+        let mut out = String::with_capacity(self.pending.len());
+
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(valid) => {
+                    out.push_str(valid);
+                    self.pending.clear();
+                    break;
+                }
+                Err(err) => {
+                    let valid_up_to = err.valid_up_to();
+                    if valid_up_to > 0 {
+                        // SAFETY: `valid_up_to` is guaranteed to be valid UTF-8.
+                        if let Ok(prefix) = std::str::from_utf8(&self.pending[..valid_up_to]) {
+                            out.push_str(prefix);
+                        }
+                    }
+                    if let Some(invalid_len) = err.error_len() {
+                        // Truly invalid UTF-8 bytes — replace with U+FFFD and continue.
+                        out.push('\u{FFFD}');
+                        self.pending.drain(..valid_up_to + invalid_len);
+                    } else {
+                        // Incomplete multi-byte sequence at the end of the chunk;
+                        // retain trailing bytes until the next chunk arrives.
+                        if valid_up_to > 0 {
+                            self.pending.drain(..valid_up_to);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let remainder = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        Some(remainder)
     }
 }
 
 pub struct WorkerDaemon {
     config: WorkerDaemonConfig,
     client: reqwest::Client,
+    status_tx: Option<watch::Sender<WorkerStatusSnapshot>>,
+    shutdown_rx: Option<watch::Receiver<bool>>,
+    models_poll_interval: Option<Duration>,
+    wildcard_discovery: bool,
+    models_refresh_notify: Option<Arc<Notify>>,
 }
 
 impl WorkerDaemon {
     #[must_use]
     pub fn new(config: WorkerDaemonConfig) -> Self {
+        let wildcard_discovery = config.models.iter().any(|m| m.trim() == "*");
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: build_http_client(),
+            status_tx: None,
+            shutdown_rx: None,
+            models_poll_interval: None,
+            wildcard_discovery,
+            models_refresh_notify: None,
         }
     }
 
-    fn registration_message(&self) -> WorkerToServerMessage {
+    /// Attach a `watch::Sender` to receive live connection, load, model, and error updates.
+    #[must_use]
+    pub fn with_status_sender(mut self, tx: watch::Sender<WorkerStatusSnapshot>) -> Self {
+        self.status_tx = Some(tx);
+        self
+    }
+
+    /// Attach a `watch::Receiver<bool>` that triggers graceful drain and exit when `true`.
+    #[must_use]
+    pub fn with_shutdown_rx(mut self, rx: watch::Receiver<bool>) -> Self {
+        self.shutdown_rx = Some(rx);
+        self
+    }
+
+    /// Periodically re-query backend `/v1/models` when wildcard discovery is enabled.
+    #[must_use]
+    pub fn with_models_poll_interval(mut self, interval: Option<Duration>) -> Self {
+        self.models_poll_interval = interval;
+        self
+    }
+
+    /// Explicitly control whether wildcard backend `/v1/models` discovery is active
+    /// (useful when `resolve_wildcard_models` was already called before `WorkerDaemon::new`).
+    #[must_use]
+    pub fn with_wildcard_discovery(mut self, enabled: bool) -> Self {
+        self.wildcard_discovery = enabled;
+        self
+    }
+
+    /// Attach a notifier that triggers an immediate backend `/v1/models` refresh on demand.
+    #[must_use]
+    pub fn with_models_refresh_notify(mut self, notify: Arc<Notify>) -> Self {
+        self.models_refresh_notify = Some(notify);
+        self
+    }
+
+    fn update_status(&self, f: impl FnOnce(&mut WorkerStatusSnapshot)) {
+        if let Some(ref tx) = self.status_tx {
+            tx.send_modify(f);
+        }
+    }
+
+    fn is_local_shutdown(&self) -> bool {
+        self.shutdown_rx.as_ref().is_some_and(|rx| *rx.borrow())
+    }
+
+    fn registration_message(&self, models: &[String]) -> WorkerToServerMessage {
         WorkerToServerMessage::Register(RegisterMessage {
-            worker_name: self.config.worker_name.clone(),
-            models: self.config.models.clone(),
-            max_concurrent: self.config.max_concurrent,
+            worker_name: self.config.worker_name.trim().to_string(),
+            models: models.to_vec(),
+            max_concurrent: self.config.max_concurrent.max(1),
             protocol_version: Some("2026-04-bridge-v1".to_string()),
             current_load: Some(0),
             endpoint_prefixes: self.config.endpoint_prefixes.clone(),
@@ -144,47 +374,208 @@ impl WorkerDaemon {
 
     /// Runs one connection session.
     ///
-    /// Returns `Ok(true)` when the proxy sent a `GracefulShutdown` before closing
-    /// (the caller should not reconnect), and `Ok(false)` when the connection was
-    /// lost unexpectedly (the caller should reconnect).
-    ///
     /// # Errors
     ///
-    /// Returns an error when the daemon cannot connect, authenticate, serialize protocol
-    /// messages, or proxy a backend response.
-    async fn run_session(&self) -> Result<bool, BoxError> {
+    /// Returns an error when the daemon cannot construct the request, connect,
+    /// complete registration, or write to the WebSocket.
+    #[allow(clippy::too_many_lines)]
+    async fn run_session(&self) -> Result<SessionOutcome, BoxError> {
+        if self.is_local_shutdown() {
+            return Ok(SessionOutcome::LocalShutdown);
+        }
+
+        // If wildcard discovery is active, refresh the model list from the local
+        // backend before registering (falls back to configured models on error).
+        let mut current_models = self.config.models.clone();
+        if self.wildcard_discovery
+            && let Ok(discovered) = discover_backend_models(&self.client, &self.config).await
+            && !discovered.is_empty()
+        {
+            current_models = discovered;
+        }
+
+        self.update_status(|s| {
+            s.state = WorkerConnectionState::Connecting;
+            s.active_requests = 0;
+            s.models.clone_from(&current_models);
+        });
+
         let mut request = self.config.websocket_url().into_client_request()?;
         request
             .headers_mut()
-            .insert("x-worker-secret", self.config.worker_secret.parse()?);
+            .insert("x-worker-secret", self.config.worker_secret.trim().parse()?);
 
-        let (socket, _) = connect_async(request).await?;
+        let (socket, _) = timeout(WS_CONNECT_TIMEOUT, connect_async(request))
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "WebSocket connect timed out after {}s",
+                        WS_CONNECT_TIMEOUT.as_secs()
+                    ),
+                )
+            })??;
+
         let (mut socket_write, mut socket_read) = socket.split();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let mut active_requests = HashMap::<String, JoinHandle<()>>::new();
-        let mut shutting_down = false;
-        let mut last_server_activity = Instant::now();
 
-        // Client-initiated pings. We use `interval` with `MissedTickBehavior::Delay`
-        // so a slow tick doesn't queue up extra pings, and skip the immediate first
-        // tick so we don't burn a ping on freshly-registered connections.
-        let mut ping_ticker = tokio::time::interval(CLIENT_PING_INTERVAL);
-        ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ping_ticker.tick().await; // consume the immediate first tick
+        send_worker_message(
+            &mut socket_write,
+            &self.registration_message(&current_models),
+        )
+        .await?;
 
-        send_worker_message(&mut socket_write, &self.registration_message()).await?;
+        // Wait for RegisterAck before considering the connection healthy or resetting backoff.
+        let ack_deadline = Instant::now() + REGISTER_ACK_TIMEOUT;
+        let mut buffered_server_messages: Vec<ServerToWorkerMessage> = Vec::new();
+        let ack = loop {
+            let remaining = ack_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Box::new(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for RegisterAck from proxy",
+                )));
+            }
+            let maybe_msg = timeout(remaining, socket_read.next()).await.map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for RegisterAck from proxy",
+                )
+            })?;
+            let Some(msg_result) = maybe_msg else {
+                return Ok(SessionOutcome::Disconnected {
+                    reason: Some("proxy closed connection before RegisterAck".to_string()),
+                    registered: false,
+                });
+            };
+            match msg_result? {
+                Message::Text(payload) => {
+                    let server_msg = serde_json::from_str::<ServerToWorkerMessage>(&payload)?;
+                    if let ServerToWorkerMessage::RegisterAck(ack) = server_msg {
+                        break ack;
+                    }
+                    buffered_server_messages.push(server_msg);
+                }
+                Message::Close(frame) => {
+                    return Ok(classify_close_frame(frame.as_ref(), false));
+                }
+                Message::Ping(payload) => {
+                    send_ws_frame(&mut socket_write, Message::Pong(payload)).await?;
+                }
+                Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+            }
+        };
+
+        if !ack.warnings.is_empty() {
+            tracing::warn!(
+                worker_id = %ack.worker_id,
+                warnings = ?ack.warnings,
+                "proxy reported registration warnings"
+            );
+        }
+        if !ack.models.is_empty() {
+            current_models.clone_from(&ack.models);
+        }
+
+        self.update_status(|s| {
+            s.state = WorkerConnectionState::Connected;
+            s.active_requests = 0;
+            s.models.clone_from(&current_models);
+            s.worker_id = Some(ack.worker_id.clone());
+            s.last_error = None;
+        });
 
         tracing::info!(
             url = %self.config.websocket_url(),
-            "connected to proxy, registered worker"
+            worker_id = %ack.worker_id,
+            models = %current_models.join(", "),
+            "connected to proxy and received RegisterAck"
         );
 
+        let (event_tx, mut event_rx) = mpsc::channel::<DaemonEvent>(EVENT_CHANNEL_CAPACITY);
+        let mut active_requests = HashMap::<String, JoinHandle<()>>::new();
+        let mut shutting_down = false;
+        let mut local_shutdown = false;
+        let mut local_shutdown_deadline: Option<Instant> = None;
+        let mut last_server_activity = Instant::now();
+        let mut shutdown_rx = self.shutdown_rx.clone();
+
+        for msg in buffered_server_messages {
+            if !self
+                .handle_server_message(
+                    &mut socket_write,
+                    &event_tx,
+                    &mut active_requests,
+                    &mut shutting_down,
+                    msg,
+                )
+                .await?
+            {
+                return Ok(SessionOutcome::ProxyGracefulShutdown);
+            }
+        }
+
+        let mut ping_ticker = tokio::time::interval(CLIENT_PING_INTERVAL);
+        ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ping_ticker.tick().await;
+
+        let mut models_poll_ticker = self
+            .models_poll_interval
+            .filter(|_| self.wildcard_discovery)
+            .map(|dur| {
+                let mut ticker = tokio::time::interval(dur.max(Duration::from_secs(5)));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticker
+            });
+        if let Some(ref mut ticker) = models_poll_ticker {
+            ticker.tick().await;
+        }
+
+        let mut outcome = SessionOutcome::Disconnected {
+            reason: None,
+            registered: true,
+        };
+
         loop {
+            if local_shutdown && active_requests.is_empty() {
+                outcome = SessionOutcome::LocalShutdown;
+                break;
+            }
+
             let idle_deadline = sleep(IDLE_TIMEOUT.saturating_sub(last_server_activity.elapsed()));
 
             select! {
+                () = wait_for_local_shutdown(&mut shutdown_rx), if !local_shutdown => {
+                    tracing::info!(
+                        in_flight = active_requests.len(),
+                        "local shutdown signal received; draining in-flight requests"
+                    );
+                    local_shutdown = true;
+                    shutting_down = true;
+                    local_shutdown_deadline = Some(Instant::now() + LOCAL_SHUTDOWN_DRAIN_TIMEOUT);
+                    if active_requests.is_empty() {
+                        outcome = SessionOutcome::LocalShutdown;
+                        break;
+                    }
+                }
+                () = sleep_until_optional(local_shutdown_deadline), if local_shutdown => {
+                    tracing::warn!(
+                        remaining = active_requests.len(),
+                        "local shutdown drain timeout reached; aborting remaining requests"
+                    );
+                    outcome = SessionOutcome::LocalShutdown;
+                    break;
+                }
                 maybe_message = socket_read.next() => {
                     let Some(message) = maybe_message else {
+                        outcome = if shutting_down {
+                            SessionOutcome::ProxyGracefulShutdown
+                        } else {
+                            SessionOutcome::Disconnected {
+                                reason: Some("proxy closed websocket stream".to_string()),
+                                registered: true,
+                            }
+                        };
                         break;
                     };
                     match message? {
@@ -192,18 +583,27 @@ impl WorkerDaemon {
                             last_server_activity = Instant::now();
                             let server_message = serde_json::from_str::<ServerToWorkerMessage>(&payload)?;
                             if !self.handle_server_message(
+                                &mut socket_write,
                                 &event_tx,
                                 &mut active_requests,
                                 &mut shutting_down,
                                 server_message,
                             ).await? {
+                                outcome = SessionOutcome::ProxyGracefulShutdown;
                                 break;
                             }
                         }
-                        Message::Close(_) => break,
+                        Message::Close(frame) => {
+                            if shutting_down {
+                                outcome = SessionOutcome::ProxyGracefulShutdown;
+                            } else {
+                                outcome = classify_close_frame(frame.as_ref(), true);
+                            }
+                            break;
+                        }
                         Message::Ping(payload) => {
                             last_server_activity = Instant::now();
-                            socket_write.send(Message::Pong(payload)).await?;
+                            send_ws_frame(&mut socket_write, Message::Pong(payload)).await?;
                         }
                         Message::Binary(_) | Message::Frame(_) | Message::Pong(_) => {
                             last_server_activity = Instant::now();
@@ -218,15 +618,53 @@ impl WorkerDaemon {
                         DaemonEvent::Outbound(message) => {
                             send_worker_message(&mut socket_write, &message).await?;
                         }
-                        DaemonEvent::RequestFinished(request_id) => {
-                            active_requests.remove(&request_id);
+                        DaemonEvent::RequestCompleted(response) => {
+                            // Remove BEFORE sending ResponseComplete so any concurrent Ping
+                            // immediately sees the decremented load.
+                            active_requests.remove(&response.request_id);
+                            let count = u32::try_from(active_requests.len()).unwrap_or(u32::MAX);
+                            self.update_status(|s| s.active_requests = count);
+                            send_worker_message(
+                                &mut socket_write,
+                                &WorkerToServerMessage::ResponseComplete(response),
+                            )
+                            .await?;
                         }
                         DaemonEvent::RequestFailed { request_id, error } => {
+                            // Isolate per-request backend errors: report Error for this
+                            // request only without aborting siblings or dropping the WS.
                             active_requests.remove(&request_id);
-                            for (_, handle) in active_requests.drain() {
-                                handle.abort();
+                            let count = u32::try_from(active_requests.len()).unwrap_or(u32::MAX);
+                            self.update_status(|s| s.active_requests = count);
+                            tracing::warn!(
+                                request_id = %request_id,
+                                error = %error,
+                                "backend request failed; reporting request error to proxy"
+                            );
+                            send_worker_message(
+                                &mut socket_write,
+                                &WorkerToServerMessage::Error(ErrorMessage {
+                                    code: "backend_error".to_string(),
+                                    message: error,
+                                    request_id: Some(request_id),
+                                }),
+                            )
+                            .await?;
+                        }
+                        DaemonEvent::ModelsDiscovered { models, force_send } => {
+                            if force_send || models != current_models {
+                                current_models.clone_from(&models);
+                                self.update_status(|s| s.models.clone_from(&models));
+                                let current_load = u32::try_from(active_requests.len()).unwrap_or(u32::MAX);
+                                send_worker_message(
+                                    &mut socket_write,
+                                    &WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
+                                        models,
+                                        current_load,
+                                    }),
+                                )
+                                .await?;
                             }
-                            return Err(Box::new(io::Error::other(error)));
                         }
                     }
                 }
@@ -235,26 +673,44 @@ impl WorkerDaemon {
                         timeout_secs = IDLE_TIMEOUT.as_secs(),
                         "no messages received from server within idle timeout, assuming dead connection"
                     );
+                    outcome = SessionOutcome::Disconnected {
+                        reason: Some(format!(
+                            "no messages from proxy for {}s",
+                            IDLE_TIMEOUT.as_secs()
+                        )),
+                        registered: true,
+                    };
                     break;
                 }
                 _ = ping_ticker.tick() => {
-                    // Proactively detect silently-half-open sockets (NAT eviction,
-                    // middlebox reset) by writing a WS Ping frame. If the send
-                    // fails, the session is definitely dead; bubble up via `?`
-                    // so `run_with_reconnect` re-establishes the WebSocket and
-                    // re-registers the worker (clearing any stale server-side
-                    // routing entry).
-                    if let Err(e) = socket_write
-                        .send(Message::Ping(Bytes::new()))
-                        .await
-                    {
+                    if let Err(e) = send_ws_frame(&mut socket_write, Message::Ping(Bytes::new())).await {
                         tracing::warn!(
                             error = %e,
                             "client-initiated ping failed; connection is dead, reconnecting"
                         );
+                        outcome = SessionOutcome::Disconnected {
+                            reason: Some(format!("keepalive ping failed: {e}")),
+                            registered: true,
+                        };
                         break;
                     }
                     tracing::trace!("sent client-initiated ws ping");
+                }
+                () = tick_optional(&mut models_poll_ticker), if models_poll_ticker.is_some() => {
+                    spawn_models_discovery(
+                        self.client.clone(),
+                        self.config.clone(),
+                        event_tx.clone(),
+                        false,
+                    );
+                }
+                () = notified_optional(self.models_refresh_notify.as_ref()), if self.models_refresh_notify.is_some() => {
+                    spawn_models_discovery(
+                        self.client.clone(),
+                        self.config.clone(),
+                        event_tx.clone(),
+                        true,
+                    );
                 }
             }
         }
@@ -262,8 +718,24 @@ impl WorkerDaemon {
         for (_, handle) in active_requests {
             handle.abort();
         }
+        self.update_status(|s| s.active_requests = 0);
 
-        Ok(shutting_down)
+        if matches!(outcome, SessionOutcome::LocalShutdown) {
+            let _ = timeout(
+                WS_CLOSE_TIMEOUT,
+                socket_write.send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "worker shutting down".into(),
+                }))),
+            )
+            .await;
+            self.update_status(|s| {
+                s.state = WorkerConnectionState::Disconnected;
+                s.last_error = None;
+            });
+        }
+
+        Ok(outcome)
     }
 
     /// Runs the worker loop until the proxy closes the connection or the task is cancelled.
@@ -278,74 +750,123 @@ impl WorkerDaemon {
 
     /// Runs the worker loop, reconnecting after unexpected disconnections.
     ///
-    /// Exits cleanly on a graceful proxy shutdown or task cancellation. On connection
-    /// errors or unexpected drops, waits with exponential backoff (1 s base, 30 s cap,
-    /// up to 500 ms of jitter) before reconnecting. Each attempt is logged to stderr.
+    /// Reuses a single HTTP connection pool across reconnects, resets backoff once
+    /// a session completes registration, and exits cleanly when a configured
+    /// shutdown signal fires.
     ///
     /// # Errors
     ///
-    /// Only returns an error if the underlying machinery cannot be set up at all (e.g.
-    /// invalid config that cannot form a URL or header value). Transient network errors
-    /// are retried indefinitely.
+    /// Only returns an error if the daemon cannot be configured. Transient network
+    /// errors are retried with exponential backoff until local shutdown.
+    #[allow(clippy::too_many_lines)]
     pub async fn run_with_reconnect(self) -> Result<(), BoxError> {
-        let config = self.config;
         let mut backoff_ms: u64 = 1_000;
         let mut attempt: u32 = 0;
 
         loop {
-            let daemon = Self::new(config.clone());
+            if self.is_local_shutdown() {
+                self.update_status(|s| {
+                    s.state = WorkerConnectionState::Disconnected;
+                    s.active_requests = 0;
+                    s.last_error = None;
+                });
+                return Ok(());
+            }
+
             let session_start = Instant::now();
-            match daemon.run_session().await {
-                Ok(true) => {
-                    // Server sent a graceful shutdown — it's going away (e.g. rolling
-                    // deploy), not telling us to die. Reconnect to the replacement pod
-                    // after a short delay.
+            match self.run_session().await {
+                Ok(SessionOutcome::LocalShutdown) => {
+                    return Ok(());
+                }
+                Ok(SessionOutcome::ProxyGracefulShutdown) => {
                     attempt += 1;
-                    let jitter_ms = subsecond_jitter_ms();
-                    let delay_ms = 2_000 + jitter_ms;
+                    let delay_ms = 2_000 + subsecond_jitter_ms();
                     tracing::info!(
                         attempt,
                         delay_ms,
                         session_duration_secs = session_start.elapsed().as_secs(),
                         "server sent graceful shutdown, reconnecting to new instance"
                     );
-                    sleep(Duration::from_millis(delay_ms)).await;
-                    backoff_ms = 1_000; // reset backoff — this is expected
+                    self.update_status(|s| {
+                        s.state = WorkerConnectionState::Reconnecting;
+                        s.last_error = Some("Server restarting — reconnecting…".to_string());
+                    });
+                    backoff_ms = 1_000;
+                    if sleep_or_shutdown(Duration::from_millis(delay_ms), self.shutdown_rx.as_ref())
+                        .await
+                    {
+                        return Ok(());
+                    }
                 }
-                Ok(false) => {
+                Ok(SessionOutcome::AuthRejected { reason, registered }) => {
                     attempt += 1;
-                    let session_secs = session_start.elapsed().as_secs();
-                    // If the session lasted longer than the idle timeout, it was a
-                    // genuine connection that eventually dropped — reset backoff so
-                    // we reconnect quickly rather than waiting up to 30 s.
-                    if session_secs > IDLE_TIMEOUT.as_secs() {
+                    if registered {
                         backoff_ms = 1_000;
                     }
-                    let jitter_ms = subsecond_jitter_ms();
+                    let delay_ms = backoff_ms + subsecond_jitter_ms();
+                    tracing::error!(
+                        attempt,
+                        delay_ms,
+                        reason = %reason,
+                        "proxy rejected worker authentication (close 1008); check WORKER_SECRET / API key"
+                    );
+                    self.update_status(|s| {
+                        s.state = WorkerConnectionState::AuthFailed;
+                        s.last_error = Some(format!("Authentication failed: {reason}"));
+                    });
+                    if sleep_or_shutdown(Duration::from_millis(delay_ms), self.shutdown_rx.as_ref())
+                        .await
+                    {
+                        return Ok(());
+                    }
+                    backoff_ms = (backoff_ms * 2).min(30_000);
+                }
+                Ok(SessionOutcome::Disconnected { reason, registered }) => {
+                    attempt += 1;
+                    if registered {
+                        backoff_ms = 1_000;
+                    }
+                    let delay_ms = backoff_ms + subsecond_jitter_ms();
+                    let msg =
+                        reason.unwrap_or_else(|| "connection closed unexpectedly".to_string());
                     tracing::warn!(
                         attempt,
-                        delay_ms = backoff_ms + jitter_ms,
-                        session_duration_secs = session_secs,
+                        delay_ms,
+                        session_duration_secs = session_start.elapsed().as_secs(),
+                        reason = %msg,
                         "connection closed unexpectedly, reconnecting"
                     );
-                    sleep(Duration::from_millis(backoff_ms + jitter_ms)).await;
+                    self.update_status(|s| {
+                        s.state = WorkerConnectionState::Reconnecting;
+                        s.last_error = Some(msg);
+                    });
+                    if sleep_or_shutdown(Duration::from_millis(delay_ms), self.shutdown_rx.as_ref())
+                        .await
+                    {
+                        return Ok(());
+                    }
                     backoff_ms = (backoff_ms * 2).min(30_000);
                 }
                 Err(e) => {
                     attempt += 1;
-                    let session_secs = session_start.elapsed().as_secs();
-                    if session_secs > IDLE_TIMEOUT.as_secs() {
-                        backoff_ms = 1_000;
-                    }
-                    let jitter_ms = subsecond_jitter_ms();
+                    let delay_ms = backoff_ms + subsecond_jitter_ms();
+                    let err_str = e.to_string();
                     tracing::warn!(
-                        error = %e,
+                        error = %err_str,
                         attempt,
-                        delay_ms = backoff_ms + jitter_ms,
-                        session_duration_secs = session_secs,
+                        delay_ms,
+                        session_duration_secs = session_start.elapsed().as_secs(),
                         "connection error, reconnecting"
                     );
-                    sleep(Duration::from_millis(backoff_ms + jitter_ms)).await;
+                    self.update_status(|s| {
+                        s.state = WorkerConnectionState::Reconnecting;
+                        s.last_error = Some(err_str);
+                    });
+                    if sleep_or_shutdown(Duration::from_millis(delay_ms), self.shutdown_rx.as_ref())
+                        .await
+                    {
+                        return Ok(());
+                    }
                     backoff_ms = (backoff_ms * 2).min(30_000);
                 }
             }
@@ -354,7 +875,8 @@ impl WorkerDaemon {
 
     async fn handle_server_message(
         &self,
-        event_tx: &mpsc::UnboundedSender<DaemonEvent>,
+        socket_write: &mut WebSocketWrite,
+        event_tx: &mpsc::Sender<DaemonEvent>,
         active_requests: &mut HashMap<String, JoinHandle<()>>,
         shutting_down: &mut bool,
         message: ServerToWorkerMessage,
@@ -362,9 +884,18 @@ impl WorkerDaemon {
         match message {
             ServerToWorkerMessage::Request(request) => {
                 if *shutting_down {
-                    return Err(Box::new(io::Error::other(
-                        "received new request while draining worker daemon",
-                    )));
+                    let request_id = request.request_id;
+                    send_worker_message(
+                        socket_write,
+                        &WorkerToServerMessage::Error(ErrorMessage {
+                            code: "worker_draining".to_string(),
+                            message: "worker is shutting down and cannot accept new requests"
+                                .to_string(),
+                            request_id: Some(request_id),
+                        }),
+                    )
+                    .await?;
+                    return Ok(true);
                 }
                 let request_id = request.request_id.clone();
                 let finished_request_id = request_id.clone();
@@ -374,59 +905,78 @@ impl WorkerDaemon {
                 let handle = tokio::spawn(async move {
                     match forward_request(client, config, request, &event_tx).await {
                         Ok(response) => {
-                            let _ = event_tx.send(DaemonEvent::Outbound(
-                                WorkerToServerMessage::ResponseComplete(response),
-                            ));
-                            let _ =
-                                event_tx.send(DaemonEvent::RequestFinished(finished_request_id));
+                            let _ = event_tx.send(DaemonEvent::RequestCompleted(response)).await;
                         }
                         Err(error) => {
-                            let _ = event_tx.send(DaemonEvent::RequestFailed {
-                                request_id: finished_request_id,
-                                error: error.to_string(),
-                            });
+                            let _ = event_tx
+                                .send(DaemonEvent::RequestFailed {
+                                    request_id: finished_request_id,
+                                    error: error.to_string(),
+                                })
+                                .await;
                         }
                     }
                 });
                 active_requests.insert(request_id, handle);
+                let count = u32::try_from(active_requests.len()).unwrap_or(u32::MAX);
+                self.update_status(|s| s.active_requests = count);
                 Ok(true)
             }
             ServerToWorkerMessage::Ping(ping) => {
                 let current_load = u32::try_from(active_requests.len()).unwrap_or(u32::MAX);
-                event_tx
-                    .send(DaemonEvent::Outbound(WorkerToServerMessage::Pong(
-                        PongMessage {
-                            current_load,
-                            timestamp_unix_ms: ping.timestamp_unix_ms,
-                        },
-                    )))
-                    .map_err(|error| -> BoxError {
-                        Box::new(io::Error::other(error.to_string()))
-                    })?;
+                send_worker_message(
+                    socket_write,
+                    &WorkerToServerMessage::Pong(PongMessage {
+                        current_load,
+                        timestamp_unix_ms: ping.timestamp_unix_ms,
+                    }),
+                )
+                .await?;
                 Ok(true)
             }
-            ServerToWorkerMessage::GracefulShutdown(_) => {
+            ServerToWorkerMessage::GracefulShutdown(gs) => {
+                tracing::info!(
+                    reason = ?gs.reason,
+                    drain_timeout_secs = ?gs.drain_timeout_secs,
+                    in_flight = active_requests.len(),
+                    "received GracefulShutdown from proxy"
+                );
                 *shutting_down = true;
                 Ok(true)
             }
             ServerToWorkerMessage::ModelsRefresh(_) => {
-                let models = discover_backend_models(&self.client, &self.config).await?;
-                event_tx
-                    .send(DaemonEvent::Outbound(WorkerToServerMessage::ModelsUpdate(
-                        ModelsUpdateMessage {
-                            models,
-                            current_load: u32::try_from(active_requests.len()).unwrap_or(u32::MAX),
-                        },
-                    )))
-                    .map_err(|error| -> BoxError {
-                        Box::new(io::Error::other(error.to_string()))
-                    })?;
+                spawn_models_discovery(
+                    self.client.clone(),
+                    self.config.clone(),
+                    event_tx.clone(),
+                    true,
+                );
                 Ok(true)
             }
             ServerToWorkerMessage::Cancel(cancel) => {
+                tracing::debug!(
+                    request_id = %cancel.request_id,
+                    reason = ?cancel.reason,
+                    "cancelling in-flight request"
+                );
                 if let Some(handle) = active_requests.remove(&cancel.request_id) {
                     handle.abort();
+                    let count = u32::try_from(active_requests.len()).unwrap_or(u32::MAX);
+                    self.update_status(|s| s.active_requests = count);
                 }
+                // Acknowledge cancellation with ResponseComplete (status 499) so
+                // the proxy immediately frees this worker's concurrency slot.
+                send_worker_message(
+                    socket_write,
+                    &WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+                        request_id: cancel.request_id,
+                        status_code: 499,
+                        headers: modelrelay_protocol::HeaderMap::new(),
+                        body: None,
+                        token_counts: None,
+                    }),
+                )
+                .await?;
                 Ok(true)
             }
             ServerToWorkerMessage::RegisterAck(_) => Ok(true),
@@ -434,20 +984,153 @@ impl WorkerDaemon {
     }
 }
 
+fn classify_close_frame(frame: Option<&CloseFrame>, registered: bool) -> SessionOutcome {
+    let Some(frame) = frame else {
+        return SessionOutcome::Disconnected {
+            reason: Some("proxy closed connection without close frame".to_string()),
+            registered,
+        };
+    };
+    let code: u16 = frame.code.into();
+    let reason = frame.reason.to_string();
+    tracing::warn!(code, reason = %reason, "proxy closed websocket");
+    if code == CLOSE_CODE_POLICY_VIOLATION {
+        SessionOutcome::AuthRejected {
+            reason: if reason.is_empty() {
+                "policy violation (1008)".to_string()
+            } else {
+                reason
+            },
+            registered,
+        }
+    } else {
+        SessionOutcome::Disconnected {
+            reason: Some(if reason.is_empty() {
+                format!("proxy closed connection (code {code})")
+            } else {
+                format!("proxy closed connection ({code}: {reason})")
+            }),
+            registered,
+        }
+    }
+}
+
+fn spawn_models_discovery(
+    client: reqwest::Client,
+    config: WorkerDaemonConfig,
+    event_tx: mpsc::Sender<DaemonEvent>,
+    force_send: bool,
+) {
+    tokio::spawn(async move {
+        match discover_backend_models(&client, &config).await {
+            Ok(models) if !models.is_empty() => {
+                let _ = event_tx
+                    .send(DaemonEvent::ModelsDiscovered { models, force_send })
+                    .await;
+            }
+            Ok(_) => {
+                tracing::debug!("backend /v1/models returned empty list during refresh");
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "backend /v1/models discovery failed during refresh; keeping existing models"
+                );
+            }
+        }
+    });
+}
+
+async fn sleep_until_optional(deadline: Option<Instant>) {
+    match deadline {
+        Some(instant) => tokio::time::sleep_until(instant).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn tick_optional(ticker: &mut Option<tokio::time::Interval>) {
+    match ticker {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn notified_optional(notify: Option<&Arc<Notify>>) {
+    match notify {
+        Some(n) => n.notified().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_for_local_shutdown(rx: &mut Option<watch::Receiver<bool>>) {
+    let Some(receiver) = rx else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    if *receiver.borrow() {
+        return;
+    }
+    while receiver.changed().await.is_ok() {
+        if *receiver.borrow() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
+/// Sleeps for `duration`, returning `true` early if local shutdown fires.
+async fn sleep_or_shutdown(
+    duration: Duration,
+    shutdown_rx: Option<&watch::Receiver<bool>>,
+) -> bool {
+    let mut rx = shutdown_rx.cloned();
+    select! {
+        () = sleep(duration) => false,
+        () = wait_for_local_shutdown(&mut rx) => true,
+    }
+}
+
+async fn send_ws_frame(socket: &mut WebSocketWrite, frame: Message) -> Result<(), BoxError> {
+    timeout(WS_WRITE_TIMEOUT, socket.send(frame))
+        .await
+        .map_err(|_| -> BoxError {
+            Box::new(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebSocket write timed out",
+            ))
+        })?
+        .map_err(Into::into)
+}
+
 async fn send_worker_message(
     socket: &mut WebSocketWrite,
     message: &WorkerToServerMessage,
 ) -> Result<(), BoxError> {
     let payload = serde_json::to_string(message)?;
-    socket.send(Message::Text(payload.into())).await?;
-    Ok(())
+    send_ws_frame(socket, Message::Text(payload.into())).await
 }
 
+fn is_hop_by_hop_header(name: &HeaderName, connection_tokens: &HashSet<String>) -> bool {
+    *name == CONNECTION
+        || *name == TRANSFER_ENCODING
+        || *name == UPGRADE
+        || *name == TE
+        || *name == TRAILER
+        || *name == PROXY_AUTHENTICATE
+        || *name == PROXY_AUTHORIZATION
+        || name.as_str().eq_ignore_ascii_case("keep-alive")
+        || name.as_str().eq_ignore_ascii_case("trailers")
+        || connection_tokens.contains(&name.as_str().to_ascii_lowercase())
+}
+
+#[allow(clippy::too_many_lines)]
 async fn forward_request(
     client: reqwest::Client,
     config: WorkerDaemonConfig,
     request: RequestMessage,
-    event_tx: &mpsc::UnboundedSender<DaemonEvent>,
+    event_tx: &mpsc::Sender<DaemonEvent>,
 ) -> Result<ResponseCompleteMessage, BoxError> {
     let RequestMessage {
         request_id,
@@ -459,12 +1142,27 @@ async fn forward_request(
         ..
     } = request;
 
+    let req_connection_tokens: HashSet<String> = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
+        .flat_map(|(_, value)| {
+            value
+                .split(',')
+                .map(|token| token.trim().to_ascii_lowercase())
+                .filter(|token| !token.is_empty())
+        })
+        .collect();
+
     let mut backend_headers = ReqwestHeaderMap::new();
     for (name, value) in headers {
-        let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) else {
+        let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
             continue;
         };
-        if header_name == CONTENT_LENGTH || header_name == CONNECTION || header_name == HOST {
+        if header_name == CONTENT_LENGTH
+            || header_name == HOST
+            || header_name == ACCEPT_ENCODING
+            || is_hop_by_hop_header(&header_name, &req_connection_tokens)
+        {
             continue;
         }
         let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value) else {
@@ -490,11 +1188,29 @@ async fn forward_request(
         .body(body)
         .send()
         .await?;
-    let status_code = response.status().as_u16();
+    let status = response.status();
+    let status_code = status.as_u16();
+
+    let resp_connection_tokens: HashSet<String> = response
+        .headers()
+        .get_all(CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|raw| {
+            raw.split(',')
+                .map(|token| token.trim().to_ascii_lowercase())
+                .filter(|token| !token.is_empty())
+        })
+        .collect();
+
     let response_headers = response
         .headers()
         .iter()
-        .filter(|(name, _)| *name != CONTENT_LENGTH && *name != CONNECTION && *name != HOST)
+        .filter(|(name, _)| {
+            *name != CONTENT_LENGTH
+                && *name != HOST
+                && !is_hop_by_hop_header(name, &resp_connection_tokens)
+        })
         .filter_map(|(name, value)| {
             value
                 .to_str()
@@ -502,17 +1218,49 @@ async fn forward_request(
                 .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
         })
         .collect();
-    if is_streaming {
+
+    // Only stream SSE chunks on 2xx responses; for non-2xx errors (e.g. 400/404/429/500),
+    // buffer the full error payload and return a unary ResponseComplete so the proxy
+    // relays the real HTTP status code and JSON error body instead of HTTP 200 SSE.
+    if is_streaming && status.is_success() {
         let mut response = response;
-        while let Some(chunk) = response.chunk().await? {
-            let chunk = String::from_utf8(chunk.to_vec())?;
+        let mut decoder = Utf8StreamDecoder::new();
+        loop {
+            let next_chunk = timeout(STREAM_CHUNK_READ_TIMEOUT, response.chunk())
+                .await
+                .map_err(|_| -> BoxError {
+                    Box::new(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "backend stream chunk timed out",
+                    ))
+                })??;
+            let Some(chunk) = next_chunk else {
+                break;
+            };
+            let text_chunk = decoder.push(&chunk);
+            if !text_chunk.is_empty() {
+                event_tx
+                    .send(DaemonEvent::Outbound(WorkerToServerMessage::ResponseChunk(
+                        ResponseChunkMessage {
+                            request_id: request_id.clone(),
+                            chunk: text_chunk,
+                        },
+                    )))
+                    .await
+                    .map_err(|error| -> BoxError {
+                        Box::new(io::Error::other(error.to_string()))
+                    })?;
+            }
+        }
+        if let Some(tail) = decoder.finish() {
             event_tx
                 .send(DaemonEvent::Outbound(WorkerToServerMessage::ResponseChunk(
                     ResponseChunkMessage {
                         request_id: request_id.clone(),
-                        chunk,
+                        chunk: tail,
                     },
                 )))
+                .await
                 .map_err(|error| -> BoxError { Box::new(io::Error::other(error.to_string())) })?;
         }
 
@@ -537,8 +1285,7 @@ async fn forward_request(
 }
 
 /// Returns a pseudo-random jitter value in the range 0–499 ms derived from the
-/// subsecond component of the system clock.  Not cryptographically strong, but
-/// sufficient for backoff spread across independent processes.
+/// subsecond component of the system clock.
 fn subsecond_jitter_ms() -> u64 {
     u64::from(
         SystemTime::now()
@@ -553,7 +1300,11 @@ async fn discover_backend_models(
     client: &reqwest::Client,
     config: &WorkerDaemonConfig,
 ) -> Result<Vec<String>, BoxError> {
-    let response = client.get(config.backend_url("/v1/models")).send().await?;
+    let response = client
+        .get(config.backend_url("/v1/models"))
+        .timeout(MODEL_DISCOVERY_TIMEOUT)
+        .send()
+        .await?;
     let response = response.error_for_status()?;
     let body = response.json::<serde_json::Value>().await?;
     let Some(data) = body.get("data").and_then(serde_json::Value::as_array) else {
@@ -632,6 +1383,16 @@ mod tests {
     }
 
     #[test]
+    fn websocket_url_percent_encodes_provider_and_trims() {
+        let mut cfg = test_config("  https://proxy.local/  ", "http://backend:11434");
+        cfg.provider = " my provider&x=1 ".to_string();
+        assert_eq!(
+            cfg.websocket_url(),
+            "wss://proxy.local/v1/worker/connect?provider=my%20provider%26x%3D1"
+        );
+    }
+
+    #[test]
     fn backend_url_joins_path() {
         let cfg = test_config("http://proxy.local", "http://localhost:11434");
         assert_eq!(
@@ -643,6 +1404,19 @@ mod tests {
     #[test]
     fn backend_url_strips_trailing_slash_on_base() {
         let cfg = test_config("http://proxy.local", "http://localhost:11434/");
+        assert_eq!(
+            cfg.backend_url("/v1/models"),
+            "http://localhost:11434/v1/models"
+        );
+    }
+
+    #[test]
+    fn backend_url_deduplicates_v1_prefix() {
+        let cfg = test_config("http://proxy.local", "http://localhost:11434/v1");
+        assert_eq!(
+            cfg.backend_url("/v1/chat/completions"),
+            "http://localhost:11434/v1/chat/completions"
+        );
         assert_eq!(
             cfg.backend_url("/v1/models"),
             "http://localhost:11434/v1/models"
@@ -665,8 +1439,23 @@ mod tests {
     }
 
     #[test]
+    fn utf8_stream_decoder_reassembles_split_multibyte_chars() {
+        let mut decoder = Utf8StreamDecoder::new();
+        let text = "Hello — 世界 🚀!";
+        let bytes = text.as_bytes();
+        let mut assembled = String::new();
+        // Feed 1 byte at a time — worst-case TCP fragmentation!
+        for b in bytes {
+            assembled.push_str(&decoder.push(&[*b]));
+        }
+        if let Some(tail) = decoder.finish() {
+            assembled.push_str(&tail);
+        }
+        assert_eq!(assembled, text);
+    }
+
+    #[test]
     fn subsecond_jitter_ms_within_range() {
-        // Run multiple times to increase confidence (the function is time-derived)
         for _ in 0..50 {
             let jitter = subsecond_jitter_ms();
             assert!(jitter < 500, "jitter {jitter} must be < 500");
@@ -678,7 +1467,6 @@ mod tests {
         let cfg = test_config("http://proxy.local", "http://backend:11434");
         let cloned = cfg.clone();
         assert_eq!(cfg, cloned);
-        // Ensure Debug is implemented (compilation check + format)
         let debug = format!("{cfg:?}");
         assert!(debug.contains("proxy_base_url"));
     }
@@ -688,7 +1476,6 @@ mod tests {
         let mut cfg = test_config("http://proxy.local", "http://backend:11434");
         cfg.models = vec!["model-a".to_string(), "model-b".to_string()];
         cfg.resolve_wildcard_models().await;
-        // Models should be unchanged when there's no wildcard
         assert_eq!(cfg.models, vec!["model-a", "model-b"]);
     }
 
@@ -697,7 +1484,6 @@ mod tests {
         let mut cfg = test_config("http://proxy.local", "http://127.0.0.1:1");
         cfg.models = vec!["*".to_string()];
         cfg.resolve_wildcard_models().await;
-        // Should keep wildcard when backend is unreachable
         assert_eq!(cfg.models, vec!["*"]);
     }
 }

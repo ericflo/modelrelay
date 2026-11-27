@@ -210,13 +210,13 @@ pub async fn billing_portal(session: Session, State(state): State<Arc<CloudState
         .into_response();
     };
 
-    let client = reqwest::Client::new();
     let params = [
         ("customer", customer_id.as_str()),
         ("return_url", "https://modelrelay.io/dashboard"),
     ];
 
-    let resp = client
+    let resp = state
+        .http_client
         .post("https://api.stripe.com/v1/billing_portal/sessions")
         .bearer_auth(key)
         .form(&params)
@@ -326,7 +326,9 @@ pub async fn keys_generate(session: Session, State(state): State<Arc<CloudState>
     let ts = chrono::Utc::now().format("%Y%m%d%H%M%S");
     let key_name = format!("admin-{email}-{ts}");
 
-    match super::webhook::provision_api_key(admin_url, admin_token, &key_name).await {
+    match super::webhook::provision_api_key(&state.http_client, admin_url, admin_token, &key_name)
+        .await
+    {
         Ok((key_id, raw_key)) => {
             if let Err(e) = sqlx::query(
                 "INSERT INTO api_keys (user_id, key_id, raw_key, name) VALUES ($1, $2, $3, $4)",
@@ -338,10 +340,26 @@ pub async fn keys_generate(session: Session, State(state): State<Arc<CloudState>
             .execute(pool)
             .await
             {
-                tracing::error!("keys_generate db insert error: {e}");
+                tracing::error!(
+                    "keys_generate db insert error: {e}; attempting compensating revoke"
+                );
+                if let Err(revoke_err) = super::webhook::revoke_api_key(
+                    &state.http_client,
+                    admin_url,
+                    admin_token,
+                    &key_id,
+                )
+                .await
+                {
+                    tracing::error!(
+                        key_id = %key_id,
+                        error = %revoke_err,
+                        "compensating revoke failed after DB insert error"
+                    );
+                }
                 return error_page(
                     "/dashboard/keys/generate",
-                    "Key was provisioned on the server but could not be saved. Contact support.",
+                    "Could not save the generated API key. Please try again.",
                 )
                 .into_response();
             }
@@ -404,17 +422,24 @@ pub async fn keys_revoke(
         return error_page(&path, "API key not found or already revoked.").into_response();
     };
 
-    // Attempt to revoke on the server
+    // Revoke on the relay server BEFORE marking revoked in cloud DB so a
+    // transient server error never hides an still-active key from the admin UI.
     if let (Some(admin_url), Some(admin_token)) = (&state.admin_url, &state.admin_token) {
-        if let Err(e) = super::webhook::revoke_api_key(admin_url, admin_token, &key_id).await {
-            tracing::warn!("keys_revoke server call failed (best-effort revoke): {e}");
-            // Best effort — still mark as revoked in DB
+        if let Err(e) =
+            super::webhook::revoke_api_key(&state.http_client, admin_url, admin_token, &key_id)
+                .await
+        {
+            tracing::error!(key_id = %key_id, error = %e, "keys_revoke server call failed");
+            return error_page(
+                &path,
+                "Could not revoke the API key on the relay server. The key is still active — please retry.",
+            )
+            .into_response();
         }
     } else {
         tracing::warn!("admin API not configured — revoking key locally only");
     }
 
-    // Mark as revoked in DB regardless of server result
     if let Err(e) = sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE id = $1")
         .bind(key_uuid)
         .execute(pool)
@@ -428,17 +453,38 @@ pub async fn keys_revoke(
     Redirect::to("/dashboard").into_response()
 }
 
+/// Check whether `user_id` is an administrator in the cloud database.
+async fn user_is_admin(state: &CloudState, user_id: uuid::Uuid) -> bool {
+    let Some(ref pool) = state.db else {
+        return false;
+    };
+    sqlx::query_scalar::<_, bool>("SELECT is_admin FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        == Some(true)
+}
+
 // ─── GET /dashboard/workers ─────────────────────────────────────────────────
 //
-// Proxy endpoint: authenticated cloud users can poll worker status via the
-// admin API without needing the raw admin token.
+// Admin-only proxy endpoint for fleet-wide worker status via the admin API.
 
-/// GET /dashboard/workers — proxy to admin API `/admin/workers` for authenticated users.
+/// GET /dashboard/workers — admin-only proxy to admin API `/admin/workers`.
 pub async fn workers(session: Session, State(state): State<Arc<CloudState>>) -> Response {
-    let _user_id = match require_user(&session).await {
+    let user_id = match require_user(&session).await {
         Ok(id) => id,
         Err(r) => return r,
     };
+
+    if !user_is_admin(&state, user_id).await {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"error": "admin access required", "workers": []})),
+        )
+            .into_response();
+    }
 
     let Some(ref admin_url) = state.admin_url else {
         return (
@@ -455,9 +501,14 @@ pub async fn workers(session: Session, State(state): State<Arc<CloudState>>) -> 
             .into_response();
     };
 
-    let client = reqwest::Client::new();
     let url = format!("{}/admin/workers", admin_url.trim_end_matches('/'));
-    match client.get(&url).bearer_auth(admin_token).send().await {
+    match state
+        .http_client
+        .get(&url)
+        .bearer_auth(admin_token)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
             Ok(body) => axum::Json(body).into_response(),
             Err(e) => {
@@ -479,16 +530,17 @@ pub async fn workers(session: Session, State(state): State<Arc<CloudState>>) -> 
 
 // ─── GET /dashboard/stats ───────────────────────────────────────────────────
 //
-// Proxy endpoint: authenticated cloud users can poll relay stats via the
-// admin API without needing the raw admin token.
+// Proxy endpoint: admins receive full queue depth breakdown; non-admin users
+// receive only aggregate totals to avoid leaking other tenants' provider names.
 
-/// GET /dashboard/stats — proxy to admin API `/admin/stats` for authenticated users.
+/// GET /dashboard/stats — proxy to admin API `/admin/stats`.
 pub async fn stats(session: Session, State(state): State<Arc<CloudState>>) -> Response {
-    let _user_id = match require_user(&session).await {
+    let user_id = match require_user(&session).await {
         Ok(id) => id,
         Err(r) => return r,
     };
 
+    let is_admin = user_is_admin(&state, user_id).await;
     let empty_stats = || serde_json::json!({"queue_depth": {}, "active_workers": 0});
 
     let Some(ref admin_url) = state.admin_url else {
@@ -498,11 +550,35 @@ pub async fn stats(session: Session, State(state): State<Arc<CloudState>>) -> Re
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(empty_stats())).into_response();
     };
 
-    let client = reqwest::Client::new();
     let url = format!("{}/admin/stats", admin_url.trim_end_matches('/'));
-    match client.get(&url).bearer_auth(admin_token).send().await {
+    match state
+        .http_client
+        .get(&url)
+        .bearer_auth(admin_token)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => axum::Json(body).into_response(),
+            Ok(body) => {
+                if is_admin {
+                    axum::Json(body).into_response()
+                } else {
+                    let active_workers = body["active_workers"].as_u64().unwrap_or(0);
+                    let total_queued: u64 = body["queue_depth"].as_object().map_or(0, |m| {
+                        m.values().filter_map(serde_json::Value::as_u64).sum()
+                    });
+                    let queue_depth = if total_queued > 0 {
+                        serde_json::json!({"total": total_queued})
+                    } else {
+                        serde_json::json!({})
+                    };
+                    axum::Json(serde_json::json!({
+                        "queue_depth": queue_depth,
+                        "active_workers": active_workers,
+                    }))
+                    .into_response()
+                }
+            }
             Err(e) => {
                 tracing::error!("stats proxy parse error: {e}");
                 axum::Json(empty_stats()).into_response()
@@ -523,9 +599,8 @@ pub async fn stats(session: Session, State(state): State<Arc<CloudState>>) -> Re
 // ─── GET /setup ─────────────────────────────────────────────────────────────
 
 /// GET /setup — serve the setup wizard with cloud context pre-filled for
-/// authenticated users (server URL, API key, proxy poll endpoint).
+/// authenticated users (public relay URL, API key, proxy poll endpoint).
 pub async fn setup(session: Session, State(state): State<Arc<CloudState>>) -> Response {
-    // If the user is logged in, inject cloud config; otherwise serve the plain wizard.
     let cloud_config = if let Ok(user_id) = require_user(&session).await {
         let pool = state.db.as_ref();
         let api_key: Option<String> = if let Some(pool) = pool {
@@ -543,11 +618,7 @@ pub async fn setup(session: Session, State(state): State<Arc<CloudState>>) -> Re
         };
 
         Some(modelrelay_web::templates::CloudWizardConfig {
-            server_url: state
-                .admin_url
-                .as_deref()
-                .unwrap_or("https://api.modelrelay.io")
-                .to_string(),
+            server_url: state.public_relay_url.clone(),
             worker_secret: api_key.clone(),
             api_key,
             workers_poll_url: "/dashboard/workers".to_string(),
@@ -566,7 +637,6 @@ pub async fn setup(session: Session, State(state): State<Arc<CloudState>>) -> Re
 
 /// GET /integrate — show integration snippets for tools, agents, and SDKs.
 pub async fn integrate(session: Session, State(state): State<Arc<CloudState>>) -> Response {
-    // If the user is logged in, inject cloud config; otherwise serve the plain page.
     let cloud_config = if let Ok(user_id) = require_user(&session).await {
         let pool = state.db.as_ref();
         let api_key: Option<String> = if let Some(pool) = pool {
@@ -584,11 +654,7 @@ pub async fn integrate(session: Session, State(state): State<Arc<CloudState>>) -
         };
 
         Some(modelrelay_web::templates::CloudWizardConfig {
-            server_url: state
-                .admin_url
-                .as_deref()
-                .unwrap_or("https://api.modelrelay.io")
-                .to_string(),
+            server_url: state.public_relay_url.clone(),
             worker_secret: api_key.clone(),
             api_key,
             workers_poll_url: "/dashboard/workers".to_string(),
@@ -875,26 +941,53 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> St
                      .then(function(r){{return r.json();}})\
                      .then(function(d){{\
                        var el=document.getElementById('admin-workers');\
+                       el.textContent='';\
                        var ws=d.workers||[];\
                        if(ws.length===0){{\
-                         el.innerHTML='<p class=\"empty-msg\">No workers connected. <a href=\"/setup\">Set up a worker &rarr;</a></p>';\
+                         var p=document.createElement('p');\
+                         p.className='empty-msg';\
+                         p.appendChild(document.createTextNode('No workers connected. '));\
+                         var a=document.createElement('a');\
+                         a.href='/setup';\
+                         a.textContent='Set up a worker \u{2192}';\
+                         p.appendChild(a);\
+                         el.appendChild(p);\
                          return;\
                        }}\
-                       var h='<table class=\"workers-table\"><tr><th>Name</th><th>Models</th><th>Load</th></tr>';\
+                       var tbl=document.createElement('table');\
+                       tbl.className='workers-table';\
+                       var hr=document.createElement('tr');\
+                       ['Name','Models','Load'].forEach(function(col){{var th=document.createElement('th');th.textContent=col;hr.appendChild(th);}});\
+                       tbl.appendChild(hr);\
                        for(var i=0;i<ws.length;i++){{\
                          var w=ws[i];\
-                         var name=w.worker_name||w.worker_id||'worker';\
-                         var models=(w.models||[]).join(', ');\
-                         var load=w.in_flight_count+'/'+w.max_concurrent;\
-                         h+='<tr><td>'+name+'</td><td class=\"worker-models\">'+models+'</td><td>'+load+'</td></tr>';\
+                         var tr=document.createElement('tr');\
+                         var tdName=document.createElement('td');\
+                         tdName.textContent=w.worker_name||w.worker_id||'worker';\
+                         var tdModels=document.createElement('td');\
+                         tdModels.className='worker-models';\
+                         tdModels.textContent=(w.models||[]).join(', ');\
+                         var tdLoad=document.createElement('td');\
+                         tdLoad.textContent=(w.in_flight_count||0)+'/'+(w.max_concurrent||0);\
+                         tr.appendChild(tdName);tr.appendChild(tdModels);tr.appendChild(tdLoad);\
+                         tbl.appendChild(tr);\
                        }}\
-                       h+='</table>';\
-                       h+='<div class=\"connect-link\"><a href=\"/setup\">+ Connect another machine</a></div>';\
-                       el.innerHTML=h;\
+                       el.appendChild(tbl);\
+                       var linkDiv=document.createElement('div');\
+                       linkDiv.className='connect-link';\
+                       var addA=document.createElement('a');\
+                       addA.href='/setup';\
+                       addA.textContent='+ Connect another machine';\
+                       linkDiv.appendChild(addA);\
+                       el.appendChild(linkDiv);\
                      }})\
                      .catch(function(){{\
-                       document.getElementById('admin-workers').innerHTML=\
-                         '<p class=\"empty-msg\">Could not load worker status.</p>';\
+                       var el=document.getElementById('admin-workers');\
+                       el.textContent='';\
+                       var p=document.createElement('p');\
+                       p.className='empty-msg';\
+                       p.textContent='Could not load worker status.';\
+                       el.appendChild(p);\
                      }});\
                  }}\
                  poll();\
@@ -1060,32 +1153,47 @@ fn subscriber_dashboard_html(
                    .then(function(r){{return r.json();}})\
                    .then(function(d){{\
                      var el=document.getElementById('relay-stats');\
+                     el.textContent='';\
                      var qd=d.queue_depth||{{}};\
                      var total=0;\
-                     for(var k in qd){{if(qd.hasOwnProperty(k))total+=qd[k];}}\
-                     var aw=d.active_workers||0;\
-                     var h='<table class=\"info-table\" style=\"margin-top:8px\">'\
-                       +'<tr><td>Workers</td><td>'+aw+'</td></tr>'\
-                       +'<tr><td>Queue depth</td><td>'+total+'</td></tr>'\
-                       +'</table>';\
+                     for(var k in qd){{if(Object.prototype.hasOwnProperty.call(qd,k))total+=Number(qd[k])||0;}}\
+                     var aw=Number(d.active_workers)||0;\
+                     var tbl=document.createElement('table');\
+                     tbl.className='info-table';\
+                     tbl.style.marginTop='8px';\
+                     [['Workers',String(aw)],['Queue depth',String(total)]].forEach(function(pair){{\
+                       var tr=document.createElement('tr');\
+                       var td1=document.createElement('td');td1.textContent=pair[0];\
+                       var td2=document.createElement('td');td2.textContent=pair[1];\
+                       tr.appendChild(td1);tr.appendChild(td2);tbl.appendChild(tr);\
+                     }});\
+                     el.appendChild(tbl);\
                      if(aw===0){{\
-                       h+='<div class=\"card card--empty\" style=\"margin-top:16px;padding:24px 20px;\">'\
-                         +'<h2>Connect Your First Worker</h2>'\
-                         +'<p>No GPU workers are connected. Set one up in minutes.</p>'\
-                         +'<a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a>'\
-                         +'</div>';\
+                       var card=document.createElement('div');\
+                       card.className='card card--empty';\
+                       card.style.marginTop='16px';\
+                       card.style.padding='24px 20px';\
+                       var h2=document.createElement('h2');h2.textContent='Connect Your First Worker';\
+                       var p=document.createElement('p');p.textContent='No GPU workers are connected. Set one up in minutes.';\
+                       var a=document.createElement('a');a.href='/setup';a.className='btn';a.textContent='Set Up a Worker \u{2192}';\
+                       card.appendChild(h2);card.appendChild(p);card.appendChild(a);\
+                       el.appendChild(card);\
                      }}\
-                     if(Object.keys(qd).length>1){{\
-                       var extra='<p class=\"per-model-info\">Per model: ';\
-                       for(var m in qd){{if(qd.hasOwnProperty(m))extra+=m+':&nbsp;'+qd[m]+'&ensp;';}}\
-                       extra+='</p>';\
-                       h+=extra;\
+                     var keys=Object.keys(qd);\
+                     if(keys.length>1){{\
+                       var extra=document.createElement('p');\
+                       extra.className='per-model-info';\
+                       extra.textContent='Per provider: '+keys.map(function(m){{return m+': '+qd[m];}}).join('  ');\
+                       el.appendChild(extra);\
                      }}\
-                     el.innerHTML=h;\
                    }})\
                    .catch(function(){{\
-                     document.getElementById('relay-stats').innerHTML=\
-                       '<p class=\"relay-error\">Could not load relay status.</p>';\
+                     var el=document.getElementById('relay-stats');\
+                     el.textContent='';\
+                     var p=document.createElement('p');\
+                     p.className='relay-error';\
+                     p.textContent='Could not load relay status.';\
+                     el.appendChild(p);\
                    }});\
                }})();\
              </script>\
