@@ -1246,6 +1246,16 @@ async fn landing_page_includes_agent_bootstrap_prompts_and_agents_md_link() {
     assert!(!body.contains("prompt-full"));
     assert!(!body.contains("help set up modelrelay-server"));
     assert!(!body.contains("Ask me for my ModelRelay URL and API key"));
+
+    let (setup_status, setup_body) = get("/setup").await;
+    assert_eq!(setup_status, StatusCode::OK);
+    assert!(setup_body.contains("setup-prompt-serve"));
+    assert!(setup_body.contains("setup-cmd-claude"));
+    assert!(setup_body.contains("setup-cmd-codex"));
+    assert!(setup_body.contains("setup-cmd-pi"));
+    assert!(setup_body.contains("https://modelrelay.io/AGENTS.md"));
+    assert!(setup_body.contains("https://api.modelrelay.io"));
+    assert!(!setup_body.contains("wizard-progress"));
 }
 
 #[tokio::test]
@@ -1282,6 +1292,11 @@ async fn custom_public_urls_override_landing_agents_md_and_pi_extension() {
             "/pi/modelrelay.ts",
             "https://relay.selfhosted.test/v1",
             "https://ui.selfhosted.test",
+        ),
+        (
+            "/setup",
+            "https://relay.selfhosted.test",
+            "https://ui.selfhosted.test/AGENTS.md",
         ),
     ] {
         let resp = router

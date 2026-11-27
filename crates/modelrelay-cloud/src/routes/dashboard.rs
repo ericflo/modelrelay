@@ -610,8 +610,10 @@ pub async fn setup(
     State(state): State<Arc<CloudState>>,
 ) -> Response {
     let cloud_config = load_cloud_config(session, &state).await;
-    Html(modelrelay_web::templates::setup_wizard_page_with_config(
+    Html(modelrelay_web::templates::setup_wizard_page_with_urls(
         cloud_config.as_ref(),
+        &state.public_relay_url,
+        &state.public_site_url,
     ))
     .into_response()
 }

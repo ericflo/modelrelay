@@ -4,7 +4,7 @@ mod setup;
 
 pub use dashboard::dashboard_page;
 pub use integrate::{integrate_page, integrate_page_with_config};
-pub use setup::{setup_wizard_page, setup_wizard_page_with_config};
+pub use setup::{setup_wizard_page, setup_wizard_page_with_config, setup_wizard_page_with_urls};
 
 /// Canonical dynamic Pi Coding Agent provider extension (`~/.pi/agent/extensions/modelrelay.ts`),
 /// served at `https://modelrelay.io/pi/modelrelay.ts` and embedded in docs & `/integrate`.
@@ -532,15 +532,15 @@ const BASE_CSS: &str = r#"
     }
     .copy-btn:hover { background: var(--accent-soft); border-color: var(--accent-border); color: var(--text-strong); }
     .copy-btn.copied { background: var(--success-soft); border-color: rgba(5, 150, 105, 0.45); color: var(--success-fg); }
-    .code-shell .copy-btn, .code-block > .copy-btn, .home-panel .copy-btn {
+    .code-shell .copy-btn, .code-block > .copy-btn, .home-panel .copy-btn, .prompt-box .copy-btn {
       background: rgba(255, 255, 255, 0.08);
       border-color: rgba(148, 163, 184, 0.3);
       color: #cbd5e1;
     }
-    .code-shell .copy-btn:hover, .code-block > .copy-btn:hover, .home-panel .copy-btn:hover {
+    .code-shell .copy-btn:hover, .code-block > .copy-btn:hover, .home-panel .copy-btn:hover, .prompt-box .copy-btn:hover {
       background: rgba(255, 255, 255, 0.16); color: #fff;
     }
-    .code-shell .copy-btn.copied, .code-block > .copy-btn.copied, .home-panel .copy-btn.copied {
+    .code-shell .copy-btn.copied, .code-block > .copy-btn.copied, .home-panel .copy-btn.copied, .prompt-box .copy-btn.copied {
       background: rgba(52, 211, 153, 0.18); border-color: rgba(52, 211, 153, 0.5); color: #6ee7b7;
     }
     .code-block > .copy-btn { position: absolute; top: 9px; right: 9px; }
