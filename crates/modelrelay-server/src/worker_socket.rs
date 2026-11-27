@@ -659,6 +659,7 @@ async fn handle_worker_message(
         Ok(WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
             models,
             current_load,
+            model_metadata,
         })) => {
             let mut core = state.core.lock().await;
             if !core.has_worker(worker_id) {
@@ -669,6 +670,7 @@ async fn handle_worker_message(
                 ModelsUpdateMessage {
                     models,
                     current_load,
+                    model_metadata,
                 },
             );
             WorkerMessageOutcome::Ok { is_pong: false }

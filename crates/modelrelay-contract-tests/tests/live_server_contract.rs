@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use modelrelay_protocol::{HeaderMap, ProviderRouting, RegisterMessage};
+use modelrelay_protocol::{HeaderMap, ModelMetadataMap, ProviderRouting, RegisterMessage};
 use modelrelay_server::{
     CancelReason, ProviderQueuePolicy, ProxyServerCore, RequestFailureReason, SubmissionOutcome,
 };
@@ -13,6 +13,7 @@ fn register_msg(name: &str, models: &[&str], max_concurrent: u32) -> RegisterMes
         protocol_version: Some("2026-04-bridge-v1".to_string()),
         current_load: Some(0),
         endpoint_prefixes: vec![],
+        model_metadata: ModelMetadataMap::new(),
     }
 }
 

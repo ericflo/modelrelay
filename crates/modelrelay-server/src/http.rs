@@ -17,9 +17,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
-use futures_util::stream;
+use futures_util::{future, stream};
 use modelrelay_protocol::admin_api::{AdminKeysResponse, CreateKeyRequest, CreateKeyResponse};
-use modelrelay_protocol::{HeaderMap, ProviderRouting, ResponseCompleteMessage};
+use modelrelay_protocol::{
+    HeaderMap, ProviderRouting, ResponseCompleteMessage, parse_openai_models_response,
+};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -32,6 +34,8 @@ use crate::{
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
+const LEGACY_MODELS_PROBE_TTL: Duration = Duration::from_secs(30);
+const LEGACY_MODELS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024; // 64 MiB (supports vision/multimodal payloads)
 const MAX_STREAM_RESPONSE_BYTES: usize = 10 * 1024 * 1024 * 1024; // 10 GB
 const OVERSIZED_STREAM_ERROR_SSE: &str = "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":\"stream exceeded size limit\"}}\n\n";
@@ -51,6 +55,7 @@ pub struct ProxyHttpApp {
     max_body_bytes: usize,
     public_cors: Option<CorsLayer>,
     admin_cors: Option<CorsLayer>,
+    legacy_models_probe: bool,
 }
 
 impl ProxyHttpApp {
@@ -68,6 +73,7 @@ impl ProxyHttpApp {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             public_cors: None,
             admin_cors: None,
+            legacy_models_probe: false,
         }
     }
 
@@ -139,6 +145,16 @@ impl ProxyHttpApp {
         self
     }
 
+    /// Enable lightweight cached `GET /v1/models` probing against connected legacy
+    /// workers that registered without native `model_metadata`, so their backend's
+    /// context window and reasoning effort fields pass through `/v1/models` without
+    /// requiring an immediate worker upgrade.
+    #[must_use]
+    pub fn with_legacy_models_probe(mut self, enabled: bool) -> Self {
+        self.legacy_models_probe = enabled;
+        self
+    }
+
     pub fn router(self) -> Router {
         let state = HttpState {
             core: self.core,
@@ -149,6 +165,7 @@ impl ProxyHttpApp {
             require_api_keys: self.require_api_keys,
             api_key_store: self.api_key_store,
             request_timeout: self.request_timeout,
+            legacy_models_probe: self.legacy_models_probe,
         };
 
         let mut admin_router = Router::new()
@@ -168,6 +185,7 @@ impl ProxyHttpApp {
         let mut public_router = Router::new()
             .route("/health", get(health_handler))
             .route("/v1/models", get(models_handler))
+            .route("/models", get(models_handler))
             .fallback(wildcard_handler)
             .layer(DefaultBodyLimit::max(self.max_body_bytes))
             .with_state(state);
@@ -195,6 +213,7 @@ struct HttpState {
     require_api_keys: bool,
     api_key_store: Arc<dyn ApiKeyStore>,
     request_timeout: Option<Duration>,
+    legacy_models_probe: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -219,17 +238,10 @@ struct WorkerHealthInfo {
     is_draining: bool,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 struct ModelsResponse {
     object: &'static str,
-    data: Vec<ModelObject>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct ModelObject {
-    id: String,
-    object: &'static str,
-    owned_by: &'static str,
+    data: Vec<serde_json::Map<String, Value>>,
 }
 
 async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> {
@@ -280,23 +292,86 @@ async fn models_handler(State(state): State<HttpState>, headers: AxumHeaderMap) 
         Err(response) => return response,
     };
 
-    let models = {
+    if state.legacy_models_probe {
+        probe_legacy_workers_metadata(&state, owner_key_id.as_deref()).await;
+    }
+
+    let data = {
         let core = state.core.lock().await;
-        core.provider_models_for_owner(&state.models_provider, owner_key_id.as_deref())
+        core.provider_model_entries_for_owner(&state.models_provider, owner_key_id.as_deref())
     };
 
     Json(ModelsResponse {
         object: "list",
-        data: models
-            .into_iter()
-            .map(|id| ModelObject {
-                id,
-                object: "model",
-                owned_by: "worker-proxy",
-            })
-            .collect(),
+        data,
     })
     .into_response()
+}
+
+async fn probe_legacy_workers_metadata(state: &HttpState, owner_key_id: Option<&str>) {
+    let pending_probes = {
+        let mut core = state.core.lock().await;
+        let targets = core.legacy_metadata_probe_targets(
+            &state.models_provider,
+            owner_key_id,
+            Instant::now(),
+            LEGACY_MODELS_PROBE_TTL,
+        );
+        targets
+            .into_iter()
+            .filter_map(|worker_id| {
+                core.submit_worker_models_probe(&worker_id)
+                    .map(|pending| (worker_id, pending))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if pending_probes.is_empty() {
+        return;
+    }
+
+    let core_ref = &state.core;
+    let probe_futs = pending_probes
+        .into_iter()
+        .map(|(worker_id, pending)| async move {
+            let request_id = pending.request_id.clone();
+            let mut guard = HttpRequestCancellationGuard::new(Arc::clone(core_ref), &pending);
+            let result =
+                tokio::time::timeout(LEGACY_MODELS_PROBE_TIMEOUT, pending.response_rx).await;
+            match result {
+                Ok(Ok(Ok(response))) => {
+                    guard.disarm();
+                    if (200..300).contains(&response.status_code)
+                        && let Some(body) = response.body.as_deref()
+                        && let Ok(parsed) = serde_json::from_str::<Value>(body)
+                        && let Some((_, metadata)) = parse_openai_models_response(&parsed)
+                        && !metadata.is_empty()
+                    {
+                        return Some((worker_id, metadata));
+                    }
+                    None
+                }
+                Ok(Ok(Err(_)) | Err(_)) => {
+                    guard.disarm();
+                    None
+                }
+                Err(_) => {
+                    guard.disarm();
+                    let mut core = core_ref.lock().await;
+                    let _ = core.cancel_request(&request_id, CancelReason::RequestTimedOut);
+                    None
+                }
+            }
+        });
+
+    let results = future::join_all(probe_futs).await;
+    let updates: Vec<_> = results.into_iter().flatten().collect();
+    if !updates.is_empty() {
+        let mut core = state.core.lock().await;
+        for (worker_id, metadata) in updates {
+            core.apply_probed_worker_metadata(&worker_id, metadata);
+        }
+    }
 }
 
 fn check_admin_auth(state: &HttpState, headers: &AxumHeaderMap) -> Result<(), StatusCode> {
@@ -527,6 +602,55 @@ fn parse_proxy_body_metadata(body: &str) -> (Option<String>, bool, Option<Provid
     (model, is_streaming, provider_routing)
 }
 
+fn extract_query_param(query: Option<&str>, key: &str) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        if k != key {
+            return None;
+        }
+        let decoded = percent_decode_query_value(v);
+        let trimmed = decoded.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn percent_decode_query_value(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Catch-all handler that proxies any path/method to a worker.
 ///
 /// Extracts the model from the JSON body's `model` field, or from the
@@ -557,15 +681,17 @@ async fn wildcard_handler(
 
     let (model, is_streaming, provider_routing) = parse_proxy_body_metadata(&body);
 
-    // Fall back to X-Model header if not in body.
-    let model = model.or_else(|| {
-        headers
-            .get("x-model")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-    });
+    // Fall back to X-Model header or `?model=<id>` query parameter (e.g. llama.cpp `/props?model=...`).
+    let model = model
+        .or_else(|| {
+            headers
+                .get("x-model")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+        .or_else(|| extract_query_param(uri.query(), "model"));
 
     let Some(model) = model else {
         return (

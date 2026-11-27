@@ -93,6 +93,7 @@ pub fn router(state: Arc<CloudState>) -> Router {
         .route("/sitemap.xml", get(sitemap_xml))
         .route("/AGENTS.md", get(agents_md))
         .route("/agents.md", get(agents_md))
+        .route("/pi/modelrelay.ts", get(pi_extension_ts))
         .route("/favicon.ico", get(favicon_ico))
         .route("/favicon-32.png", get(favicon_32_png))
         .route("/apple-touch-icon.png", get(apple_touch_icon))
@@ -210,6 +211,20 @@ async fn agents_md() -> impl IntoResponse {
     )
 }
 
+async fn pi_extension_ts() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/typescript; charset=utf-8",
+            ),
+            (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        modelrelay_web::templates::PI_EXTENSION_TS,
+    )
+}
+
 async fn sitemap_xml() -> impl IntoResponse {
     (
         [(
@@ -308,6 +323,7 @@ const SESSION_EXEMPT_ROUTES: &[&str] = &[
     "/sitemap.xml",
     "/AGENTS.md",
     "/agents.md",
+    "/pi/modelrelay.ts",
     "/favicon.ico",
     "/favicon-32.png",
     "/apple-touch-icon.png",

@@ -4,11 +4,10 @@
 > **Source & Releases:** `https://github.com/ericflo/modelrelay` (MIT License)  
 > **Hosted Relay Endpoint:** `https://api.modelrelay.io` (Dashboard: `https://modelrelay.io/dashboard`)
 
-This document is written for coding agents (**Claude Code**, **OpenAI Codex CLI**, **Pi Coding Agent**, Cursor, etc.) helping a user set up **ModelRelay** end-to-end:
+This document is written for coding agents (**Claude Code**, **OpenAI Codex CLI**, **Pi Coding Agent**, Cursor, etc.) helping a user with either of two separate machine setups:
 
-1. Putting a relay in front of one or more local GPU servers running an LLM (`llama-server`, Ollama, vLLM, LM Studio, SGLang, etc.) — either **self-hosted** (`modelrelay-server`) or via **hosted** `https://api.modelrelay.io`.
-2. Installing and persisting `modelrelay-worker` on the GPU machine(s).
-3. Configuring **Pi**, **Codex CLI**, **Claude Code**, OpenAI/Anthropic SDKs, browser OAuth apps, or `curl` to talk to models through ModelRelay — **alongside** any commercial provider already configured.
+- **Workflow A — Serve an LLM (on a GPU machine):** Detect the local LLM server (`llama-server`, Ollama, vLLM, LM Studio, SGLang, etc.), connect it via `modelrelay-worker` (to hosted `https://api.modelrelay.io` or a self-hosted `modelrelay-server`), **offer to install it permanently to run on startup for whatever OS/platform it's running on**, and verify live `/v1/models` + streaming completions.
+- **Workflow B — Connect a Client (on a laptop / dev machine):** Configure **Pi**, **Codex CLI**, **Claude Code**, OpenAI/Anthropic SDKs, or browser OAuth apps to talk to models through ModelRelay — **alongside** any commercial provider already configured.
 
 ---
 
@@ -39,7 +38,7 @@ Follow these rules whenever bootstrapping ModelRelay for a user:
 [Local LLM Server]   (llama-server, Ollama, vLLM, LM Studio, SGLang, etc.)
 ```
 
-- Workers register supported models (or `--models "*"` to poll the local backend's `/v1/models` every 30s and publish changes dynamically).
+- Workers register supported models (or `--models "*"` to poll the local backend's `/v1/models` every 30s and publish changes dynamically) **and preserve full per-model `/v1/models` metadata** (context length, max output tokens, reasoning efforts, vision modalities, `compat`) through `GET /v1/models`.
 - `modelrelay-server` routes by `"model"` in the JSON body (or `X-Model` header), queues/load-balances across workers, streams SSE unbuffered, and propagates client cancellation immediately to abort GPU generation.
 - `modelrelay-server` strips browser hop headers (`Origin`, `Referer`, `Sec-Fetch-*`, `Cookie`) before forwarding to workers so third-party web apps work cleanly against localhost backends without per-origin allowlisting.
 
@@ -306,7 +305,11 @@ log_level = "info"
 | `ENDPOINT_PREFIXES` | `--endpoint-prefixes` | *(all)* | Optional comma-separated allowed paths, e.g. `/v1/chat,/v1/messages`. |
 | `LOG_LEVEL` | `--log-level` | `info` | Tracing filter (overridden by `RUST_LOG`). |
 
-#### Persist on Linux (`systemd` user service — no root needed)
+#### Offer Permanent Startup Persistence for This Platform
+
+Always **offer to set up `modelrelay-worker` to start automatically on boot** for whichever OS the GPU machine is running:
+
+- **Linux (`systemd` user service — no root needed):**
 
 ```bash
 mkdir -p ~/.config/modelrelay ~/.config/systemd/user
@@ -334,10 +337,9 @@ systemctl --user daemon-reload
 systemctl --user enable --now modelrelay-worker
 systemctl --user status modelrelay-worker --no-pager
 ```
+*(For headless Linux servers where the user isn't logged in, also run `loginctl enable-linger "$USER"` — or install as a system service under `/etc/systemd/system/modelrelay-worker.service`.)*
 
-*(For headless servers where the user isn't logged in, run `loginctl enable-linger "$USER"` or install as a system unit under `/etc/systemd/system/`.)*
-
-#### Persist on macOS (`launchd`)
+- **macOS (`launchd` LaunchAgent):**
 
 Save to `~/Library/LaunchAgents/io.modelrelay.worker.plist` and load with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.modelrelay.worker.plist`:
 
@@ -361,7 +363,20 @@ Save to `~/Library/LaunchAgents/io.modelrelay.worker.plist` and load with `launc
 </plist>
 ```
 
-#### Or Run via Docker on the GPU Machine
+- **Windows (PowerShell Scheduled Task on startup, or ModelRelay Desktop Launch at Login):**
+
+```powershell
+# Download binary & write %USERPROFILE%\.config\modelrelay\worker.toml first, then register to run at startup:
+$action = New-ScheduledTaskAction -Execute "$env:LOCALAPPDATA\modelrelay\modelrelay-worker.exe" `
+  -Argument "--config `"$env:USERPROFILE\.config\modelrelay\worker.toml`""
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName "ModelRelayWorker" -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -Force
+Start-ScheduledTask -TaskName "ModelRelayWorker"
+```
+*(Or install ModelRelay Desktop from `https://modelrelay.io/download/desktop/windows` and enable **Launch at Login** in Settings.)*
+
+- **Docker (`--restart unless-stopped`):**
 
 ```bash
 # Linux (reaches loopback LLM directly via --network host)
@@ -415,128 +430,16 @@ curl -fsSL https://pi.dev/install.sh | sh
 # or: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 ```
 
-#### 1. Create `~/.pi/agent/extensions/modelrelay.ts`
+#### 1. Enable Dynamic API Discovery (1 Command — Zero `models.json` Needed)
 
-Register ModelRelay as a **dynamic provider** (NOT a static model list). Set `DEFAULT_BASE_URL` to `"https://api.modelrelay.io/v1"` or your self-hosted `"https://relay.example.com/v1"`, and set `DEFAULT_CONTEXT_WINDOW` to match your GPU backend's actual `-c` / `--max-model-len`:
+Install the hosted ModelRelay provider file so Pi discovers live models, runtime context lengths, max output tokens, reasoning efforts / thinking formats, and vision support dynamically from your backend APIs with **zero `models.json` config** — supporting **llama.cpp** (single-model & router mode `/props`), **vLLM** (`max_model_len` & `root`), **LM Studio** (`/api/v1/models` & `/api/v0/models`), **Ollama** (`/api/show`), and custom OpenAI-compatible servers:
 
-```ts
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
-const DEFAULT_BASE_URL =
-  process.env.MODELRELAY_BASE_URL || "https://api.modelrelay.io/v1";
-const DEFAULT_CONTEXT_WINDOW =
-  Number(process.env.MODELRELAY_CONTEXT_WINDOW) || 131072;
-const DEFAULT_MAX_TOKENS =
-  Number(process.env.MODELRELAY_MAX_TOKENS) || 32768;
-
-type RelayModel = {
-  id: string;
-  context_window?: number;
-  context_length?: number;
-  max_model_len?: number;
-  max_tokens?: number;
-  max_completion_tokens?: number;
-  reasoning?: boolean;
-  meta?: { n_ctx?: number; n_ctx_train?: number };
-  architecture?: { input_modalities?: string[] };
-};
-
-export default function (pi: ExtensionAPI) {
-  pi.registerProvider("modelrelay", {
-    name: "ModelRelay",
-    baseUrl: DEFAULT_BASE_URL,
-    api: "openai-completions",
-    async refreshModels({ credential, stored, publish, allowNetwork, baseUrl, signal }) {
-      const root = (baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-      const cached = (stored?.models ?? [])
-        .filter((m) => m.provider === "modelrelay" && "maxTokens" in m)
-        .map((m) => ({
-          id: m.id,
-          name: m.name,
-          reasoning: m.reasoning,
-          thinkingLevelMap: m.thinkingLevelMap,
-          input: m.input,
-          inputLimits: m.inputLimits,
-          cost: m.cost,
-          contextWindow: m.contextWindow,
-          maxTokens: m.maxTokens,
-          samplingParams: m.samplingParams,
-          samplingParamsByThinkingLevel: m.samplingParamsByThinkingLevel,
-          compat: m.compat,
-        }));
-
-      if (!allowNetwork || credential?.type !== "api_key" || !credential.key) {
-        return cached;
-      }
-
-      const res = await fetch(`${root}/models`, {
-        headers: { Authorization: `Bearer ${credential.key}` },
-        signal,
-      });
-      if (!res.ok) return cached;
-
-      const { data = [] } = (await res.json()) as { data?: RelayModel[] };
-      const models = data.map((m) => {
-        const contextWindow =
-          m.meta?.n_ctx ||
-          m.context_window ||
-          m.context_length ||
-          m.max_model_len ||
-          m.meta?.n_ctx_train ||
-          DEFAULT_CONTEXT_WINDOW;
-        const maxTokens = Math.min(
-          m.max_completion_tokens || m.max_tokens || DEFAULT_MAX_TOKENS,
-          contextWindow,
-        );
-        const reasoning = m.reasoning ?? true;
-        const hasVision = m.architecture?.input_modalities?.includes("image") === true;
-
-        return {
-          id: m.id,
-          name: m.id,
-          reasoning,
-          ...(reasoning && {
-            thinkingLevelMap: {
-              off: "none",
-              minimal: null,
-              low: "low",
-              medium: "medium",
-              high: "high",
-            },
-          }),
-          input: (hasVision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow,
-          maxTokens,
-          compat: {
-            supportsStore: false,
-            supportsDeveloperRole: false,
-            supportsReasoningEffort: reasoning,
-            supportsUsageInStreaming: true,
-            supportsStrictMode: false,
-            maxTokensField: "max_tokens" as const,
-            ...(reasoning && { thinkingFormat: "openai" as const }),
-          },
-        };
-      });
-
-      await publish({
-        persist: {
-          models: models.map((m) => ({
-            ...m,
-            api: "openai-completions" as const,
-            provider: "modelrelay",
-            baseUrl: root,
-          })),
-          checkedAt: Date.now(),
-        },
-      });
-
-      return models;
-    },
-  });
-}
+```bash
+curl -fsSL https://modelrelay.io/pi/modelrelay.ts \
+  --create-dirs -o ~/.pi/agent/extensions/modelrelay.ts
 ```
+
+For a self-hosted relay URL, keep the exact same file and export `MODELRELAY_BASE_URL=https://relay.example.com/v1` (no `models.json` needed).
 
 #### 2. Merge Token into `~/.pi/agent/auth.json` (Preserving Existing Providers!)
 
@@ -555,33 +458,7 @@ fs.chmodSync(p, 0o600);
 ```
 *(Alternatively, the user can run `/login modelrelay` inside Pi, or use `"key": "!security find-generic-password -ws 'modelrelay'"` for keychain resolution.)*
 
-#### 3. Optional Per-Model Overrides (`~/.pi/agent/models.json`)
-
-For heterogeneous GPU fleets (e.g., Qwen3 chat templates, DeepSeek R1/V3, GLM, or different `-c` sizes per model), layer `modelOverrides` cleanly without putting keys in `models.json`:
-
-```json
-{
-  "$schema": "https://pi.dev/schemas/models.schema.json",
-  "providers": {
-    "modelrelay": {
-      "baseUrl": "https://relay.example.com/v1",
-      "modelOverrides": {
-        "qwen3.5-27b": {
-          "reasoning": true,
-          "contextWindow": 131072,
-          "maxTokens": 32768,
-          "compat": {
-            "thinkingFormat": "qwen-chat-template",
-            "thinkingTokenBudgetField": "thinking_budget_tokens"
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-#### 4. Verify Pi Discovery
+#### 3. Verify Pi Discovery
 
 ```bash
 pi update --models
@@ -692,5 +569,5 @@ Before reporting completion to the user, verify every applicable item:
 | `502 Bad Gateway` | Worker cannot reach `BACKEND_URL` locally, or backend crashed/returned malformed response. Test `curl http://127.0.0.1:<port>/v1/models` on the GPU host. |
 | Streaming arrives all at once | Reverse proxy is buffering responses. Add `proxy_buffering off;` in nginx or switch to Caddy. |
 | Worker WS closes with code `1008` | Invalid `WORKER_SECRET` (or revoked API key on hosted relay). Verify secret matches server/dashboard. |
-| Pi `/thinking` only shows `off` | Ensure `reasoning: true` and `thinkingLevelMap` are set in `~/.pi/agent/extensions/modelrelay.ts`, then run `pi update --models`. |
-| Pi hits context overflow early | Lower `DEFAULT_CONTEXT_WINDOW` (or `modelOverrides.<id>.contextWindow`) to match your backend's actual `-c` / `--max-model-len`. |
+| Pi `/thinking` only shows `off` | Check `GET ${RELAY_URL}/v1/models` to verify your backend advertises `reasoning_efforts` / `reasoning` (or add a `modelOverrides` entry in `models.json`), then run `pi update --models`. |
+| Pi hits context overflow early | Check `context_length` / `meta.n_ctx` in `GET ${RELAY_URL}/v1/models` and run `pi update --models` (or set `modelOverrides.<id>.contextWindow` for bare backends). |

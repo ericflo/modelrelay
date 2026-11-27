@@ -254,6 +254,7 @@ async fn register_test_worker_with(
         protocol_version: Some("2026-04-bridge-v1".to_string()),
         endpoint_prefixes: vec![],
         current_load,
+        model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
     });
     let register_payload = serde_json::to_string(&register).expect("serialize register");
 
@@ -457,6 +458,7 @@ async fn authenticated_worker_can_register_and_receive_register_ack() {
             protocol_version: Some("2026-04-bridge-v1".to_string()),
             current_load: Some(0),
             endpoint_prefixes: vec![],
+            model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
         },
     )
     .await;
@@ -506,6 +508,7 @@ async fn mismatched_protocol_version_is_closed_with_protocol_error() {
             protocol_version: Some("katamari-pre-release".to_string()),
             current_load: Some(0),
             endpoint_prefixes: vec![],
+            model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
         },
     )
     .await;
@@ -756,6 +759,7 @@ async fn worker_models_update_dispatches_newly_compatible_queued_request_without
     let models_update = WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
         models: vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()],
         current_load: 0,
+        model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
     });
     let update_payload = serde_json::to_string(&models_update).expect("serialize models_update");
     socket

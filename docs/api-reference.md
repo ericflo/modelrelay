@@ -13,7 +13,7 @@ Send your ModelRelay API key in either header format:
 
 | Method & Path | Protocol | Notes |
 |---|---|---|
-| `GET /v1/models` | OpenAI model list | Live models advertised by your connected workers |
+| `GET /v1/models` | OpenAI model list | Live models across your workers, preserving backend metadata (context length, max tokens, reasoning efforts, modalities) |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Unary JSON or unbuffered SSE streaming (`"stream": true`) |
 | `POST /v1/responses` | OpenAI Responses API | Supports `input` and SSE event pass-through |
 | `POST /v1/messages` | Anthropic Messages API | Send `x-api-key` and `anthropic-version: 2023-06-01` |

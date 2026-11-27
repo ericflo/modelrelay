@@ -2353,3 +2353,121 @@ async fn worker_daemon_run_with_reconnect_reconnects_after_proxy_restart() {
 
     daemon_handle.abort();
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn worker_daemon_relays_backend_model_metadata_and_updates_live() {
+    let (proxy_addr, _core) = spawn_proxy_server("openai").await;
+
+    let backend_payload = Arc::new(Mutex::new(json!({
+        "object": "list",
+        "data": [
+            {
+                "id": "qwen3.5-27b",
+                "object": "model",
+                "owned_by": "loom",
+                "context_length": 131_072,
+                "max_output_tokens": 32_768,
+                "reasoning": true,
+                "reasoning_efforts": ["none", "low", "medium", "high"],
+                "architecture": { "input_modalities": ["text", "image"] }
+            }
+        ]
+    })));
+    let backend_state = Arc::clone(&backend_payload);
+    let backend_app = Router::new().route(
+        "/v1/models",
+        get(move || {
+            let state = Arc::clone(&backend_state);
+            async move {
+                let payload = state.lock().await.clone();
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    payload.to_string(),
+                )
+            }
+        }),
+    );
+    let backend_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind metadata backend listener");
+    let backend_addr = backend_listener
+        .local_addr()
+        .expect("metadata backend addr");
+    tokio::spawn(async move {
+        axum::serve(backend_listener, backend_app)
+            .await
+            .expect("serve metadata backend");
+    });
+
+    let refresh_notify = Arc::new(tokio::sync::Notify::new());
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-meta".to_string(),
+        models: vec!["*".to_string()],
+        max_concurrent: 2,
+        backend_base_url: format!("http://{backend_addr}"),
+        endpoint_prefixes: vec![],
+    })
+    .with_models_refresh_notify(Arc::clone(&refresh_notify));
+
+    let daemon_handle = tokio::spawn(async move {
+        let _ = daemon.run().await;
+    });
+
+    wait_for_registered_model(proxy_addr, "qwen3.5-27b").await;
+
+    let (status, body) = get_models(proxy_addr).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["data"][0]["id"], "qwen3.5-27b");
+    assert_eq!(body["data"][0]["owned_by"], "loom");
+    assert_eq!(body["data"][0]["context_length"], 131_072);
+    assert_eq!(body["data"][0]["max_output_tokens"], 32_768);
+    assert_eq!(body["data"][0]["reasoning"], true);
+    assert_eq!(
+        body["data"][0]["reasoning_efforts"],
+        json!(["none", "low", "medium", "high"])
+    );
+    assert_eq!(
+        body["data"][0]["architecture"]["input_modalities"],
+        json!(["text", "image"])
+    );
+
+    // Update only the metadata on the backend (same model ID!) and trigger refresh.
+    *backend_payload.lock().await = json!({
+        "object": "list",
+        "data": [
+            {
+                "id": "qwen3.5-27b",
+                "object": "model",
+                "owned_by": "loom",
+                "context_length": 262_144,
+                "max_output_tokens": 65_536,
+                "reasoning": true,
+                "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"]
+            }
+        ]
+    });
+    refresh_notify.notify_one();
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let (_, body) = get_models(proxy_addr).await;
+            if body["data"][0]["context_length"] == 262_144 {
+                assert_eq!(
+                    body["data"][0]["reasoning_efforts"],
+                    json!(["none", "low", "medium", "high", "xhigh"])
+                );
+                return;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("updated backend metadata should propagate through /v1/models");
+
+    daemon_handle.abort();
+}

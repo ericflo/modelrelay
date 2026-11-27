@@ -79,6 +79,7 @@ fn register_message(models: &[&str]) -> RegisterMessage {
         protocol_version: Some("2026-04-bridge-v1".to_string()),
         current_load: Some(0),
         endpoint_prefixes: vec![],
+        model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
     }
 }
 

@@ -18,6 +18,54 @@ use serde::{Deserialize, Serialize};
 /// Keys are header names (lowercase by convention) and values are header values.
 pub type HeaderMap = BTreeMap<String, String>;
 
+/// Per-model JSON metadata objects keyed by model ID, preserving backend `/v1/models`
+/// fields such as context length, max output tokens, reasoning efforts, and modalities.
+pub type ModelMetadataMap = BTreeMap<String, serde_json::Map<String, serde_json::Value>>;
+
+/// Maximum serialized byte size retained for a single model's metadata object.
+pub const MAX_MODEL_METADATA_BYTES: usize = 32 * 1024;
+
+/// Maximum number of per-model metadata entries retained per worker.
+pub const MAX_MODEL_METADATA_ENTRIES: usize = 256;
+
+/// Parses an OpenAI-compatible `GET /v1/models` JSON payload (`{"data": [{"id": ...}, ...]}`)
+/// into an ordered, deduplicated list of model IDs and a sanitized [`ModelMetadataMap`].
+///
+/// Returns `None` when the payload does not contain a `"data"` array.
+#[must_use]
+pub fn parse_openai_models_response(
+    body: &serde_json::Value,
+) -> Option<(Vec<String>, ModelMetadataMap)> {
+    let data = body.get("data")?.as_array()?;
+    let mut models = Vec::new();
+    let mut metadata = ModelMetadataMap::new();
+
+    for entry in data {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let Some(raw_id) = obj.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = raw_id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if !models.iter().any(|existing| existing == id) {
+            models.push(id.to_string());
+        }
+        if metadata.len() < MAX_MODEL_METADATA_ENTRIES
+            && !metadata.contains_key(id)
+            && serde_json::to_string(obj)
+                .is_ok_and(|serialized| serialized.len() <= MAX_MODEL_METADATA_BYTES)
+        {
+            metadata.insert(id.to_string(), obj.clone());
+        }
+    }
+
+    Some((models, metadata))
+}
+
 /// OpenRouter-compatible provider routing preferences.
 ///
 /// Allows clients to influence which workers handle their request based on
@@ -60,7 +108,7 @@ pub enum ServerToWorkerMessage {
 }
 
 /// Messages sent from a worker back to the proxy server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerToServerMessage {
     /// Initial registration announcing the worker's identity, models, and capacity.
@@ -78,7 +126,7 @@ pub enum WorkerToServerMessage {
 }
 
 /// Sent by a worker when it first connects to register its capabilities.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegisterMessage {
     /// Human-readable name for this worker (e.g. hostname or GPU box label).
     pub worker_name: String,
@@ -96,6 +144,10 @@ pub struct RegisterMessage {
     /// An empty list means the worker accepts any endpoint (legacy behavior).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoint_prefixes: Vec<String>,
+    /// Optional per-model metadata objects discovered from the backend's `/v1/models`
+    /// endpoint (context window, max output tokens, reasoning efforts, modalities, etc.).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_metadata: ModelMetadataMap,
 }
 
 /// Server's acknowledgment of a successful worker registration.
@@ -209,12 +261,15 @@ pub struct ModelsRefreshMessage {
 }
 
 /// Sent by a worker to update the server with its current model list and load.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelsUpdateMessage {
     /// Current set of models the worker can serve.
     pub models: Vec<String>,
     /// Number of requests the worker is currently processing.
     pub current_load: u32,
+    /// Optional per-model metadata objects discovered from the backend's `/v1/models`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_metadata: ModelMetadataMap,
 }
 
 /// One chunk of a streaming response being relayed back to the client.
@@ -323,6 +378,20 @@ mod tests {
 
     #[test]
     fn round_trips_worker_messages_for_registration_and_updates() {
+        let mut model_metadata = super::ModelMetadataMap::new();
+        model_metadata.insert(
+            "gpt-oss-120b".to_string(),
+            serde_json::json!({
+                "id": "gpt-oss-120b",
+                "object": "model",
+                "context_length": 131_072,
+                "reasoning": true,
+                "reasoning_efforts": ["none", "low", "medium", "high"]
+            })
+            .as_object()
+            .expect("json object")
+            .clone(),
+        );
         let register = WorkerToServerMessage::Register(RegisterMessage {
             worker_name: "gpu-box-a".to_string(),
             models: vec!["gpt-oss-120b".to_string()],
@@ -330,10 +399,12 @@ mod tests {
             protocol_version: Some("2026-04-bridge-v1".to_string()),
             current_load: Some(1),
             endpoint_prefixes: vec!["/v1/chat".to_string(), "/v1/messages".to_string()],
+            model_metadata: model_metadata.clone(),
         });
         let update = WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
             models: vec!["gpt-oss-120b".to_string(), "qwen3".to_string()],
             current_load: 1,
+            model_metadata,
         });
 
         let register_json = serde_json::to_string(&register).expect("serialize register");
@@ -347,7 +418,26 @@ mod tests {
         assert_eq!(decoded_register, register);
         assert_eq!(decoded_update, update);
         assert!(register_json.contains("\"type\":\"register\""));
+        assert!(register_json.contains("\"context_length\":131072"));
         assert!(update_json.contains("\"type\":\"models_update\""));
+
+        // Backward compatibility: legacy messages without `model_metadata` still deserialize cleanly.
+        let legacy_register =
+            r#"{"type":"register","worker_name":"legacy","models":["m1"],"max_concurrent":1}"#;
+        let parsed_legacy: WorkerToServerMessage =
+            serde_json::from_str(legacy_register).expect("deserialize legacy register");
+        assert!(matches!(
+            parsed_legacy,
+            WorkerToServerMessage::Register(r) if r.model_metadata.is_empty()
+        ));
+
+        let legacy_update = r#"{"type":"models_update","models":["m1"],"current_load":0}"#;
+        let parsed_legacy_update: WorkerToServerMessage =
+            serde_json::from_str(legacy_update).expect("deserialize legacy update");
+        assert!(matches!(
+            parsed_legacy_update,
+            WorkerToServerMessage::ModelsUpdate(u) if u.model_metadata.is_empty()
+        ));
     }
 
     #[test]

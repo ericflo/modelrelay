@@ -17,6 +17,7 @@ const LANDING_CSS: &str = r"
     position: relative; z-index: 1;
     display: grid; grid-template-columns: 1.02fr 0.98fr; gap: 40px; align-items: center;
   }
+  .hero-grid > *, .split-2 > *, .desktop-grid > *, .topo-grid > *, .pillars > * { min-width: 0; }
   .eyebrow-pill {
     display: inline-flex; align-items: center; gap: 8px;
     padding: 5px 12px; border-radius: 999px; margin-bottom: 20px;
@@ -96,6 +97,7 @@ const LANDING_CSS: &str = r"
     font-size: 2.05rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.15;
     margin-bottom: 12px; color: var(--text-strong);
   }
+  .section-head h2 code { overflow-wrap: anywhere; }
   .section-head p { color: var(--text-secondary); font-size: 1rem; }
 
   /* Topology Diagram */
@@ -148,13 +150,14 @@ const LANDING_CSS: &str = r"
     background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-md);
     box-shadow: var(--shadow-card);
   }
+  .ep-row > div { min-width: 0; }
   .ep-method {
     font-family: var(--font-mono); font-size: 0.7rem; font-weight: 700;
     padding: 3px 7px; border-radius: 5px; flex-shrink: 0; margin-top: 2px;
   }
   .ep-method.get { background: var(--success-soft); color: var(--success-fg); border: 1px solid rgba(5, 150, 105, 0.3); }
   .ep-method.post { background: var(--cyan-soft); color: var(--cyan-fg); border: 1px solid rgba(2, 132, 199, 0.3); }
-  .ep-row code { font-size: 0.85rem; color: var(--text-strong); background: none; border: none; padding: 0; font-weight: 600; }
+  .ep-row code { font-size: 0.85rem; color: var(--text-strong); background: none; border: none; padding: 0; font-weight: 600; overflow-wrap: anywhere; }
   .ep-row p { font-size: 0.83rem; color: var(--text-secondary); margin: 3px 0 0; }
 
   /* Interactive Curl Tabs */
@@ -176,8 +179,8 @@ const LANDING_CSS: &str = r"
   .home-panel { display: none; position: relative; background: var(--bg-code); }
   .home-panel.active { display: block; }
   .home-panel pre { margin: 0; padding: 18px 66px 18px 18px; overflow-x: auto; font-size: 0.82rem; line-height: 1.65; color: var(--code-fg); }
-  .home-panel.prompt-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; font-size: 0.86rem; line-height: 1.68; }
-  .home-panel .copy-btn { position: absolute; top: 12px; right: 12px; }
+  .home-panel.prompt-panel pre { padding: 20px 136px 20px 20px; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; font-size: 0.86rem; line-height: 1.68; }
+  .home-panel .copy-btn { position: absolute; top: 14px; right: 14px; }
 
   /* Agent Bootstrap Spotlight */
   .agent-banner {
@@ -205,6 +208,31 @@ const LANDING_CSS: &str = r"
     display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;
   }
   .agent-prompt-note code { color: #e0e7ff; background: rgba(99, 102, 241, 0.22); border-color: rgba(129, 140, 248, 0.35); }
+  .agent-oneliners {
+    padding: 14px 18px 18px;
+    background: var(--bg-subtle);
+    border-top: 1px solid var(--border);
+  }
+  .agent-oneliners-label {
+    font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-muted); margin-bottom: 10px;
+  }
+  .oneliner-list { display: flex; flex-direction: column; gap: 8px; }
+  .oneliner-row {
+    display: grid; grid-template-columns: 98px minmax(0, 1fr) auto; gap: 10px; align-items: center;
+    padding: 8px 10px 8px 12px;
+    background: var(--bg-code); border: 1px solid var(--code-border); border-radius: var(--radius-md);
+  }
+  .oneliner-client {
+    font-size: 0.74rem; font-weight: 700; color: #c7d2fe;
+    white-space: nowrap;
+  }
+  .oneliner-code {
+    margin: 0; min-width: 0; overflow-x: auto; white-space: nowrap;
+    font-family: var(--font-mono); font-size: 0.78rem; color: var(--code-fg);
+    background: none; border: none; padding: 2px 0;
+  }
+  .oneliner-row .copy-btn { position: static; flex-shrink: 0; }
   .agent-pillars {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 18px;
   }
@@ -260,10 +288,13 @@ const LANDING_CSS: &str = r"
   @media (max-width: 600px) {
     .hero { padding: 48px 0; }
     .section { padding: 52px 0; }
+    .section-head h2 { font-size: 1.55rem; }
     .dl-cards { grid-template-columns: 1fr; }
     .agent-banner { padding: 20px 16px; }
     .agent-top h2 { font-size: 1.5rem; }
-    .home-panel.prompt-panel pre { padding: 48px 16px 16px 16px; font-size: 0.82rem; }
+    .home-panel.prompt-panel pre { padding: 50px 16px 16px 16px; font-size: 0.82rem; }
+    .oneliner-row { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; }
+    .oneliner-client { grid-column: 1 / -1; }
     .cta-banner { padding: 32px 20px; }
   }
 ";
@@ -376,21 +407,14 @@ pub async fn page(OptionalSession(session): OptionalSession) -> Response {
           </div>
         </div>
         <div class="term-pane active" data-tab-pane="hero-pi">
-<pre><span class="tk-c">// 1. ~/.pi/agent/extensions/modelrelay.ts</span>
-<span class="tk-k">pi.registerProvider</span>(<span class="tk-s">"modelrelay"</span>, {{
-  name: <span class="tk-s">"ModelRelay"</span>,
-  baseUrl: <span class="tk-s">"https://api.modelrelay.io/v1"</span>,
-  api: <span class="tk-s">"openai-completions"</span>,
-  <span class="tk-k">async refreshModels</span>({{ credential, signal }}) {{
-    <span class="tk-c">// Live /v1/models + thinkingLevelMap,</span>
-    <span class="tk-c">// contextWindow, maxTokens &amp; compat</span>
-  }},
-}});
+<pre><span class="tk-c"># 1. Install live /v1/models discovery for Pi (1 command)</span>
+curl -fsSL https://modelrelay.io/pi/modelrelay.ts \
+  --create-dirs -o ~/.pi/agent/extensions/modelrelay.ts
 
-<span class="tk-c">// 2. ~/.pi/agent/auth.json  (or /login modelrelay)</span>
-{{
-  <span class="tk-s">"modelrelay"</span>: {{ <span class="tk-s">"type"</span>: <span class="tk-s">"api_key"</span>, <span class="tk-s">"key"</span>: <span class="tk-g">"mr_live_..."</span> }}
-}}</pre>
+<span class="tk-c"># 2. Log in inside Pi (writes ~/.pi/agent/auth.json)</span>
+pi
+<span class="tk-k">/login</span> <span class="tk-s">modelrelay</span>
+<span class="tk-c"># Context length &amp; reasoning efforts auto-populate from /v1/models</span></pre>
         </div>
         <div class="term-pane" data-tab-pane="hero-curl">
 <pre><span class="tk-c"># List live models across your connected GPU workers</span>
@@ -418,8 +442,8 @@ curl -N https://api.modelrelay.io/v1/chat/completions \
         <div class="agent-top">
           <div>
             <div class="eyebrow">Agent-First Setup &middot; modelrelay.io/AGENTS.md</div>
-            <h2>Already using Claude Code, Codex, or Pi? Let it bootstrap your self-hosted stack.</h2>
-            <p>Use your existing commercial provider once to build your own local alternative. Paste a prompt below and your coding agent will read <a href="/AGENTS.md"><code>https://modelrelay.io/AGENTS.md</code></a>, inspect your running local LLM, install <code>modelrelay-server</code> and <code>modelrelay-worker</code>, and wire up your clients &mdash; without overwriting your current API keys.</p>
+            <h2>Already using Claude Code, Codex, or Pi? Let it set up ModelRelay.</h2>
+            <p>Use your existing commercial provider once to wire up your self-hosted alternative. Pick the machine you&rsquo;re on &mdash; <strong>Serve an LLM</strong> on your GPU box or <strong>Connect a Client</strong> on your laptop &mdash; and paste the prompt or run a one-liner below.</p>
           </div>
           <div class="agent-links">
             <a href="/AGENTS.md" class="btn btn-sm">Read AGENTS.md &rarr;</a>
@@ -430,68 +454,66 @@ curl -N https://api.modelrelay.io/v1/chat/completions \
 
         <div class="home-tabs" data-tab-scope="agent-bootstrap">
           <div class="home-tab-bar">
-            <button type="button" class="home-tab active" data-tab-btn="ab-full">Full Self-Hosted Stack</button>
-            <button type="button" class="home-tab" data-tab-btn="ab-worker">Connect This GPU Server</button>
-            <button type="button" class="home-tab" data-tab-btn="ab-client">Configure Pi / Codex / Claude</button>
-            <button type="button" class="home-tab" data-tab-btn="ab-cli">CLI One-Liners</button>
+            <button type="button" class="home-tab active" data-tab-btn="ab-serve">1. Serve an LLM</button>
+            <button type="button" class="home-tab" data-tab-btn="ab-connect">2. Connect a Client</button>
           </div>
 
-          <div class="home-panel prompt-panel active" data-tab-pane="ab-full">
-            <button type="button" class="copy-btn" data-copy-target="prompt-full">Copy</button>
-<pre><code id="prompt-full">Read https://modelrelay.io/AGENTS.md and help me bootstrap a complete self-hosted ModelRelay setup alongside my current provider (do not overwrite my existing commercial API keys). Ask me where to run modelrelay-server and my GPU server's local LLM URL (or detect it on this machine), then deploy the relay with TLS, install modelrelay-worker as a persistent service with models=["*"], configure Pi (~/.pi/agent/extensions/modelrelay.ts + auth.json) and/or my installed coding agents with accurate thinking levels and context limits, and verify streaming chat completions end-to-end.</code></pre>
+          <div class="home-panel prompt-panel active" data-tab-pane="ab-serve">
+            <button type="button" class="copy-btn" data-copy-target="prompt-serve">Copy prompt</button>
+<pre><code id="prompt-serve">Read https://modelrelay.io/AGENTS.md and set up this machine to serve its local LLM through ModelRelay. Detect my running local LLM server (llama-server, Ollama, vLLM, LM Studio, SGLang, etc.), ask whether I'm connecting to api.modelrelay.io or a self-hosted relay (and help set up modelrelay-server if needed), install modelrelay-worker with models=["*"], offer to configure it to start permanently on boot for whatever platform this machine is running (systemd on Linux, launchd on macOS, Windows Service/Scheduled Task on Windows, or Docker), and verify GET /v1/models and a streaming chat completion end-to-end.</code></pre>
             <div class="agent-prompt-note">
-              <span>Paste into <strong>Claude Code</strong>, <strong>Codex</strong>, or <strong>Pi</strong> &mdash; ideal when starting from scratch.</span>
-              <span>Reads <code>https://modelrelay.io/AGENTS.md</code></span>
+              <span>Paste into an existing <strong>Claude Code</strong>, <strong>Codex</strong>, or <strong>Pi</strong> session on your <strong>GPU machine</strong>.</span>
+              <span>Offers permanent startup service for Linux, macOS &amp; Windows</span>
+            </div>
+            <div class="agent-oneliners">
+              <div class="agent-oneliners-label">Or run a CLI one-liner on your GPU machine</div>
+              <div class="oneliner-list">
+                <div class="oneliner-row">
+                  <span class="oneliner-client">Claude Code</span>
+                  <code class="oneliner-code" id="cmd-serve-claude">claude "Read https://modelrelay.io/AGENTS.md and set up this machine to serve its local LLM through ModelRelay, offering to configure it to run permanently on startup for this platform."</code>
+                  <button type="button" class="copy-btn" data-copy-target="cmd-serve-claude">Copy</button>
+                </div>
+                <div class="oneliner-row">
+                  <span class="oneliner-client">Codex CLI</span>
+                  <code class="oneliner-code" id="cmd-serve-codex">codex "Read https://modelrelay.io/AGENTS.md and set up this machine to serve its local LLM through ModelRelay, offering to configure it to run permanently on startup for this platform."</code>
+                  <button type="button" class="copy-btn" data-copy-target="cmd-serve-codex">Copy</button>
+                </div>
+                <div class="oneliner-row">
+                  <span class="oneliner-client">Pi Agent</span>
+                  <code class="oneliner-code" id="cmd-serve-pi">pi "Read https://modelrelay.io/AGENTS.md and set up this machine to serve its local LLM through ModelRelay, offering to configure it to run permanently on startup for this platform."</code>
+                  <button type="button" class="copy-btn" data-copy-target="cmd-serve-pi">Copy</button>
+                </div>
+              </div>
             </div>
           </div>
 
-          <div class="home-panel prompt-panel" data-tab-pane="ab-worker">
-            <button type="button" class="copy-btn" data-copy-target="prompt-worker">Copy</button>
-<pre><code id="prompt-worker">Read https://modelrelay.io/AGENTS.md and connect this GPU machine's local LLM server to ModelRelay. Detect my running local backend (llama-server, Ollama, vLLM, LM Studio, or SGLang) and its context window, install modelrelay-worker, ask me for my relay URL and worker secret/API key, configure it as a persistent background service (systemd, launchd, or Docker) with models=["*"], and verify GET /v1/models and a streaming chat completion through the relay.</code></pre>
+          <div class="home-panel prompt-panel" data-tab-pane="ab-connect">
+            <button type="button" class="copy-btn" data-copy-target="prompt-connect">Copy prompt</button>
+<pre><code id="prompt-connect">Read https://modelrelay.io/AGENTS.md and connect my installed coding agents (Pi, Codex CLI, and/or Claude Code) on this machine to my ModelRelay endpoint without overwriting my existing commercial providers. Ask me for my ModelRelay URL and API key, configure each installed client cleanly (keeping secrets chmod 600 and letting Pi pick up live models, context limits, and reasoning efforts dynamically from /v1/models), and verify a live completion responds.</code></pre>
             <div class="agent-prompt-note">
-              <span>Paste into an agent running on your <strong>GPU box</strong> &mdash; works with hosted or self-hosted relays.</span>
-              <span>Sets up persistent worker + live model discovery</span>
+              <span>Paste into an existing <strong>Claude Code</strong>, <strong>Codex</strong>, or <strong>Pi</strong> session on your <strong>laptop / workstation</strong>.</span>
+              <span>Merges cleanly alongside your existing commercial keys</span>
             </div>
-          </div>
-
-          <div class="home-panel prompt-panel" data-tab-pane="ab-client">
-            <button type="button" class="copy-btn" data-copy-target="prompt-client">Copy</button>
-<pre><code id="prompt-client">Read https://modelrelay.io/AGENTS.md and configure my installed coding agents (Pi, Codex CLI, and/or Claude Code) on this machine to talk to my ModelRelay endpoint without overwriting my existing commercial providers. Ask me for my ModelRelay URL and API key, configure Pi as a dynamic provider (~/.pi/agent/extensions/modelrelay.ts + merged ~/.pi/agent/auth.json with proper thinking levels and context limits), add a non-destructive Codex provider or claude-local alias if installed, and verify live models respond.</code></pre>
-            <div class="agent-prompt-note">
-              <span>Paste into an agent on your <strong>laptop / workstation</strong> &mdash; keeps your commercial accounts untouched.</span>
-              <span>Merges configs safely with <code>chmod 600</code></span>
+            <div class="agent-oneliners">
+              <div class="agent-oneliners-label">Or run a CLI one-liner on your dev machine</div>
+              <div class="oneliner-list">
+                <div class="oneliner-row">
+                  <span class="oneliner-client">Claude Code</span>
+                  <code class="oneliner-code" id="cmd-connect-claude">claude "Read https://modelrelay.io/AGENTS.md and connect my installed coding agents on this machine to my ModelRelay endpoint without overwriting my existing commercial providers."</code>
+                  <button type="button" class="copy-btn" data-copy-target="cmd-connect-claude">Copy</button>
+                </div>
+                <div class="oneliner-row">
+                  <span class="oneliner-client">Codex CLI</span>
+                  <code class="oneliner-code" id="cmd-connect-codex">codex "Read https://modelrelay.io/AGENTS.md and connect my installed coding agents on this machine to my ModelRelay endpoint without overwriting my existing commercial providers."</code>
+                  <button type="button" class="copy-btn" data-copy-target="cmd-connect-codex">Copy</button>
+                </div>
+                <div class="oneliner-row">
+                  <span class="oneliner-client">Pi Agent</span>
+                  <code class="oneliner-code" id="cmd-connect-pi">pi "Read https://modelrelay.io/AGENTS.md and connect my installed coding agents on this machine to my ModelRelay endpoint without overwriting my existing commercial providers."</code>
+                  <button type="button" class="copy-btn" data-copy-target="cmd-connect-pi">Copy</button>
+                </div>
+              </div>
             </div>
-          </div>
-
-          <div class="home-panel" data-tab-pane="ab-cli">
-            <button type="button" class="copy-btn" data-copy-target="prompt-cli">Copy</button>
-<pre><code id="prompt-cli"># Claude Code (using your existing Anthropic setup)
-claude "Read https://modelrelay.io/AGENTS.md and bootstrap my self-hosted ModelRelay server, GPU worker, and client config without overwriting my existing commercial provider."
-
-# OpenAI Codex CLI (using your existing OpenAI setup)
-codex "Read https://modelrelay.io/AGENTS.md and bootstrap my self-hosted ModelRelay server, GPU worker, and client config without overwriting my existing commercial provider."
-
-# Pi Coding Agent (using any existing provider)
-pi "Read https://modelrelay.io/AGENTS.md and bootstrap my self-hosted ModelRelay server, GPU worker, and client config without overwriting my existing commercial provider."</code></pre>
-            <div class="agent-prompt-note">
-              <span>Run any line directly from your shell to kick off an interactive agent session.</span>
-              <span>Works with Claude Code, Codex &amp; Pi</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="agent-pillars">
-          <div class="agent-pillar">
-            <strong>1. Server &amp; GPU Worker Automation</strong>
-            <p>Exact binary URLs, Docker images, <code>modelrelay-server</code> + Caddy/nginx TLS configs, and <code>systemd</code>/<code>launchd</code> worker units.</p>
-          </div>
-          <div class="agent-pillar">
-            <strong>2. Safe Multi-Provider Client Setup</strong>
-            <p>Wires Pi (<code>modelrelay.ts</code> + <code>auth.json</code>), Codex <code>config.toml</code>, and a <code>claude-local</code> alias without touching existing keys.</p>
-          </div>
-          <div class="agent-pillar">
-            <strong>3. Live End-to-End Verification</strong>
-            <p>Guides your agent to test <code>/health</code>, <code>/v1/models</code>, thinking effort, and unbuffered SSE streaming before finishing.</p>
           </div>
         </div>
       </div>
@@ -680,22 +702,14 @@ pi "Read https://modelrelay.io/AGENTS.md and bootstrap my self-hosted ModelRelay
       <div class="split-2">
         <div class="card" style="margin-bottom:0;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-            <h2 style="margin:0;">1. Provider Extension</h2>
-            <span class="badge badge-accent">Thinking &amp; Context Aware</span>
+            <h2 style="margin:0;">1. Enable Live Discovery</h2>
+            <span class="badge badge-accent">1 Command</span>
           </div>
-          <p style="font-size:0.88rem;margin-bottom:12px;">Drop <code>modelrelay.ts</code> into <code>~/.pi/agent/extensions/</code>. Discovers live <code>/v1/models</code> and conveys <code>thinkingLevelMap</code>, <code>contextWindow</code>, <code>maxTokens</code>, and local-backend <code>compat</code> straight to Pi.</p>
+          <p style="font-size:0.88rem;margin-bottom:12px;">Pi&rsquo;s <code>models.json</code> is static, so one small hosted provider file teaches Pi to pull live models, context windows, and reasoning efforts directly from <code>/v1/models</code>.</p>
           <div class="code-shell" style="margin:0;">
-            <div class="code-shell-header"><span>~/.pi/agent/extensions/modelrelay.ts</span><a href="/integrate#pi" style="font-size:0.76rem;">Configure &amp; copy &rarr;</a></div>
-            <pre><code>pi.registerProvider("modelrelay", {{
-  name: "ModelRelay",
-  baseUrl: "https://api.modelrelay.io/v1",
-  api: "openai-completions",
-  async refreshModels({{ credential, signal }}) {{
-    // Returns live models with reasoning: true,
-    // thinkingLevelMap (off:"none", low/medium/high),
-    // contextWindow, maxTokens, and local compat
-  }},
-}});</code></pre>
+            <div class="code-shell-header"><span>shell</span><button type="button" class="copy-btn" data-copy-target="home-pi-install">Copy</button></div>
+            <pre><code id="home-pi-install">curl -fsSL https://modelrelay.io/pi/modelrelay.ts \
+  --create-dirs -o ~/.pi/agent/extensions/modelrelay.ts</code></pre>
           </div>
         </div>
 

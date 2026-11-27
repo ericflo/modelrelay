@@ -187,7 +187,8 @@ async fn main() {
         .with_request_timeout(request_timeout)
         .with_max_body_bytes(max_body_bytes)
         .with_public_cors(public_cors)
-        .with_admin_cors(admin_cors);
+        .with_admin_cors(admin_cors)
+        .with_legacy_models_probe(true);
 
     let router = http_app.router();
 

@@ -338,7 +338,7 @@ const DOC_API: &str = r#"
   <table class="doc-table">
     <thead><tr><th>Method &amp; Path</th><th>Protocol</th><th>Notes</th></tr></thead>
     <tbody>
-      <tr><td><code>GET /v1/models</code></td><td>OpenAI model list</td><td>Returns live model IDs advertised by your connected workers.</td></tr>
+      <tr><td><code>GET /v1/models</code></td><td>OpenAI model list</td><td>Returns live models across your workers, preserving backend metadata (context length, max tokens, reasoning efforts, modalities).</td></tr>
       <tr><td><code>POST /v1/chat/completions</code></td><td>OpenAI Chat Completions</td><td>Unary JSON or SSE streaming (<code>"stream": true</code>).</td></tr>
       <tr><td><code>POST /v1/responses</code></td><td>OpenAI Responses API</td><td>Supports <code>input</code> string/items and SSE event streams.</td></tr>
       <tr><td><code>POST /v1/messages</code></td><td>Anthropic Messages API</td><td>Send <code>x-api-key</code> and <code>anthropic-version: 2023-06-01</code>.</td></tr>
@@ -448,11 +448,11 @@ const DOC_API: &str = r#"
 const DOC_PI: &str = r#"
 <div class="docs-eyebrow">Recommended Coding Agent</div>
 <h1>Pi Coding Agent Setup</h1>
-<p class="docs-lead">Configure ModelRelay as a native <strong>provider</strong> in Pi (<code>@earendil-works/pi-coding-agent</code>) with your API token stored in <code>~/.pi/agent/auth.json</code>, plus full thinking-level, reasoning-effort, and context-window conveyance.</p>
+<p class="docs-lead">Configure ModelRelay as a zero-config dynamic <strong>provider</strong> in Pi (<code>@earendil-works/pi-coding-agent</code>) with your API token stored cleanly in <code>~/.pi/agent/auth.json</code>.</p>
 
 <div class="callout">
-  <strong>Why a provider extension + <code>auth.json</code>?</strong><br>
-  A provider extension calls <code>GET https://api.modelrelay.io/v1/models</code> on refresh so every live model on your GPU workers appears automatically in Pi&rsquo;s <code>/model</code> picker with proper <code>reasoning</code>, <code>thinkingLevelMap</code>, <code>compat</code>, <code>contextWindow</code>, and <code>maxTokens</code> metadata &mdash; while <code>auth.json</code> keeps secrets out of config files and supports <code>/login modelrelay</code> and keychain <code>!command</code> lookups.
+  <strong>Fully dynamic from <code>/v1/models</code></strong><br>
+  ModelRelay preserves your local server&rsquo;s <code>/v1/models</code> metadata (context length, max output tokens, reasoning efforts, vision modalities, and <code>compat</code>) end-to-end. Pi reads them automatically whenever you refresh models &mdash; no manual context dropdowns, env vars, or static model lists.
 </div>
 
 <h2>1. Install Pi</h2>
@@ -462,125 +462,14 @@ const DOC_PI: &str = r#"
 </div>
 <p>On Windows PowerShell run <code>powershell -c "irm https://pi.dev/install.ps1 | iex"</code>, or install via npm (Node 22.19+): <code>npm install -g --ignore-scripts @earendil-works/pi-coding-agent</code>.</p>
 
-<h2>2. Register ModelRelay as a Provider</h2>
-<p>Save the extension below to <code>~/.pi/agent/extensions/modelrelay.ts</code> (or customize your context window and thinking mode interactively on <a href="/integrate#pi">Pi &amp; API Setup</a>). Pi loads extensions in that directory automatically on startup and persists the full model metadata &mdash; including <code>thinkingLevelMap</code> and <code>compat</code> &mdash; for instant offline startup:</p>
+<h2>2. Enable Dynamic <code>/v1/models</code> Discovery (1 Command)</h2>
+<p>Zero <code>models.json</code> config required. One command installs our hosted provider file (<a href="/pi/modelrelay.ts">inspect source</a>) so Pi dynamically discovers live models, runtime context windows, reasoning efforts, and vision support straight from your backend APIs &mdash; supporting <strong>llama.cpp</strong> (<code>/props</code> &amp; router mode), <strong>vLLM</strong> (<code>max_model_len</code> &amp; thinking templates), <strong>LM Studio</strong> (<code>/api/v1/models</code> &amp; <code>/api/v0/models</code>), <strong>Ollama</strong> (<code>/api/show</code>), and custom OpenAI-compatible servers:</p>
 <div class="code-shell">
-  <div class="code-shell-header"><span>~/.pi/agent/extensions/modelrelay.ts</span><button type="button" class="copy-btn" data-copy-target="doc-pi-ext">Copy</button></div>
-  <pre><code id="doc-pi-ext">import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
-const DEFAULT_BASE_URL = "https://api.modelrelay.io/v1";
-// Match your worker backend context limit (e.g. llama-server -c / vLLM --max-model-len)
-const DEFAULT_CONTEXT_WINDOW = Number(process.env.MODELRELAY_CONTEXT_WINDOW) || 131072;
-const DEFAULT_MAX_TOKENS = Number(process.env.MODELRELAY_MAX_TOKENS) || 32768;
-
-type RelayModel = {
-  id: string;
-  context_window?: number;
-  context_length?: number;
-  max_model_len?: number;
-  max_tokens?: number;
-  max_completion_tokens?: number;
-  reasoning?: boolean;
-  meta?: { n_ctx?: number; n_ctx_train?: number };
-  architecture?: { input_modalities?: string[] };
-};
-
-export default function (pi: ExtensionAPI) {
-  pi.registerProvider("modelrelay", {
-    name: "ModelRelay",
-    baseUrl: DEFAULT_BASE_URL,
-    api: "openai-completions",
-    async refreshModels({ credential, stored, publish, allowNetwork, baseUrl, signal }) {
-      const root = (baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-      const cached = (stored?.models ?? [])
-        .filter((m) => m.provider === "modelrelay" && "maxTokens" in m)
-        .map((m) => ({
-          id: m.id,
-          name: m.name,
-          reasoning: m.reasoning,
-          thinkingLevelMap: m.thinkingLevelMap,
-          input: m.input,
-          inputLimits: m.inputLimits,
-          cost: m.cost,
-          contextWindow: m.contextWindow,
-          maxTokens: m.maxTokens,
-          samplingParams: m.samplingParams,
-          samplingParamsByThinkingLevel: m.samplingParamsByThinkingLevel,
-          compat: m.compat,
-        }));
-
-      if (!allowNetwork || credential?.type !== "api_key" || !credential.key) {
-        return cached;
-      }
-
-      const res = await fetch(`${root}/models`, {
-        headers: { Authorization: `Bearer ${credential.key}` },
-        signal,
-      });
-      if (!res.ok) return cached;
-
-      const { data = [] } = (await res.json()) as { data?: RelayModel[] };
-      const models = data.map((m) => {
-        const contextWindow =
-          m.meta?.n_ctx ||
-          m.context_window ||
-          m.context_length ||
-          m.max_model_len ||
-          m.meta?.n_ctx_train ||
-          DEFAULT_CONTEXT_WINDOW;
-        const maxTokens = Math.min(
-          m.max_completion_tokens || m.max_tokens || DEFAULT_MAX_TOKENS,
-          contextWindow,
-        );
-        const reasoning = m.reasoning ?? true;
-        const hasVision = m.architecture?.input_modalities?.includes("image") === true;
-
-        return {
-          id: m.id,
-          name: m.id,
-          reasoning,
-          ...(reasoning && {
-            thinkingLevelMap: {
-              off: "none",
-              minimal: null,
-              low: "low",
-              medium: "medium",
-              high: "high",
-            },
-          }),
-          input: (hasVision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow,
-          maxTokens,
-          compat: {
-            supportsStore: false,
-            supportsDeveloperRole: false,
-            supportsReasoningEffort: reasoning,
-            supportsUsageInStreaming: true,
-            supportsStrictMode: false,
-            maxTokensField: "max_tokens" as const,
-            ...(reasoning && { thinkingFormat: "openai" as const }),
-          },
-        };
-      });
-
-      await publish({
-        persist: {
-          models: models.map((m) => ({
-            ...m,
-            api: "openai-completions" as const,
-            provider: "modelrelay",
-            baseUrl: root,
-          })),
-          checkedAt: Date.now(),
-        },
-      });
-
-      return models;
-    },
-  });
-}</code></pre>
+  <div class="code-shell-header"><span>shell</span><button type="button" class="copy-btn" data-copy-target="doc-pi-ext">Copy</button></div>
+  <pre><code id="doc-pi-ext">curl -fsSL https://modelrelay.io/pi/modelrelay.ts \
+  --create-dirs -o ~/.pi/agent/extensions/modelrelay.ts</code></pre>
 </div>
+<p>Self-hosting a custom relay URL? Keep the same file and set <code>export MODELRELAY_BASE_URL=https://relay.example.com/v1</code> (or set <code>providers.modelrelay.baseUrl</code> in <code>~/.pi/agent/models.json</code>).</p>
 
 <h2>3. Store Your Token in <code>~/.pi/agent/auth.json</code></h2>
 <p>Add a <code>"modelrelay"</code> entry to <code>~/.pi/agent/auth.json</code> (or start Pi and run <code>/login modelrelay</code> to let Pi prompt and write it for you):</p>
@@ -595,75 +484,43 @@ export default function (pi: ExtensionAPI) {
 </div>
 <p>Lock down file permissions with <code>chmod 600 ~/.pi/agent/auth.json</code>. To pull the key from macOS Keychain or a password manager instead of storing plaintext, prefix <code>key</code> with <code>!</code> (for example <code>"!security find-generic-password -ws 'modelrelay'"</code>).</p>
 
-<h2>4. Refresh, Select a Model &amp; Set Thinking Level</h2>
+<h2>4. Refresh &amp; Start Coding</h2>
 <div class="code-shell">
   <div class="code-shell-header"><span>shell</span><button type="button" class="copy-btn" data-copy-target="doc-pi-verify">Copy</button></div>
   <pre><code id="doc-pi-verify">pi update --models
 pi --list-models</code></pre>
 </div>
-<p>Open <code>pi</code>, run <code>/model</code> to pick any ModelRelay model (<code>Ctrl+S</code> saves it as your default), and run <code>/thinking</code> (or press <code>Shift+Tab</code>) to switch between <code>off</code>, <code>low</code>, <code>medium</code>, and <code>high</code>.</p>
+<p>Open <code>pi</code>, run <code>/model</code> to select any live ModelRelay model (<code>Ctrl+S</code> saves it as your default), and use <code>/thinking</code> (or <code>Shift+Tab</code>) to cycle through the exact reasoning efforts advertised by your server.</p>
 
-<h2 id="thinking">Thinking Levels &amp; Reasoning Effort</h2>
-<p>Pi only offers <code>/thinking</code> choices when a model sets <code>reasoning: true</code>, and translates each level into wire parameters using <code>thinkingLevelMap</code> and <code>compat</code>:</p>
-<ul>
-  <li><strong><code>thinkingLevelMap.off = "none"</code>:</strong> Explicitly sends <code>"reasoning_effort": "none"</code> when you pick <code>/thinking off</code>, actively disabling thinking on <code>llama-server</code> and vLLM instead of leaving backend defaults on.</li>
-  <li><strong><code>thinkingLevelMap.minimal = null</code>:</strong> Hides <code>minimal</code> from Pi&rsquo;s selector so strict Jinja chat templates (which only accept <code>low</code>, <code>medium</code>, and <code>high</code>) never reject requests with HTTP 400.</li>
-  <li><strong><code>xhigh</code> / <code>max</code>:</strong> Opt-in in Pi &mdash; only offered if you map them to a string in <code>thinkingLevelMap</code>.</li>
-  <li><strong><code>compat.thinkingTokenBudgetField</code>:</strong> Because reasoning and final answer share <code>max_tokens</code> on OpenAI-compatible servers, set a budget field to cap reasoning tokens per thinking level (<code>llama.cpp</code>: <code>"thinking_budget_tokens"</code>, vLLM: <code>"thinking_token_budget"</code>, Qwen/SGLang: <code>"thinking_budget"</code>).</li>
-</ul>
-
+<h2 id="metadata">How Dynamic Metadata Flows to Pi</h2>
+<p>Whenever your local inference server returns model metadata in <code>GET /v1/models</code>, ModelRelay preserves the full JSON object through the relay so <code>modelrelay.ts</code> configures Pi automatically:</p>
 <div class="doc-table-wrap">
   <table class="doc-table">
-    <thead><tr><th>Backend / Model Family</th><th><code>compat.thinkingFormat</code></th><th>Wire Parameters Sent by Pi</th></tr></thead>
+    <thead><tr><th>Pi Field</th><th>Auto-Detected From <code>/v1/models</code></th></tr></thead>
     <tbody>
-      <tr><td>llama.cpp / vLLM / Ollama / gpt-oss</td><td><code>"openai"</code> (default)</td><td><code>reasoning_effort: "none" | "low" | "medium" | "high"</code> (+ optional <code>thinking_budget_tokens</code> / <code>thinking_token_budget</code>)</td></tr>
-      <tr><td>Qwen3 / Qwen3.5 chat templates</td><td><code>"qwen-chat-template"</code></td><td><code>chat_template_kwargs: { enable_thinking, preserve_thinking: true }</code> (+ optional <code>thinking_budget_tokens</code>)</td></tr>
-      <tr><td>DeepSeek R1 / V3 / V4</td><td><code>"deepseek"</code></td><td><code>thinking: { type: "enabled" | "disabled" }</code> + <code>reasoning_effort</code> + <code>requiresReasoningContentOnAssistantMessages: true</code></td></tr>
-      <tr><td>GLM (ZAI)</td><td><code>"zai"</code></td><td><code>thinking: { type: "enabled", clear_thinking: false }</code> / <code>{ type: "disabled" }</code></td></tr>
+      <tr><td><code>contextWindow</code></td><td><code>context_length</code>, <code>context_window</code>, <code>max_model_len</code>, <code>meta.n_ctx</code>, <code>n_ctx</code>, <code>top_provider.context_length</code></td></tr>
+      <tr><td><code>maxTokens</code></td><td><code>max_output_tokens</code>, <code>max_completion_tokens</code>, <code>max_tokens</code>, <code>top_provider.max_completion_tokens</code></td></tr>
+      <tr><td><code>reasoning</code> &amp; <code>thinkingLevelMap</code></td><td><code>thinkingLevelMap</code> / <code>thinking_level_map</code>, <code>reasoning_efforts</code> / <code>supported_reasoning_efforts</code> / <code>thinking_levels</code>, <code>reasoning</code>, <code>capabilities.reasoning</code>, or <code>supported_parameters</code></td></tr>
+      <tr><td><code>input</code> (vision)</td><td><code>architecture.input_modalities</code> (<code>"image"</code>), <code>capabilities.vision</code>, or <code>meta.multimodal</code></td></tr>
+      <tr><td><code>compat</code></td><td>Local OpenAI defaults (<code>supportsUsageInStreaming: true</code>, <code>supportsReasoningEffort</code>, <code>thinkingFormat</code>) merged with any backend <code>compat</code> object</td></tr>
     </tbody>
   </table>
 </div>
 
-<h2 id="context">Context Window, Output Limits &amp; Per-Model Overrides</h2>
-<p>Pi relies on accurate <code>contextWindow</code> and <code>maxTokens</code> values for three things: displaying context usage in the footer, clamping <code>max_tokens</code> so <code>input + max_tokens</code> never exceeds your window, and triggering auto-compaction before your worker hits a KV-cache overflow. Note that <code>compat.supportsUsageInStreaming: true</code> ensures streamed turns return real token usage.</p>
-<ul>
-  <li>Set <code>MODELRELAY_CONTEXT_WINDOW</code> / <code>MODELRELAY_MAX_TOKENS</code> (or edit the defaults in <code>modelrelay.ts</code>) to match your worker&rsquo;s configured window (e.g. <code>llama-server -c 65536</code> or vLLM <code>--max-model-len</code>).</li>
-  <li>For heterogeneous GPU fleets where different models have different context limits, vision support, or thinking formats, add per-model <code>modelOverrides</code> in <code>~/.pi/agent/models.json</code> (no API keys needed &mdash; Pi layers overrides cleanly on top of your extension):</li>
-</ul>
-
+<h2 id="overrides">Optional Per-Model Overrides (<code>models.json</code>)</h2>
+<p>If a legacy backend omits metadata from <code>/v1/models</code> (or you want custom sampling or token budgets like <code>thinkingTokenBudgetField</code>), layer per-model <code>modelOverrides</code> in <code>~/.pi/agent/models.json</code> &mdash; still zero API keys in <code>models.json</code>:</p>
 <div class="code-shell">
-  <div class="code-shell-header"><span>~/.pi/agent/models.json (per-model overrides)</span><button type="button" class="copy-btn" data-copy-target="doc-pi-overrides">Copy</button></div>
+  <div class="code-shell-header"><span>~/.pi/agent/models.json (optional)</span><button type="button" class="copy-btn" data-copy-target="doc-pi-overrides">Copy</button></div>
   <pre><code id="doc-pi-overrides">{
   "$schema": "https://pi.dev/schemas/models.schema.json",
   "providers": {
     "modelrelay": {
-      "baseUrl": "https://api.modelrelay.io/v1",
       "modelOverrides": {
         "qwen3.5-27b": {
-          "reasoning": true,
-          "input": ["text", "image"],
           "contextWindow": 131072,
           "maxTokens": 32768,
-          "thinkingLevelMap": {
-            "off": "none",
-            "minimal": null,
-            "low": "low",
-            "medium": "medium",
-            "high": "high"
-          },
-          "compat": {
-            "thinkingFormat": "qwen-chat-template",
-            "thinkingTokenBudgetField": "thinking_budget_tokens"
-          },
-          "samplingParamsByThinkingLevel": {
-            "off": { "temperature": 0.7, "top_p": 0.8 },
-            "high": { "temperature": 1.0, "top_p": 0.95 }
-          }
-        },
-        "llama-3.3-70b": {
-          "reasoning": false,
-          "contextWindow": 65536,
-          "maxTokens": 16384
+          "reasoning": true,
+          "thinkingLevelMap": { "off": "none", "minimal": null, "low": "low", "medium": "medium", "high": "high" }
         }
       }
     }
@@ -674,9 +531,7 @@ pi --list-models</code></pre>
 <h2>Troubleshooting</h2>
 <ul>
   <li><strong>No ModelRelay models appear in <code>/model</code>:</strong> Confirm your worker is online with <code>curl https://api.modelrelay.io/v1/models -H "Authorization: Bearer $MODELRELAY_API_KEY"</code>, then run <code>pi update --models</code>.</li>
-  <li><strong><code>/thinking</code> only shows <code>off</code>:</strong> Ensure the model has <code>reasoning: true</code> (check <code>pi --list-models</code>) and run <code>/reload</code> + <code>pi update --models</code> so cached catalog entries refresh.</li>
-  <li><strong>Backend returns HTTP 400 on a thinking level:</strong> Hide unsupported levels with <code>null</code> in <code>thinkingLevelMap</code> (e.g. <code>"minimal": null</code>) or switch <code>compat.thinkingFormat</code> to match your server&rsquo;s chat template.</li>
-  <li><strong>Context overflow before Pi compacts:</strong> Lower <code>contextWindow</code> in <code>modelrelay.ts</code> or <code>modelOverrides</code> to match your worker&rsquo;s actual <code>-c</code> / <code>--max-model-len</code> value.</li>
+  <li><strong>Changed backend context length or efforts:</strong> ModelRelay workers refresh <code>/v1/models</code> metadata automatically; run <code>pi update --models</code> (or <code>/reload</code> inside Pi) to pull the updated values immediately.</li>
 </ul>
 "#;
 

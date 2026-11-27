@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use modelrelay_protocol::{
-    HeaderMap, ModelsUpdateMessage, PongMessage, ProviderRouting, RegisterAck, RegisterMessage,
+    HeaderMap, MAX_MODEL_METADATA_BYTES, MAX_MODEL_METADATA_ENTRIES, ModelMetadataMap,
+    ModelsUpdateMessage, PongMessage, ProviderRouting, RegisterAck, RegisterMessage,
     RequestMessage, ResponseCompleteMessage,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -131,6 +132,9 @@ impl ProxyServerCore {
         self.next_worker_id += 1;
 
         let sanitized_models = sanitize_models(register.models);
+        let sanitized_metadata =
+            sanitize_model_metadata(register.model_metadata, &sanitized_models);
+        let native_metadata_reported = !sanitized_metadata.is_empty();
         let warnings = registration_warnings(&register.worker_name, &sanitized_models);
         let current_load = register.current_load.unwrap_or(0) as usize;
         let max_concurrent = register.max_concurrent.max(1) as usize;
@@ -142,6 +146,7 @@ impl ProxyServerCore {
             worker_name = %register.worker_name,
             provider = %provider,
             models = ?sanitized_models,
+            metadata_count = sanitized_metadata.len(),
             max_concurrent,
             scoped = owner_key_id.is_some(),
             "worker registered"
@@ -155,6 +160,9 @@ impl ProxyServerCore {
                 worker_name: register.worker_name,
                 owner_key_id,
                 models: sanitized_models.clone(),
+                model_metadata: sanitized_metadata,
+                native_metadata_reported,
+                legacy_metadata_probed_at: None,
                 endpoint_prefixes: endpoint_prefixes.clone(),
                 max_concurrent,
                 reported_load: current_load,
@@ -194,6 +202,22 @@ impl ProxyServerCore {
         };
 
         worker.models = sanitize_models(update.models);
+        if !update.model_metadata.is_empty() {
+            worker.model_metadata = sanitize_model_metadata(update.model_metadata, &worker.models);
+            worker.native_metadata_reported = true;
+        } else if worker.native_metadata_reported {
+            worker.model_metadata.clear();
+        } else {
+            // Keep cached legacy probe entries only for models still advertised,
+            // and allow a fresh legacy probe on the next `/v1/models` call.
+            let allowed: HashSet<&str> = worker.models.iter().map(String::as_str).collect();
+            if !allowed.contains("*") {
+                worker
+                    .model_metadata
+                    .retain(|id, _| allowed.contains(id.as_str()));
+            }
+            worker.legacy_metadata_probed_at = None;
+        }
         worker.reported_load = update.current_load as usize;
 
         tracing::debug!(
@@ -1372,6 +1396,194 @@ impl ProxyServerCore {
         models
     }
 
+    /// Returns full OpenAI-compatible model objects (preserving backend `/v1/models`
+    /// metadata such as context length, max output tokens, reasoning efforts, and
+    /// modalities) across all workers visible to `owner_key_id`.
+    #[must_use]
+    pub fn provider_model_entries_for_owner(
+        &self,
+        provider: &str,
+        owner_key_id: Option<&str>,
+    ) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        let mut model_order = Vec::new();
+        let mut model_metadata: HashMap<
+            String,
+            Option<serde_json::Map<String, serde_json::Value>>,
+        > = HashMap::new();
+
+        for exact_only in [true, false] {
+            for worker_id in &self.worker_order {
+                let Some(worker) = self.workers.get(worker_id) else {
+                    continue;
+                };
+                if !worker.visible_to_owner(owner_key_id) {
+                    continue;
+                }
+                if exact_only && worker.provider != provider {
+                    continue;
+                }
+                if !exact_only && worker.provider == provider {
+                    continue;
+                }
+                for model in &worker.models {
+                    if model == "*" {
+                        continue;
+                    }
+                    let meta = worker.model_metadata.get(model).cloned();
+                    match model_metadata.entry(model.clone()) {
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            model_order.push(model.clone());
+                            slot.insert(meta);
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut slot) => {
+                            if slot.get().is_none() && meta.is_some() {
+                                slot.insert(meta);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        model_order
+            .into_iter()
+            .map(|id| {
+                let mut obj = model_metadata.remove(&id).flatten().unwrap_or_default();
+                obj.insert("id".to_string(), serde_json::Value::String(id));
+                if obj
+                    .get("object")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty)
+                {
+                    obj.insert(
+                        "object".to_string(),
+                        serde_json::Value::String("model".to_string()),
+                    );
+                }
+                if obj
+                    .get("owned_by")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty)
+                {
+                    obj.insert(
+                        "owned_by".to_string(),
+                        serde_json::Value::String("worker-proxy".to_string()),
+                    );
+                }
+                obj
+            })
+            .collect()
+    }
+
+    /// Identifies connected legacy workers (those that registered without native
+    /// `model_metadata`) that are eligible for a lightweight cached `GET /v1/models`
+    /// metadata probe.
+    #[must_use]
+    pub fn legacy_metadata_probe_targets(
+        &self,
+        provider: &str,
+        owner_key_id: Option<&str>,
+        now: Instant,
+        ttl: Duration,
+    ) -> Vec<String> {
+        let mut targets = Vec::new();
+        for exact_only in [true, false] {
+            for worker_id in &self.worker_order {
+                let Some(worker) = self.workers.get(worker_id) else {
+                    continue;
+                };
+                if !worker.visible_to_owner(owner_key_id) {
+                    continue;
+                }
+                if exact_only && worker.provider != provider {
+                    continue;
+                }
+                if !exact_only && worker.provider == provider {
+                    continue;
+                }
+                if worker.native_metadata_reported
+                    || worker.is_draining
+                    || !worker.supports_endpoint("/v1/models")
+                    || !self.worker_notifiers.contains_key(worker_id)
+                    || worker.selection_load() >= worker.max_concurrent
+                {
+                    continue;
+                }
+                if worker
+                    .legacy_metadata_probed_at
+                    .is_some_and(|probed_at| now.saturating_duration_since(probed_at) < ttl)
+                {
+                    continue;
+                }
+                targets.push(worker_id.clone());
+            }
+        }
+        targets
+    }
+
+    /// Dispatches a non-queued `GET /v1/models` probe directly to a specific connected
+    /// worker to populate cached metadata for legacy workers that did not send
+    /// `model_metadata` in `Register`. Returns `None` if the worker is unavailable or busy.
+    pub fn submit_worker_models_probe(&mut self, worker_id: &str) -> Option<PendingHttpResponse> {
+        let (provider, owner_key_id) = {
+            let worker = self.workers.get_mut(worker_id)?;
+            if worker.is_draining
+                || worker.native_metadata_reported
+                || worker.selection_load() >= worker.max_concurrent
+                || !worker.supports_endpoint("/v1/models")
+                || !self.worker_notifiers.contains_key(worker_id)
+            {
+                return None;
+            }
+            worker.legacy_metadata_probed_at = Some(Instant::now());
+            (worker.provider.clone(), worker.owner_key_id.clone())
+        };
+
+        let request_id = format!("request-{}", self.next_request_id);
+        self.next_request_id += 1;
+        let request = RequestRecord {
+            request_id: request_id.clone(),
+            provider,
+            model: "*".to_string(),
+            owner_key_id,
+            queued_at: Instant::now(),
+            transport: RequestTransport {
+                endpoint_path: "/v1/models".to_string(),
+                method: "GET".to_string(),
+                is_streaming: false,
+                body: String::new(),
+                headers: HeaderMap::new(),
+            },
+            provider_routing: None,
+            requeue_count: 0,
+        };
+        let (tx, rx) = oneshot::channel();
+        self.pending_http_response_senders
+            .insert(request_id.clone(), PendingHttpResponseSender::Unary(tx));
+        self.assign_to_worker(worker_id, request);
+
+        Some(PendingHttpResponse {
+            request_id,
+            response_rx: rx,
+        })
+    }
+
+    /// Stores metadata obtained from a legacy worker `GET /v1/models` probe unless
+    /// the worker has since reported native metadata.
+    pub fn apply_probed_worker_metadata(
+        &mut self,
+        worker_id: &str,
+        probed_metadata: ModelMetadataMap,
+    ) {
+        let Some(worker) = self.workers.get_mut(worker_id) else {
+            return;
+        };
+        if worker.native_metadata_reported {
+            return;
+        }
+        worker.model_metadata = sanitize_model_metadata(probed_metadata, &worker.models);
+    }
+
     #[must_use]
     pub fn worker_ids_for_provider(&self, provider: &str) -> Vec<String> {
         self.worker_order
@@ -1972,12 +2184,15 @@ pub enum RequestFailureReason {
     WorkerDisconnectedMidStream,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct WorkerState {
     provider: String,
     worker_name: String,
     owner_key_id: Option<String>,
     models: Vec<String>,
+    model_metadata: ModelMetadataMap,
+    native_metadata_reported: bool,
+    legacy_metadata_probed_at: Option<Instant>,
     endpoint_prefixes: Vec<String>,
     max_concurrent: usize,
     reported_load: usize,
@@ -2098,6 +2313,35 @@ fn sanitize_models(models: Vec<String>) -> Vec<String> {
     sanitized
 }
 
+fn sanitize_model_metadata(
+    metadata: ModelMetadataMap,
+    sanitized_models: &[String],
+) -> ModelMetadataMap {
+    if metadata.is_empty() {
+        return ModelMetadataMap::new();
+    }
+    let allowed: HashSet<&str> = sanitized_models.iter().map(String::as_str).collect();
+    let allow_all = allowed.contains("*");
+    let mut cleaned = ModelMetadataMap::new();
+
+    for (raw_id, obj) in metadata {
+        if cleaned.len() >= MAX_MODEL_METADATA_ENTRIES {
+            break;
+        }
+        let id = raw_id.trim();
+        if id.is_empty() || (!allow_all && !allowed.contains(id)) {
+            continue;
+        }
+        if serde_json::to_string(&obj)
+            .is_ok_and(|serialized| serialized.len() <= MAX_MODEL_METADATA_BYTES)
+        {
+            cleaned.insert(id.to_string(), obj);
+        }
+    }
+
+    cleaned
+}
+
 fn registration_warnings(worker_name: &str, sanitized_models: &[String]) -> Vec<String> {
     let mut warnings = Vec::new();
 
@@ -2118,7 +2362,9 @@ mod tests {
         ProxyServerCore, QueuedAssignment, RequestFailure, RequestFailureReason, RequestState,
         SubmissionOutcome, WorkerCancelSignal, WorkerDisconnectOutcome,
     };
-    use modelrelay_protocol::{HeaderMap, ModelsUpdateMessage, ProviderRouting, RegisterMessage};
+    use modelrelay_protocol::{
+        HeaderMap, ModelMetadataMap, ModelsUpdateMessage, ProviderRouting, RegisterMessage,
+    };
     use std::time::Duration;
 
     fn register_message(
@@ -2134,6 +2380,7 @@ mod tests {
             protocol_version: Some("2026-04-bridge-v1".to_string()),
             current_load,
             endpoint_prefixes: vec![],
+            model_metadata: ModelMetadataMap::new(),
         }
     }
 
@@ -2289,6 +2536,7 @@ mod tests {
                 ModelsUpdateMessage {
                     models: vec!["llama-3.1-70b".to_string(), "mistral-large".to_string()],
                     current_load: 0,
+                    model_metadata: ModelMetadataMap::new(),
                 }
             ),
             vec![DispatchAssignment {
@@ -2306,6 +2554,7 @@ mod tests {
                 ModelsUpdateMessage {
                     models: vec!["llama-3.1-70b".to_string()],
                     current_load: 0,
+                    model_metadata: ModelMetadataMap::new(),
                 }
             )
             .is_empty()
@@ -2902,6 +3151,7 @@ mod tests {
                 .iter()
                 .map(|ep| (*ep).to_string())
                 .collect(),
+            model_metadata: ModelMetadataMap::new(),
         }
     }
 

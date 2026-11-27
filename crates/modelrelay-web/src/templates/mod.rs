@@ -6,6 +6,10 @@ pub use dashboard::dashboard_page;
 pub use integrate::{integrate_page, integrate_page_with_config};
 pub use setup::{setup_wizard_page, setup_wizard_page_with_config};
 
+/// Canonical dynamic Pi Coding Agent provider extension (`~/.pi/agent/extensions/modelrelay.ts`),
+/// served at `https://modelrelay.io/pi/modelrelay.ts` and embedded in docs & `/integrate`.
+pub const PI_EXTENSION_TS: &str = include_str!("../../assets/modelrelay.ts");
+
 /// Optional configuration for embedding interactive pages in a cloud context.
 ///
 /// When provided, page scripts pre-fill the public relay URL, active API key,

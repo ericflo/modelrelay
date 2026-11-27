@@ -842,7 +842,7 @@ async fn docs_hub_and_all_sections_render_cleanly() {
     for (path, expected) in [
         ("/docs", "ModelRelay Overview"),
         ("/docs/api", "api.modelrelay.io"),
-        ("/docs/pi", "pi.registerProvider"),
+        ("/docs/pi", "/pi/modelrelay.ts"),
         ("/docs/workers", "Desktop App"),
         ("/docs/self-hosting", "Self-Hosting ModelRelay"),
         ("/docs/architecture", "Architecture"),
@@ -870,16 +870,23 @@ async fn integrate_page_focuses_on_api_curl_and_pi_provider() {
     let (status, body) = get("/integrate").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("api.modelrelay.io"));
+    assert!(body.contains("/pi/modelrelay.ts"));
     assert!(body.contains("pi.registerProvider"));
     assert!(body.contains("~/.pi/agent/extensions/modelrelay.ts"));
     assert!(body.contains("~/.pi/agent/auth.json"));
     assert!(body.contains("@earendil-works/pi-coding-agent"));
     assert!(body.contains("thinkingLevelMap"));
+    assert!(body.contains("reasoning_efforts"));
     assert!(body.contains("thinkingFormat"));
     assert!(body.contains("supportsReasoningEffort"));
     assert!(body.contains("contextWindow"));
     assert!(body.contains("maxTokens"));
-    assert!(body.contains("MODELRELAY_CONTEXT_WINDOW"));
+    assert!(
+        !body.contains("pi-thinking-mode")
+            && !body.contains("pi-ctx-window")
+            && !body.contains("MODELRELAY_CONTEXT_WINDOW"),
+        "/integrate should stay fully dynamic without manual thinking/context dropdowns or env var hacks"
+    );
     assert!(
         !body.contains("Codex CLI") && !body.contains("Continue.dev") && !body.contains("Aider"),
         "/integrate should drop non-Pi agents and stay focused on api.modelrelay.io curl + Pi"
@@ -1165,15 +1172,64 @@ async fn agents_md_is_served_with_markdown_and_cors_on_both_cases() {
 }
 
 #[tokio::test]
+async fn pi_extension_endpoint_serves_dynamic_provider_script() {
+    let resp = app()
+        .oneshot(
+            Request::builder()
+                .uri("/pi/modelrelay.ts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("text/typescript; charset=utf-8")
+    );
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("*")
+    );
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains(r#"pi.registerProvider("modelrelay""#));
+    assert!(body.contains("reasoning_efforts"));
+    assert!(body.contains("thinkingLevelMap"));
+    assert!(body.contains("contextWindow"));
+    assert!(body.contains("fetchLlamaProps"));
+    assert!(body.contains("fetchLmStudioCatalog"));
+    assert!(body.contains("fetchOllamaShow"));
+    assert!(body.contains("max_model_len"));
+    assert!(body.contains("qwen-chat-template"));
+}
+
+#[tokio::test]
 async fn landing_page_includes_agent_bootstrap_prompts_and_agents_md_link() {
     let (status, body) = get("/").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("/AGENTS.md"));
     assert!(body.contains("https://modelrelay.io/AGENTS.md"));
-    assert!(body.contains("Claude Code"));
-    assert!(body.contains("Codex"));
-    assert!(body.contains("prompt-full"));
-    assert!(body.contains("prompt-worker"));
-    assert!(body.contains("prompt-client"));
-    assert!(body.contains("prompt-cli"));
+    assert!(body.contains("Serve an LLM"));
+    assert!(body.contains("Connect a Client"));
+    assert!(body.contains("prompt-serve"));
+    assert!(body.contains("prompt-connect"));
+    assert!(body.contains("cmd-serve-claude"));
+    assert!(body.contains("cmd-serve-codex"));
+    assert!(body.contains("cmd-serve-pi"));
+    assert!(body.contains("cmd-connect-claude"));
+    assert!(body.contains("cmd-connect-codex"));
+    assert!(body.contains("cmd-connect-pi"));
+    assert!(!body.contains("prompt-full"));
 }

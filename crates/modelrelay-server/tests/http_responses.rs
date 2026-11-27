@@ -82,6 +82,7 @@ async fn register_test_worker(socket: &mut TestSocket) {
         protocol_version: Some("2026-04-bridge-v1".to_string()),
         current_load: Some(0),
         endpoint_prefixes: vec![],
+        model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
     });
     let register_payload = serde_json::to_string(&register).expect("serialize register");
 
@@ -214,6 +215,7 @@ async fn send_models_update(socket: &mut TestSocket, models: Vec<String>, curren
     let message = WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
         models,
         current_load,
+        model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
     });
     let payload = serde_json::to_string(&message).expect("serialize models_update");
 

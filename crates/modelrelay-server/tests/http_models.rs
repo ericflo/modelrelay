@@ -1,6 +1,10 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use modelrelay_protocol::{ModelsUpdateMessage, RegisterMessage};
+use futures_util::{SinkExt, StreamExt};
+use modelrelay_protocol::{
+    HeaderMap, ModelMetadataMap, ModelsUpdateMessage, RegisterMessage, ResponseCompleteMessage,
+    ServerToWorkerMessage, WorkerToServerMessage,
+};
 use modelrelay_server::{
     ProxyHttpApp, ProxyServerCore, WorkerSocketApp, WorkerSocketProviderConfig,
 };
@@ -9,6 +13,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Mutex,
+};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
 };
 
 async fn spawn_server() -> (SocketAddr, Arc<Mutex<ProxyServerCore>>) {
@@ -79,6 +87,7 @@ fn register_message(models: &[&str]) -> RegisterMessage {
         protocol_version: Some("2026-04-bridge-v1".to_string()),
         current_load: Some(0),
         endpoint_prefixes: vec![],
+        model_metadata: ModelMetadataMap::new(),
     }
 }
 
@@ -157,6 +166,7 @@ async fn models_endpoint_tracks_live_model_updates_and_disconnects_without_stale
                 ModelsUpdateMessage {
                     models: vec!["llama-3.1-70b".to_string(), "gpt-oss-120b".to_string()],
                     current_load: 0,
+                    model_metadata: ModelMetadataMap::new(),
                 },
             )
             .is_empty()
@@ -167,6 +177,7 @@ async fn models_endpoint_tracks_live_model_updates_and_disconnects_without_stale
                 ModelsUpdateMessage {
                     models: vec!["gpt-oss-120b".to_string()],
                     current_load: 0,
+                    model_metadata: ModelMetadataMap::new(),
                 },
             )
             .is_empty()
@@ -218,4 +229,190 @@ async fn models_endpoint_tracks_live_model_updates_and_disconnects_without_stale
             ]
         })
     );
+}
+
+#[tokio::test]
+async fn models_endpoint_preserves_backend_metadata_from_register_and_updates() {
+    let (addr, core) = spawn_server().await;
+
+    let mut initial_metadata = ModelMetadataMap::new();
+    initial_metadata.insert(
+        "qwen3.5-27b".to_string(),
+        json!({
+            "id": "qwen3.5-27b",
+            "object": "model",
+            "owned_by": "loom",
+            "context_length": 131_072,
+            "max_output_tokens": 32_768,
+            "reasoning": true,
+            "reasoning_efforts": ["none", "low", "medium", "high"],
+            "architecture": { "input_modalities": ["text", "image"] }
+        })
+        .as_object()
+        .expect("metadata json object")
+        .clone(),
+    );
+
+    let worker_id = {
+        let mut core = core.lock().await;
+        core.register_worker(
+            "openai",
+            RegisterMessage {
+                worker_name: "gpu-box".to_string(),
+                models: vec!["qwen3.5-27b".to_string()],
+                max_concurrent: 2,
+                protocol_version: Some("2026-04-bridge-v1".to_string()),
+                current_load: Some(0),
+                endpoint_prefixes: vec![],
+                model_metadata: initial_metadata,
+            },
+        )
+        .worker_id
+    };
+
+    let (status, body) = get_json(addr, "/v1/models").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["data"][0]["id"], "qwen3.5-27b");
+    assert_eq!(body["data"][0]["owned_by"], "loom");
+    assert_eq!(body["data"][0]["context_length"], 131_072);
+    assert_eq!(body["data"][0]["max_output_tokens"], 32_768);
+    assert_eq!(body["data"][0]["reasoning"], true);
+    assert_eq!(
+        body["data"][0]["reasoning_efforts"],
+        json!(["none", "low", "medium", "high"])
+    );
+    assert_eq!(
+        body["data"][0]["architecture"]["input_modalities"],
+        json!(["text", "image"])
+    );
+
+    // Updating metadata on ModelsUpdate (same model ID, bigger context & xhigh effort) updates /v1/models live.
+    let mut updated_metadata = ModelMetadataMap::new();
+    updated_metadata.insert(
+        "qwen3.5-27b".to_string(),
+        json!({
+            "id": "qwen3.5-27b",
+            "object": "model",
+            "owned_by": "loom",
+            "context_length": 262_144,
+            "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"]
+        })
+        .as_object()
+        .expect("updated metadata json object")
+        .clone(),
+    );
+    {
+        let mut core = core.lock().await;
+        core.update_worker_models(
+            &worker_id,
+            ModelsUpdateMessage {
+                models: vec!["qwen3.5-27b".to_string()],
+                current_load: 0,
+                model_metadata: updated_metadata,
+            },
+        );
+    }
+
+    let (updated_status, updated_body) = get_json(addr, "/v1/models").await;
+    assert_eq!(updated_status, 200);
+    assert_eq!(updated_body["data"][0]["context_length"], 262_144);
+    assert_eq!(
+        updated_body["data"][0]["reasoning_efforts"],
+        json!(["none", "low", "medium", "high", "xhigh"])
+    );
+}
+
+#[tokio::test]
+async fn models_endpoint_probes_legacy_workers_and_caches_metadata() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let worker_socket_app = WorkerSocketApp::new(core.clone())
+        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
+    let app = ProxyHttpApp::new(core.clone())
+        .with_worker_socket_app(worker_socket_app)
+        .with_legacy_models_probe(true)
+        .router();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("listener local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve proxy app");
+    });
+
+    let mut req = format!("ws://{addr}/v1/worker/connect?provider=openai")
+        .into_client_request()
+        .expect("ws request");
+    req.headers_mut().insert(
+        "x-worker-secret",
+        "top-secret".parse().expect("secret header"),
+    );
+    let (mut ws, _) = connect_async(req).await.expect("connect legacy worker");
+
+    // Register WITHOUT model_metadata (legacy worker payload)
+    let legacy_reg = r#"{"type":"register","worker_name":"legacy-gpu","models":["inkling-2-mini"],"max_concurrent":2,"protocol_version":"2026-04-bridge-v1","current_load":0}"#;
+    ws.send(Message::Text(legacy_reg.into()))
+        .await
+        .expect("send legacy register");
+    let _ = ws.next().await.expect("register ack").expect("ws text");
+
+    // Simulate the legacy worker answering a GET /v1/models probe once.
+    let probe_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_count_worker = Arc::clone(&probe_count);
+    let worker_task = tokio::spawn(async move {
+        while let Some(Ok(Message::Text(text))) = ws.next().await {
+            if let Ok(ServerToWorkerMessage::Request(req)) = serde_json::from_str(&text) {
+                assert_eq!(req.method, "GET");
+                assert_eq!(req.endpoint_path, "/v1/models");
+                probe_count_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let resp = WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+                    request_id: req.request_id,
+                    status_code: 200,
+                    headers: HeaderMap::from([(
+                        "content-type".to_string(),
+                        "application/json".to_string(),
+                    )]),
+                    body: Some(
+                        json!({
+                            "object": "list",
+                            "data": [{
+                                "id": "inkling-2-mini",
+                                "object": "model",
+                                "owned_by": "loom",
+                                "context_length": 131_072,
+                                "max_output_tokens": 16_384,
+                                "reasoning": true,
+                                "reasoning_efforts": ["none", "low", "medium", "high"]
+                            }]
+                        })
+                        .to_string(),
+                    ),
+                    token_counts: None,
+                });
+                let payload = serde_json::to_string(&resp).expect("serialize probe response");
+                ws.send(Message::Text(payload.into()))
+                    .await
+                    .expect("send probe response");
+            }
+        }
+    });
+
+    // First call probes the legacy worker and returns rich metadata.
+    let (status1, body1) = get_json(addr, "/v1/models").await;
+    assert_eq!(status1, 200);
+    assert_eq!(body1["data"][0]["id"], "inkling-2-mini");
+    assert_eq!(body1["data"][0]["context_length"], 131_072);
+    assert_eq!(body1["data"][0]["max_output_tokens"], 16_384);
+    assert_eq!(
+        body1["data"][0]["reasoning_efforts"],
+        json!(["none", "low", "medium", "high"])
+    );
+
+    // Second call uses the cached metadata without re-probing the worker.
+    let (status2, body2) = get_json(addr, "/v1/models").await;
+    assert_eq!(status2, 200);
+    assert_eq!(body2, body1);
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    worker_task.abort();
 }

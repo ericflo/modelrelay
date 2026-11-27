@@ -1,4 +1,4 @@
-use super::{CloudWizardConfig, cloud_config_script, page_shell_custom};
+use super::{CloudWizardConfig, PI_EXTENSION_TS, cloud_config_script, page_shell_custom};
 
 /// Build the Pi & API integration page (unauthenticated / self-hosted default).
 #[must_use]
@@ -60,11 +60,13 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     }
     .discover-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .model-chip {
+      display: inline-flex; align-items: center; gap: 6px;
       padding: 4px 10px; border-radius: 999px; font-family: var(--font-mono); font-size: 0.76rem;
       background: var(--accent-soft); border: 1px solid var(--accent-border); color: var(--accent-fg);
       cursor: pointer; transition: background 0.15s, color 0.15s;
     }
     .model-chip:hover { background: var(--accent); color: #fff; }
+    .model-chip-meta { opacity: 0.75; font-size: 0.7rem; }
     .discover-status { font-size: 0.82rem; color: var(--text-muted); }
 
     /* Sections */
@@ -143,41 +145,6 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     .pi-why-item strong { display: block; font-size: 0.9rem; color: var(--text-strong); margin-bottom: 4px; }
     .pi-why-item span { font-size: 0.84rem; color: var(--text-secondary); }
 
-    /* Pi Thinking & Context Controls */
-    .pi-tune-card {
-      background: var(--bg-subtle); border: 1px solid var(--border);
-      border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px;
-    }
-    .pi-tune-grid {
-      display: grid; grid-template-columns: 1.4fr 0.8fr 0.8fr; gap: 12px; align-items: end;
-    }
-    .pi-tune-card select, .pi-tune-card input {
-      width: 100%; padding: 9px 11px; background: var(--bg-input);
-      border: 1px solid var(--border-strong); border-radius: 8px;
-      color: var(--text-primary); font-size: 0.84rem; font-family: var(--font-mono);
-    }
-    .pi-tune-card select { font-family: inherit; }
-    .pi-tune-card select:focus, .pi-tune-card input:focus {
-      border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
-    }
-    .pi-ctx-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
-    .pi-preset-btn {
-      padding: 3px 9px; border-radius: 999px; font-family: var(--font-mono); font-size: 0.74rem;
-      background: var(--bg-surface); border: 1px solid var(--border-strong); color: var(--text-secondary);
-      cursor: pointer; transition: border-color 0.15s, color 0.15s, background 0.15s;
-    }
-    .pi-preset-btn:hover, .pi-preset-btn.active {
-      border-color: var(--accent-border); background: var(--accent-soft); color: var(--accent-fg);
-    }
-    .pi-note-grid {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px;
-    }
-    .pi-note-box {
-      background: var(--bg-subtle); border: 1px solid var(--border);
-      border-radius: var(--radius-md); padding: 14px 16px; font-size: 0.84rem; color: var(--text-secondary);
-    }
-    .pi-note-box strong { display: block; color: var(--text-strong); margin-bottom: 4px; font-size: 0.86rem; }
-
     /* Collapsible callout */
     details.opt-box {
       background: var(--bg-surface); border: 1px solid var(--border);
@@ -234,7 +201,7 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     }
 
     @media (max-width: 820px) {
-      .config-grid, .ep-grid, .pi-why, .pi-tune-grid, .pi-note-grid { grid-template-columns: 1fr; }
+      .config-grid, .ep-grid, .pi-why { grid-template-columns: 1fr; }
       .pg-input-row { flex-direction: column; }
     }
     ";
@@ -248,9 +215,6 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
   const urlInput = $('#int-server-url');
   const keyInput = $('#int-api-key');
   const modelInput = $('#int-model-name');
-  const ctxInput = $('#pi-ctx-window');
-  const maxTokInput = $('#pi-max-tokens');
-  const thinkSelect = $('#pi-thinking-mode');
 
   const defaultUrl = (cloudCfg && cloudCfg.serverUrl)
     ? cloudCfg.serverUrl
@@ -261,9 +225,6 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     ? cloudCfg.apiKey
     : (localStorage.getItem('mr_test_api_key') || '');
   modelInput.value = localStorage.getItem('mr_model_name') || '';
-  if (ctxInput) ctxInput.value = localStorage.getItem('mr_pi_ctx') || '131072';
-  if (maxTokInput) maxTokInput.value = localStorage.getItem('mr_pi_max_tokens') || '32768';
-  if (thinkSelect) thinkSelect.value = localStorage.getItem('mr_pi_thinking') || 'openai';
 
   if (cloudCfg && cloudCfg.apiKey) {
     const banner = $('#int-cloud-banner');
@@ -282,239 +243,6 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
   function sv() { return urlInput.value.trim().replace(/\/+$/, '') || 'https://api.modelrelay.io'; }
   function ak() { return keyInput.value.trim() || 'mr_live_your_api_key'; }
   function mn() { return modelInput.value.trim() || 'qwen3.5-27b'; }
-  function ctxVal() {
-    const n = parseInt((ctxInput && ctxInput.value) || '131072', 10);
-    return Number.isFinite(n) && n >= 4096 ? n : 131072;
-  }
-  function maxTokVal() {
-    const c = ctxVal();
-    const n = parseInt((maxTokInput && maxTokInput.value) || '32768', 10);
-    const v = Number.isFinite(n) && n >= 1024 ? n : 32768;
-    return Math.min(v, c);
-  }
-  function thinkMode() { return (thinkSelect && thinkSelect.value) || 'openai'; }
-
-  function buildPiExtensionTs() {
-    const base = sv() + '/v1';
-    const ctx = ctxVal();
-    const maxTok = maxTokVal();
-    const mode = thinkMode();
-    const isReasoning = mode !== 'off';
-
-    let thinkingMapBlock = '';
-    if (mode === 'qwen-chat-template') {
-      thinkingMapBlock = [
-        '          ...(reasoning && {',
-        '            thinkingLevelMap: {',
-        '              off: "off",',
-        '              minimal: null,',
-        '              low: "low",',
-        '              medium: "medium",',
-        '              high: "high",',
-        '            },',
-        '          }),',
-      ].join('\n');
-    } else if (mode === 'deepseek') {
-      thinkingMapBlock = [
-        '          ...(reasoning && {',
-        '            thinkingLevelMap: {',
-        '              off: "disabled",',
-        '              minimal: null,',
-        '              low: "low",',
-        '              medium: "medium",',
-        '              high: "high",',
-        '            },',
-        '          }),',
-      ].join('\n');
-    } else if (isReasoning) {
-      thinkingMapBlock = [
-        '          ...(reasoning && {',
-        '            thinkingLevelMap: {',
-        '              off: "none",',
-        '              minimal: null,',
-        '              low: "low",',
-        '              medium: "medium",',
-        '              high: "high",',
-        '            },',
-        '          }),',
-      ].join('\n');
-    }
-
-    const compatLines = [
-      '            supportsStore: false,',
-      '            supportsDeveloperRole: false,',
-      '            supportsReasoningEffort: ' + (mode === 'qwen-chat-template' ? 'false' : (isReasoning ? 'reasoning' : 'false')) + ',',
-      '            supportsUsageInStreaming: true,',
-      '            supportsStrictMode: false,',
-      '            maxTokensField: "max_tokens" as const,',
-    ];
-    if (mode === 'openai') {
-      compatLines.push('            ...(reasoning && { thinkingFormat: "openai" as const }),');
-    } else if (mode === 'llama-budget') {
-      compatLines.push('            ...(reasoning && {');
-      compatLines.push('              thinkingFormat: "openai" as const,');
-      compatLines.push('              thinkingTokenBudgetField: "thinking_budget_tokens" as const,');
-      compatLines.push('            }),');
-    } else if (mode === 'qwen-chat-template') {
-      compatLines.push('            ...(reasoning && {');
-      compatLines.push('              thinkingFormat: "qwen-chat-template" as const,');
-      compatLines.push('              thinkingTokenBudgetField: "thinking_budget_tokens" as const,');
-      compatLines.push('            }),');
-    } else if (mode === 'deepseek') {
-      compatLines.push('            ...(reasoning && {');
-      compatLines.push('              thinkingFormat: "deepseek" as const,');
-      compatLines.push('              requiresReasoningContentOnAssistantMessages: true,');
-      compatLines.push('            }),');
-    }
-
-    const lines = [
-      'import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";',
-      '',
-      'const DEFAULT_BASE_URL = "' + base + '";',
-      '// Match your worker backend context limit (e.g. llama-server -c / vLLM --max-model-len)',
-      'const DEFAULT_CONTEXT_WINDOW = Number(process.env.MODELRELAY_CONTEXT_WINDOW) || ' + ctx + ';',
-      'const DEFAULT_MAX_TOKENS = Number(process.env.MODELRELAY_MAX_TOKENS) || ' + maxTok + ';',
-      '',
-      'type RelayModel = {',
-      '  id: string;',
-      '  context_window?: number;',
-      '  context_length?: number;',
-      '  max_model_len?: number;',
-      '  max_tokens?: number;',
-      '  max_completion_tokens?: number;',
-      '  reasoning?: boolean;',
-      '  meta?: { n_ctx?: number; n_ctx_train?: number };',
-      '  architecture?: { input_modalities?: string[] };',
-      '};',
-      '',
-      'export default function (pi: ExtensionAPI) {',
-      '  pi.registerProvider("modelrelay", {',
-      '    name: "ModelRelay",',
-      '    baseUrl: DEFAULT_BASE_URL,',
-      '    api: "openai-completions",',
-      '    async refreshModels({ credential, stored, publish, allowNetwork, baseUrl, signal }) {',
-      '      const root = (baseUrl ?? DEFAULT_BASE_URL).replace(/\\/+$/, "");',
-      '      const cached = (stored?.models ?? [])',
-      '        .filter((m) => m.provider === "modelrelay" && "maxTokens" in m)',
-      '        .map((m) => ({',
-      '          id: m.id,',
-      '          name: m.name,',
-      '          reasoning: m.reasoning,',
-      '          thinkingLevelMap: m.thinkingLevelMap,',
-      '          input: m.input,',
-      '          inputLimits: m.inputLimits,',
-      '          cost: m.cost,',
-      '          contextWindow: m.contextWindow,',
-      '          maxTokens: m.maxTokens,',
-      '          samplingParams: m.samplingParams,',
-      '          samplingParamsByThinkingLevel: m.samplingParamsByThinkingLevel,',
-      '          compat: m.compat,',
-      '        }));',
-      '',
-      '      if (!allowNetwork || credential?.type !== "api_key" || !credential.key) {',
-      '        return cached;',
-      '      }',
-      '',
-      '      const res = await fetch(`${root}/models`, {',
-      '        headers: { Authorization: `Bearer ${credential.key}` },',
-      '        signal,',
-      '      });',
-      '      if (!res.ok) return cached;',
-      '',
-      '      const { data = [] } = (await res.json()) as { data?: RelayModel[] };',
-      '      const models = data.map((m) => {',
-      '        const contextWindow =',
-      '          m.meta?.n_ctx ||',
-      '          m.context_window ||',
-      '          m.context_length ||',
-      '          m.max_model_len ||',
-      '          m.meta?.n_ctx_train ||',
-      '          DEFAULT_CONTEXT_WINDOW;',
-      '        const maxTokens = Math.min(',
-      '          m.max_completion_tokens || m.max_tokens || DEFAULT_MAX_TOKENS,',
-      '          contextWindow,',
-      '        );',
-      '        const reasoning = m.reasoning ?? ' + (isReasoning ? 'true' : 'false') + ';',
-      '        const hasVision = m.architecture?.input_modalities?.includes("image") === true;',
-      '',
-      '        return {',
-      '          id: m.id,',
-      '          name: m.id,',
-      '          reasoning,',
-    ];
-    if (thinkingMapBlock) lines.push(thinkingMapBlock);
-    lines.push(
-      '          input: (hasVision ? ["text", "image"] : ["text"]) as ("text" | "image")[],',
-      '          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },',
-      '          contextWindow,',
-      '          maxTokens,',
-      '          compat: {',
-      compatLines.join('\n'),
-      '          },',
-      '        };',
-      '      });',
-      '',
-      '      await publish({',
-      '        persist: {',
-      '          models: models.map((m) => ({',
-      '            ...m,',
-      '            api: "openai-completions" as const,',
-      '            provider: "modelrelay",',
-      '            baseUrl: root,',
-      '          })),',
-      '          checkedAt: Date.now(),',
-      '        },',
-      '      });',
-      '',
-      '      return models;',
-      '    },',
-      '  });',
-      '}'
-    );
-    return lines.join('\n');
-  }
-
-  function buildPiOverridesJson() {
-    const model = mn();
-    const ctx = ctxVal();
-    const maxTok = maxTokVal();
-    const mode = thinkMode();
-    const override = {
-      reasoning: mode !== 'off',
-      input: ['text', 'image'],
-      contextWindow: ctx,
-      maxTokens: maxTok,
-    };
-    if (mode !== 'off') {
-      override.thinkingLevelMap = mode === 'qwen-chat-template'
-        ? { off: 'off', minimal: null, low: 'low', medium: 'medium', high: 'high' }
-        : { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' };
-      override.compat = mode === 'qwen-chat-template'
-        ? { thinkingFormat: 'qwen-chat-template', thinkingTokenBudgetField: 'thinking_budget_tokens' }
-        : mode === 'deepseek'
-        ? { thinkingFormat: 'deepseek', requiresReasoningContentOnAssistantMessages: true }
-        : mode === 'llama-budget'
-        ? { thinkingFormat: 'openai', thinkingTokenBudgetField: 'thinking_budget_tokens' }
-        : { thinkingFormat: 'openai', supportsReasoningEffort: true };
-    }
-    return JSON.stringify({
-      $schema: 'https://pi.dev/schemas/models.schema.json',
-      providers: {
-        modelrelay: {
-          modelOverrides: {
-            [model]: override,
-          },
-        },
-      },
-    }, null, 2);
-  }
-
-  function syncPresetChips() {
-    const cur = String(ctxVal());
-    $$('.pi-preset-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.ctx === cur);
-    });
-  }
 
   function renderAllSnippets() {
     const s = sv(), a = ak(), m = mn();
@@ -525,14 +253,6 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
         .replace(/__API_KEY__/g, a)
         .replace(/__MODEL_NAME__/g, m);
     });
-    const ts = buildPiExtensionTs();
-    const extEl = $('#pi-ext-code');
-    if (extEl) extEl.textContent = ts;
-    const cmdEl = $('#pi-ext-cmd-code');
-    if (cmdEl) cmdEl.textContent = "mkdir -p ~/.pi/agent/extensions\ncat <<'EOF' > ~/.pi/agent/extensions/modelrelay.ts\n" + ts + "\nEOF";
-    const ovEl = $('#pi-overrides-code');
-    if (ovEl) ovEl.textContent = buildPiOverridesJson();
-    syncPresetChips();
   }
 
   // Tab switching
@@ -568,23 +288,22 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
   urlInput.addEventListener('input', () => { localStorage.setItem('mr_server_url', urlInput.value.trim()); renderAllSnippets(); });
   keyInput.addEventListener('input', () => { localStorage.setItem('mr_test_api_key', keyInput.value.trim()); renderAllSnippets(); });
   modelInput.addEventListener('input', () => { localStorage.setItem('mr_model_name', modelInput.value.trim()); renderAllSnippets(); });
-  if (ctxInput) ctxInput.addEventListener('input', () => { localStorage.setItem('mr_pi_ctx', ctxInput.value.trim()); renderAllSnippets(); });
-  if (maxTokInput) maxTokInput.addEventListener('input', () => { localStorage.setItem('mr_pi_max_tokens', maxTokInput.value.trim()); renderAllSnippets(); });
-  if (thinkSelect) thinkSelect.addEventListener('change', () => { localStorage.setItem('mr_pi_thinking', thinkSelect.value); renderAllSnippets(); });
-  $$('.pi-preset-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (ctxInput && btn.dataset.ctx) {
-        ctxInput.value = btn.dataset.ctx;
-        localStorage.setItem('mr_pi_ctx', btn.dataset.ctx);
-      }
-      if (maxTokInput && btn.dataset.maxtok) {
-        maxTokInput.value = btn.dataset.maxtok;
-        localStorage.setItem('mr_pi_max_tokens', btn.dataset.maxtok);
-      }
-      renderAllSnippets();
-    });
-  });
   renderAllSnippets();
+
+  function formatModelMeta(entry) {
+    const parts = [];
+    const ctx = entry.meta?.n_ctx || entry.context_window || entry.context_length || entry.max_model_len || entry.max_context_length || entry.n_ctx || entry.contextWindow;
+    if (typeof ctx === 'number' && ctx > 0) {
+      parts.push(ctx >= 1024 ? Math.round(ctx / 1024) + 'k' : String(ctx));
+    }
+    const efforts = entry.reasoning_efforts || entry.supported_reasoning_efforts || entry.capabilities?.reasoning_efforts || entry.thinking_levels;
+    if (Array.isArray(efforts) && efforts.length > 0) {
+      parts.push(efforts.join('/'));
+    } else if (entry.reasoning === true || entry.capabilities?.reasoning === true) {
+      parts.push('reasoning');
+    }
+    return parts.join(' · ');
+  }
 
   // Discover live models via GET /v1/models
   const discoverBtn = $('#discover-models-btn');
@@ -606,27 +325,34 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
           return;
         }
         const payload = await res.json();
-        const models = (payload.data || []).map(x => x.id).filter(Boolean);
-        if (models.length === 0) {
+        const entries = (payload.data || []).filter(x => x && x.id);
+        if (entries.length === 0) {
           discoverStatus.textContent = 'Connected, but no workers are advertising models right now.';
           return;
         }
-        discoverStatus.textContent = models.length + ' live model' + (models.length === 1 ? '' : 's') + ' (click to select):';
-        models.forEach(id => {
+        discoverStatus.textContent = entries.length + ' live model' + (entries.length === 1 ? '' : 's') + ' (click to select):';
+        entries.forEach(entry => {
           const chip = document.createElement('button');
           chip.type = 'button';
           chip.className = 'model-chip';
-          chip.textContent = id;
+          chip.appendChild(document.createTextNode(entry.id));
+          const meta = formatModelMeta(entry);
+          if (meta) {
+            const tag = document.createElement('span');
+            tag.className = 'model-chip-meta';
+            tag.textContent = '· ' + meta;
+            chip.appendChild(tag);
+          }
           chip.addEventListener('click', () => {
-            modelInput.value = id;
-            localStorage.setItem('mr_model_name', id);
+            modelInput.value = entry.id;
+            localStorage.setItem('mr_model_name', entry.id);
             renderAllSnippets();
           });
           discoverChips.appendChild(chip);
         });
-        if (!modelInput.value.trim() && models[0]) {
-          modelInput.value = models[0];
-          localStorage.setItem('mr_model_name', models[0]);
+        if (!modelInput.value.trim() && entries[0]) {
+          modelInput.value = entries[0].id;
+          localStorage.setItem('mr_model_name', entries[0].id);
           renderAllSnippets();
         }
       } catch (err) {
@@ -776,131 +502,17 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
 
     let curl_messages = "curl __SERVER_URL__/v1/messages \\\n  -H \"Content-Type: application/json\" \\\n  -H \"x-api-key: __API_KEY__\" \\\n  -H \"anthropic-version: 2023-06-01\" \\\n  -d '{\n    \"model\": \"__MODEL_NAME__\",\n    \"max_tokens\": 256,\n    \"messages\": [{\"role\": \"user\", \"content\": \"Hello from Anthropic Messages!\"}]\n  }'";
 
-    let pi_extension_ts = r#"import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+    let pi_extension_tpl =
+        PI_EXTENSION_TS.replace("https://api.modelrelay.io/v1", "__SERVER_URL__/v1");
 
-const DEFAULT_BASE_URL = "https://api.modelrelay.io/v1";
-// Match your worker backend context limit (e.g. llama-server -c / vLLM --max-model-len)
-const DEFAULT_CONTEXT_WINDOW = Number(process.env.MODELRELAY_CONTEXT_WINDOW) || 131072;
-const DEFAULT_MAX_TOKENS = Number(process.env.MODELRELAY_MAX_TOKENS) || 32768;
-
-type RelayModel = {
-  id: string;
-  context_window?: number;
-  context_length?: number;
-  max_model_len?: number;
-  max_tokens?: number;
-  max_completion_tokens?: number;
-  reasoning?: boolean;
-  meta?: { n_ctx?: number; n_ctx_train?: number };
-  architecture?: { input_modalities?: string[] };
-};
-
-export default function (pi: ExtensionAPI) {
-  pi.registerProvider("modelrelay", {
-    name: "ModelRelay",
-    baseUrl: DEFAULT_BASE_URL,
-    api: "openai-completions",
-    async refreshModels({ credential, stored, publish, allowNetwork, baseUrl, signal }) {
-      const root = (baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-      const cached = (stored?.models ?? [])
-        .filter((m) => m.provider === "modelrelay" && "maxTokens" in m)
-        .map((m) => ({
-          id: m.id,
-          name: m.name,
-          reasoning: m.reasoning,
-          thinkingLevelMap: m.thinkingLevelMap,
-          input: m.input,
-          inputLimits: m.inputLimits,
-          cost: m.cost,
-          contextWindow: m.contextWindow,
-          maxTokens: m.maxTokens,
-          samplingParams: m.samplingParams,
-          samplingParamsByThinkingLevel: m.samplingParamsByThinkingLevel,
-          compat: m.compat,
-        }));
-
-      if (!allowNetwork || credential?.type !== "api_key" || !credential.key) {
-        return cached;
-      }
-
-      const res = await fetch(`${root}/models`, {
-        headers: { Authorization: `Bearer ${credential.key}` },
-        signal,
-      });
-      if (!res.ok) return cached;
-
-      const { data = [] } = (await res.json()) as { data?: RelayModel[] };
-      const models = data.map((m) => {
-        const contextWindow =
-          m.meta?.n_ctx ||
-          m.context_window ||
-          m.context_length ||
-          m.max_model_len ||
-          m.meta?.n_ctx_train ||
-          DEFAULT_CONTEXT_WINDOW;
-        const maxTokens = Math.min(
-          m.max_completion_tokens || m.max_tokens || DEFAULT_MAX_TOKENS,
-          contextWindow,
-        );
-        const reasoning = m.reasoning ?? true;
-        const hasVision = m.architecture?.input_modalities?.includes("image") === true;
-
-        return {
-          id: m.id,
-          name: m.id,
-          reasoning,
-          ...(reasoning && {
-            thinkingLevelMap: {
-              off: "none",
-              minimal: null,
-              low: "low",
-              medium: "medium",
-              high: "high",
-            },
-          }),
-          input: (hasVision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow,
-          maxTokens,
-          compat: {
-            supportsStore: false,
-            supportsDeveloperRole: false,
-            supportsReasoningEffort: reasoning,
-            supportsUsageInStreaming: true,
-            supportsStrictMode: false,
-            maxTokensField: "max_tokens" as const,
-            ...(reasoning && { thinkingFormat: "openai" as const }),
-          },
-        };
-      });
-
-      await publish({
-        persist: {
-          models: models.map((m) => ({
-            ...m,
-            api: "openai-completions" as const,
-            provider: "modelrelay",
-            baseUrl: root,
-          })),
-          checkedAt: Date.now(),
-        },
-      });
-
-      return models;
-    },
-  });
-}"#;
-
-    let pi_extension_oneliner = format!(
-        "mkdir -p ~/.pi/agent/extensions\ncat <<'EOF' > ~/.pi/agent/extensions/modelrelay.ts\n{pi_extension_ts}\nEOF"
-    );
+    let pi_extension_curl = "curl -fsSL https://modelrelay.io/pi/modelrelay.ts \\\n  --create-dirs -o ~/.pi/agent/extensions/modelrelay.ts";
 
     let pi_auth_json =
         "{\n  \"modelrelay\": {\n    \"type\": \"api_key\",\n    \"key\": \"__API_KEY__\"\n  }\n}";
 
     let pi_auth_keychain = "{\n  \"modelrelay\": {\n    \"type\": \"api_key\",\n    \"key\": \"!security find-generic-password -ws 'modelrelay'\"\n  }\n}";
 
-    let pi_overrides_json = "{\n  \"$schema\": \"https://pi.dev/schemas/models.schema.json\",\n  \"providers\": {\n    \"modelrelay\": {\n      \"modelOverrides\": {\n        \"qwen3.5-27b\": {\n          \"reasoning\": true,\n          \"input\": [\"text\", \"image\"],\n          \"contextWindow\": 131072,\n          \"maxTokens\": 32768,\n          \"thinkingLevelMap\": {\n            \"off\": \"none\",\n            \"minimal\": null,\n            \"low\": \"low\",\n            \"medium\": \"medium\",\n            \"high\": \"high\",\n            \"xhigh\": \"xhigh\"\n          },\n          \"compat\": {\n            \"thinkingFormat\": \"openai\",\n            \"supportsReasoningEffort\": true\n          }\n        }\n      }\n    }\n  }\n}";
+    let pi_static_models_json = "{\n  \"$schema\": \"https://pi.dev/schemas/models.schema.json\",\n  \"providers\": {\n    \"modelrelay\": {\n      \"baseUrl\": \"__SERVER_URL__/v1\",\n      \"api\": \"openai-completions\",\n      \"apiKey\": \"$MODELRELAY_API_KEY\",\n      \"models\": [\n        {\n          \"id\": \"__MODEL_NAME__\",\n          \"reasoning\": true,\n          \"contextWindow\": 131072,\n          \"maxTokens\": 32768\n        }\n      ]\n    }\n  }\n}";
 
     let esc_attr = |s: &str| {
         s.replace('&', "&amp;")
@@ -915,11 +527,16 @@ export default function (pi: ExtensionAPI) {
     let t_stream = esc_attr(curl_stream);
     let t_responses = esc_attr(curl_responses);
     let t_messages = esc_attr(curl_messages);
-    let ssr_pi_ts = esc_attr(pi_extension_ts);
-    let ssr_pi_cmd = esc_attr(&pi_extension_oneliner);
+    let t_pi_ts = esc_attr(&pi_extension_tpl);
+    let ssr_pi_ts = esc_attr(PI_EXTENSION_TS);
     let t_pi_auth = esc_attr(pi_auth_json);
     let t_pi_keychain = esc_attr(pi_auth_keychain);
-    let ssr_pi_overrides = esc_attr(pi_overrides_json);
+    let t_pi_static = esc_attr(pi_static_models_json);
+    let ssr_pi_static = esc_attr(
+        &pi_static_models_json
+            .replace("__SERVER_URL__", "https://api.modelrelay.io")
+            .replace("__MODEL_NAME__", "qwen3.5-27b"),
+    );
 
     let logged_in = cloud_config.is_some();
     let extra_css = format!("<style>{integrate_css}</style>");
@@ -928,7 +545,7 @@ export default function (pi: ExtensionAPI) {
         r##"<div class="int-hero">
       <div class="sec-eyebrow">Connect Clients</div>
       <h1>Pi Coding Agent &amp; <code>api.modelrelay.io</code></h1>
-      <p>Every GPU worker you connect appears behind one authenticated HTTPS endpoint. Verify it in seconds with <code>curl</code>, then add ModelRelay as a live-discovering provider in Pi.</p>
+      <p>Every GPU worker you connect appears behind one authenticated HTTPS endpoint. ModelRelay passes through each model&rsquo;s live metadata from <code>/v1/models</code> so Pi picks up context limits and reasoning efforts automatically.</p>
       <div class="int-jump">
         <a href="#pi" class="btn">Jump to Pi Setup &darr;</a>
         <a href="#endpoint" class="btn btn-secondary">api.modelrelay.io &amp; curl</a>
@@ -961,7 +578,7 @@ export default function (pi: ExtensionAPI) {
       </div>
       <div class="discover-row">
         <button type="button" class="btn btn-sm btn-secondary" id="discover-models-btn">Fetch live models</button>
-        <span class="discover-status" id="discover-status">Queries <code>GET /v1/models</code> on your relay to populate model IDs.</span>
+        <span class="discover-status" id="discover-status">Queries <code>GET /v1/models</code> on your relay to inspect live models, context windows, and reasoning efforts.</span>
         <div class="discover-chips" id="discover-chips"></div>
       </div>
     </div>
@@ -982,7 +599,7 @@ export default function (pi: ExtensionAPI) {
       <div class="ep-grid">
         <div class="ep-card">
           <div class="ep-line"><span class="http-verb verb-get">GET</span><span class="ep-path">/v1/models</span></div>
-          <p>Returns the live list of models currently advertised across your connected workers.</p>
+          <p>Returns live models across your workers, preserving backend metadata (context length, max tokens, reasoning efforts, and modalities).</p>
         </div>
         <div class="ep-card">
           <div class="ep-line"><span class="http-verb verb-post">POST</span><span class="ep-path">/v1/chat/completions</span></div>
@@ -1007,7 +624,7 @@ export default function (pi: ExtensionAPI) {
           <button type="button" class="tab-btn" data-tab="c-messages">Anthropic Messages</button>
         </div>
         <div class="tab-panel active" data-tab="c-models">
-          <p class="tab-note">Verify your token and see which models your connected workers are currently serving:</p>
+          <p class="tab-note">Verify your token and inspect live models plus metadata relayed from your workers:</p>
           <div class="code-shell">
             <div class="code-shell-header"><span>curl &mdash; GET /v1/models</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
             <pre><code class="code-text" data-tpl="{t_models}"></code></pre>
@@ -1051,25 +668,25 @@ export default function (pi: ExtensionAPI) {
           <div class="sec-eyebrow">Part 2 &mdash; Recommended Client</div>
           <h2>Pi Coding Agent Setup</h2>
         </div>
-        <span class="badge badge-accent">Provider Extension + auth.json</span>
+        <span class="badge badge-accent">Zero-Config Dynamic Discovery</span>
       </div>
 
       <p style="color:var(--text-secondary);margin-bottom:18px;max-width:760px;">
-        Instead of hardcoding individual models and pasting plaintext API keys into <code>models.json</code>, register ModelRelay once as a <strong>Pi provider extension</strong> and keep your token cleanly in <code>~/.pi/agent/auth.json</code>.
+        Install one small provider extension and put your API key in <code>~/.pi/agent/auth.json</code>. ModelRelay passes through your server&rsquo;s <code>/v1/models</code> metadata, so Pi picks up context limits, max output tokens, reasoning efforts, and vision support dynamically &mdash; no manual tuning or static model lists.
       </p>
 
       <div class="pi-why">
         <div class="pi-why-item">
-          <strong>Live model discovery</strong>
-          <span>Queries <code>/v1/models</code> automatically whenever you open <code>/model</code> or run <code>pi update --models</code>.</span>
+          <strong>Auto-discovered metadata</strong>
+          <span>Reads context window, max output tokens, reasoning efforts, and vision modalities straight from <code>GET /v1/models</code>.</span>
         </div>
         <div class="pi-why-item">
-          <strong>Thinking levels &amp; context limits</strong>
-          <span>Conveys <code>reasoning</code>, <code>thinkingLevelMap</code>, <code>compat</code>, <code>contextWindow</code>, and <code>maxTokens</code> so <code>/thinking</code> and auto-compaction work accurately.</span>
+          <strong>Dynamic <code>/thinking</code> levels</strong>
+          <span>Maps your server&rsquo;s advertised <code>reasoning_efforts</code> (or <code>thinkingLevelMap</code>) directly into Pi&rsquo;s <code>/thinking</code> picker.</span>
         </div>
         <div class="pi-why-item">
           <strong>Clean credentials in <code>auth.json</code></strong>
-          <span>Never store API keys in <code>models.json</code>. Supports direct <code>auth.json</code>, <code>/login modelrelay</code>, or keychain commands.</span>
+          <span>No API keys in config files. Supports <code>~/.pi/agent/auth.json</code>, <code>/login modelrelay</code>, or keychain <code>!command</code> lookups.</span>
         </div>
       </div>
 
@@ -1112,67 +729,26 @@ export default function (pi: ExtensionAPI) {
         <div class="pi-step">
           <div class="pi-step-head">
             <span class="pi-num">2</span>
-            <h3>Add ModelRelay as a Provider (<code>~/.pi/agent/extensions/modelrelay.ts</code>)</h3>
+            <h3>Enable Live Model Discovery (1 command)</h3>
           </div>
-          <p>Drop this provider extension into <code>~/.pi/agent/extensions/</code>. Set your worker&rsquo;s context window, max output tokens, and thinking mode below so Pi conveys <code>/thinking</code> levels and compacts before hitting your GPU&rsquo;s KV-cache limit:</p>
-
-          <div class="pi-tune-card">
-            <div class="pi-tune-grid">
-              <div class="cfg-field">
-                <label for="pi-thinking-mode">Thinking / Reasoning Mode</label>
-                <select id="pi-thinking-mode">
-                  <option value="openai">OpenAI reasoning_effort (llama.cpp / vLLM / Ollama)</option>
-                  <option value="llama-budget">llama.cpp reasoning_effort + thinking_budget_tokens</option>
-                  <option value="qwen-chat-template">Qwen3 / Qwen3.5 chat_template_kwargs (enable_thinking)</option>
-                  <option value="deepseek">DeepSeek / GLM (thinking.type + reasoning_content)</option>
-                  <option value="off">Non-reasoning models (thinking off)</option>
-                </select>
-              </div>
-              <div class="cfg-field">
-                <label for="pi-ctx-window">Context Window (tokens)</label>
-                <input id="pi-ctx-window" type="number" min="4096" step="4096" value="131072">
-              </div>
-              <div class="cfg-field">
-                <label for="pi-max-tokens">Max Output Tokens</label>
-                <input id="pi-max-tokens" type="number" min="1024" step="1024" value="32768">
-              </div>
-            </div>
-            <div class="pi-ctx-presets">
-              <span style="font-size:0.76rem;color:var(--text-muted);">Quick context presets (match your <code>llama-server -c</code> / vLLM <code>--max-model-len</code>):</span>
-              <button type="button" class="pi-preset-btn" data-ctx="32768" data-maxtok="8192">32k / 8k</button>
-              <button type="button" class="pi-preset-btn" data-ctx="65536" data-maxtok="16384">64k / 16k</button>
-              <button type="button" class="pi-preset-btn active" data-ctx="131072" data-maxtok="32768">128k / 32k</button>
-              <button type="button" class="pi-preset-btn" data-ctx="262144" data-maxtok="65536">256k / 64k</button>
-            </div>
-          </div>
+          <p>Zero <code>models.json</code> config required &mdash; one command installs our hosted provider file so Pi pulls live models, runtime context windows, reasoning efforts, and vision support dynamically from your server APIs, out of the box for <strong>llama.cpp</strong> (<code>/props</code> &amp; router mode), <strong>vLLM</strong> (<code>max_model_len</code>), <strong>LM Studio</strong> (<code>/api/v1/models</code> &amp; <code>/api/v0/models</code>), <strong>Ollama</strong> (<code>/api/show</code>), and custom OpenAI-compatible servers (self-hosting? Export <code>MODELRELAY_BASE_URL</code>):</p>
 
           <div class="tab-group" style="margin-bottom:0;">
             <div class="tab-bar">
-              <button type="button" class="tab-btn active" data-tab="pi-ext-file">modelrelay.ts</button>
-              <button type="button" class="tab-btn" data-tab="pi-ext-cmd">One-command install</button>
+              <button type="button" class="tab-btn active" data-tab="pi-ext-cmd">One-line install</button>
+              <button type="button" class="tab-btn" data-tab="pi-ext-file">Inspect modelrelay.ts</button>
             </div>
-            <div class="tab-panel active" data-tab="pi-ext-file" style="padding:14px;">
+            <div class="tab-panel active" data-tab="pi-ext-cmd" style="padding:14px;">
+              <div class="code-shell" style="margin:0;">
+                <div class="code-shell-header"><span>shell &mdash; downloads <a href="/pi/modelrelay.ts" style="color:inherit;text-decoration:underline;">/pi/modelrelay.ts</a></span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
+                <pre><code id="pi-ext-cmd-code" class="code-text">{pi_extension_curl}</code></pre>
+              </div>
+            </div>
+            <div class="tab-panel" data-tab="pi-ext-file" style="padding:14px;">
               <div class="code-shell" style="margin:0;">
                 <div class="code-shell-header"><span>~/.pi/agent/extensions/modelrelay.ts</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
-                <pre><code id="pi-ext-code" class="code-text">{ssr_pi_ts}</code></pre>
+                <pre><code id="pi-ext-code" class="code-text" data-tpl="{t_pi_ts}">{ssr_pi_ts}</code></pre>
               </div>
-            </div>
-            <div class="tab-panel" data-tab="pi-ext-cmd" style="padding:14px;">
-              <div class="code-shell" style="margin:0;">
-                <div class="code-shell-header"><span>shell &mdash; writes ~/.pi/agent/extensions/modelrelay.ts</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
-                <pre><code id="pi-ext-cmd-code" class="code-text">{ssr_pi_cmd}</code></pre>
-              </div>
-            </div>
-          </div>
-
-          <div class="pi-note-grid">
-            <div class="pi-note-box">
-              <strong>Why <code>thinkingLevelMap</code> matters</strong>
-              Mapping <code>off: &quot;none&quot;</code> makes <code>/thinking off</code> actively disable thinking instead of leaving backend defaults on, and hiding <code>minimal: null</code> avoids HTTP 400 errors on Jinja templates that only accept <code>low</code>/<code>medium</code>/<code>high</code>.
-            </div>
-            <div class="pi-note-box">
-              <strong>Why <code>contextWindow</code> &amp; <code>maxTokens</code> matter</strong>
-              Pi uses <code>contextWindow</code> for its context meter, <code>max_tokens</code> clamping, and auto-compaction, while <code>supportsUsageInStreaming: true</code> feeds real token counts back on every turn.
             </div>
           </div>
         </div>
@@ -1183,7 +759,7 @@ export default function (pi: ExtensionAPI) {
             <span class="pi-num">3</span>
             <h3>Add Your Token to <code>~/.pi/agent/auth.json</code></h3>
           </div>
-          <p>Store your ModelRelay API key under the <code>"modelrelay"</code> provider key in <code>~/.pi/agent/auth.json</code> &mdash; or run <code>/login modelrelay</code> inside Pi to save it interactively.</p>
+          <p>Store your ModelRelay API key under <code>"modelrelay"</code> in <code>~/.pi/agent/auth.json</code> &mdash; or run <code>/login modelrelay</code> inside Pi.</p>
           <div class="tab-group" style="margin-bottom:0;">
             <div class="tab-bar">
               <button type="button" class="tab-btn active" data-tab="auth-file">~/.pi/agent/auth.json</button>
@@ -1218,28 +794,25 @@ export default function (pi: ExtensionAPI) {
         <div class="pi-step">
           <div class="pi-step-head">
             <span class="pi-num">4</span>
-            <h3>Verify, Pick a Model &amp; Set Thinking Level</h3>
+            <h3>Refresh &amp; Start Coding</h3>
           </div>
-          <p>Refresh the catalog, select any live model with <code>/model</code>, and dial reasoning depth with <code>/thinking</code> (<code>Shift+Tab</code> cycles levels live):</p>
+          <p>Pull your live models and verify that Pi picked up their context windows and thinking levels automatically:</p>
           <div class="code-shell" style="margin-bottom:0;">
             <div class="code-shell-header"><span>verify in terminal</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
-            <pre><code class="code-text"># Fetch live models from api.modelrelay.io and inspect context/thinking support
-pi update --models
+            <pre><code class="code-text">pi update --models
 pi --list-models
-
-# Launch Pi, pick a model (/model), and choose a thinking level (/thinking, Ctrl+S to save default)
-pi</code></pre>
+pi   # use /model to pick a model and /thinking (Shift+Tab) to adjust effort</code></pre>
           </div>
         </div>
       </div>
 
       <details class="opt-box">
-        <summary>Per-model context limits, thinking formats &amp; vision overrides in <code>models.json</code></summary>
+        <summary>Prefer zero extensions? Configure a static model in <code>~/.pi/agent/models.json</code></summary>
         <div class="opt-body">
-          <p>Running mixed models across GPU boxes (for example a 64k Qwen3.5 worker alongside a 256k coder or non-reasoning model)? Pi layers <code>modelOverrides</code> from <code>~/.pi/agent/models.json</code> on top of your registered <code>modelrelay</code> provider &mdash; zero secrets in <code>models.json</code>, and live discovery stays intact. See <a href="/docs/pi#thinking">Pi Thinking &amp; Context Docs &rarr;</a> for all backend formats (<code>thinkingFormat</code>, <code>thinkingTokenBudgetField</code>, and <code>samplingParamsByThinkingLevel</code>).</p>
+          <p>If you only serve one fixed model and don&rsquo;t need live <code>/v1/models</code> discovery, skip Step 2 and declare the model statically in <code>~/.pi/agent/models.json</code> (note: Pi&rsquo;s <code>models.json</code> does not query <code>/v1/models</code>, so you specify the model ID and limits manually). See <a href="/docs/pi">Pi Docs &rarr;</a>.</p>
           <div class="code-shell" style="margin-bottom:0;">
-            <div class="code-shell-header"><span>~/.pi/agent/models.json (optional per-model overrides)</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
-            <pre><code id="pi-overrides-code" class="code-text">{ssr_pi_overrides}</code></pre>
+            <div class="code-shell-header"><span>~/.pi/agent/models.json (zero-extension static config)</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
+            <pre><code id="pi-overrides-code" class="code-text" data-tpl="{t_pi_static}">{ssr_pi_static}</code></pre>
           </div>
         </div>
       </details>

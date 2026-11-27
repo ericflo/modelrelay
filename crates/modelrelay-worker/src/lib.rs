@@ -8,8 +8,9 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use modelrelay_protocol::{
-    ErrorMessage, ModelsUpdateMessage, PongMessage, RegisterMessage, RequestMessage,
-    ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage, WorkerToServerMessage,
+    ErrorMessage, ModelMetadataMap, ModelsUpdateMessage, PongMessage, RegisterMessage,
+    RequestMessage, ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage,
+    WorkerToServerMessage, parse_openai_models_response,
 };
 use reqwest::header::{
     ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, HOST, HeaderMap as ReqwestHeaderMap, HeaderName,
@@ -104,6 +105,7 @@ enum DaemonEvent {
     },
     ModelsDiscovered {
         models: Vec<String>,
+        metadata: ModelMetadataMap,
         force_send: bool,
     },
 }
@@ -148,7 +150,7 @@ impl WorkerDaemonConfig {
 
         let client = build_http_client();
         match discover_backend_models(&client, self).await {
-            Ok(discovered) if !discovered.is_empty() => {
+            Ok((discovered, _)) if !discovered.is_empty() => {
                 tracing::info!(
                     count = discovered.len(),
                     models = %discovered.join(", "),
@@ -187,15 +189,21 @@ impl WorkerDaemonConfig {
     pub fn backend_url(&self, endpoint_path: &str) -> String {
         let base = self.backend_base_url.trim().trim_end_matches('/');
         // Avoid doubling `/v1` when backend_base_url already ends with `/v1`
-        // (e.g. `http://localhost:11434/v1` + `/v1/chat/completions`).
-        let normalized_path = if base.ends_with("/v1")
-            && (endpoint_path == "/v1" || endpoint_path.starts_with("/v1/"))
-        {
-            &endpoint_path[3..]
-        } else {
-            endpoint_path
-        };
-        format!("{base}{normalized_path}")
+        // (e.g. `http://localhost:11434/v1` + `/v1/chat/completions`), and route
+        // backend-native root metadata endpoints (`/props` for llama.cpp,
+        // `/api/*` for LM Studio & Ollama) against the server root.
+        if let Some(root) = base.strip_suffix("/v1") {
+            if endpoint_path == "/v1" || endpoint_path.starts_with("/v1/") {
+                return format!("{base}{}", &endpoint_path[3..]);
+            }
+            if endpoint_path == "/props"
+                || endpoint_path.starts_with("/props?")
+                || endpoint_path.starts_with("/api/")
+            {
+                return format!("{root}{endpoint_path}");
+            }
+        }
+        format!("{base}{endpoint_path}")
     }
 }
 
@@ -361,7 +369,11 @@ impl WorkerDaemon {
         self.shutdown_rx.as_ref().is_some_and(|rx| *rx.borrow())
     }
 
-    fn registration_message(&self, models: &[String]) -> WorkerToServerMessage {
+    fn registration_message(
+        &self,
+        models: &[String],
+        model_metadata: &ModelMetadataMap,
+    ) -> WorkerToServerMessage {
         WorkerToServerMessage::Register(RegisterMessage {
             worker_name: self.config.worker_name.trim().to_string(),
             models: models.to_vec(),
@@ -369,6 +381,7 @@ impl WorkerDaemon {
             protocol_version: Some("2026-04-bridge-v1".to_string()),
             current_load: Some(0),
             endpoint_prefixes: self.config.endpoint_prefixes.clone(),
+            model_metadata: model_metadata.clone(),
         })
     }
 
@@ -384,14 +397,19 @@ impl WorkerDaemon {
             return Ok(SessionOutcome::LocalShutdown);
         }
 
-        // If wildcard discovery is active, refresh the model list from the local
-        // backend before registering (falls back to configured models on error).
+        // If wildcard discovery is active, refresh both the model list and per-model
+        // metadata from the local backend before registering (falls back to configured
+        // models on error). Explicit-model workers skip startup probing so they connect
+        // immediately without sending unsolicited requests to the backend.
         let mut current_models = self.config.models.clone();
+        let mut current_metadata = ModelMetadataMap::new();
         if self.wildcard_discovery
-            && let Ok(discovered) = discover_backend_models(&self.client, &self.config).await
+            && let Ok((discovered, metadata)) =
+                discover_backend_models(&self.client, &self.config).await
             && !discovered.is_empty()
         {
             current_models = discovered;
+            current_metadata = metadata;
         }
 
         self.update_status(|s| {
@@ -421,7 +439,7 @@ impl WorkerDaemon {
 
         send_worker_message(
             &mut socket_write,
-            &self.registration_message(&current_models),
+            &self.registration_message(&current_models, &current_metadata),
         )
         .await?;
 
@@ -651,9 +669,17 @@ impl WorkerDaemon {
                             )
                             .await?;
                         }
-                        DaemonEvent::ModelsDiscovered { models, force_send } => {
-                            if force_send || models != current_models {
+                        DaemonEvent::ModelsDiscovered {
+                            models,
+                            metadata,
+                            force_send,
+                        } => {
+                            if force_send
+                                || models != current_models
+                                || metadata != current_metadata
+                            {
                                 current_models.clone_from(&models);
+                                current_metadata.clone_from(&metadata);
                                 self.update_status(|s| s.models.clone_from(&models));
                                 let current_load = u32::try_from(active_requests.len()).unwrap_or(u32::MAX);
                                 send_worker_message(
@@ -661,6 +687,7 @@ impl WorkerDaemon {
                                     &WorkerToServerMessage::ModelsUpdate(ModelsUpdateMessage {
                                         models,
                                         current_load,
+                                        model_metadata: metadata,
                                     }),
                                 )
                                 .await?;
@@ -1023,9 +1050,13 @@ fn spawn_models_discovery(
 ) {
     tokio::spawn(async move {
         match discover_backend_models(&client, &config).await {
-            Ok(models) if !models.is_empty() => {
+            Ok((models, metadata)) if !models.is_empty() => {
                 let _ = event_tx
-                    .send(DaemonEvent::ModelsDiscovered { models, force_send })
+                    .send(DaemonEvent::ModelsDiscovered {
+                        models,
+                        metadata,
+                        force_send,
+                    })
                     .await;
             }
             Ok(_) => {
@@ -1315,7 +1346,7 @@ fn subsecond_jitter_ms() -> u64 {
 async fn discover_backend_models(
     client: &reqwest::Client,
     config: &WorkerDaemonConfig,
-) -> Result<Vec<String>, BoxError> {
+) -> Result<(Vec<String>, ModelMetadataMap), BoxError> {
     let response = client
         .get(config.backend_url("/v1/models"))
         .timeout(MODEL_DISCOVERY_TIMEOUT)
@@ -1323,17 +1354,13 @@ async fn discover_backend_models(
         .await?;
     let response = response.error_for_status()?;
     let body = response.json::<serde_json::Value>().await?;
-    let Some(data) = body.get("data").and_then(serde_json::Value::as_array) else {
+    let Some((models, metadata)) = parse_openai_models_response(&body) else {
         return Err(Box::new(io::Error::other(
             "backend /v1/models response missing data array",
         )));
     };
 
-    Ok(data
-        .iter()
-        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
-        .map(ToOwned::to_owned)
-        .collect())
+    Ok((models, metadata))
 }
 
 #[cfg(test)]
@@ -1436,6 +1463,24 @@ mod tests {
         assert_eq!(
             cfg.backend_url("/v1/models"),
             "http://localhost:11434/v1/models"
+        );
+        // Root metadata endpoints for llama.cpp (/props), LM Studio (/api/v1/models, /api/v0/models),
+        // and Ollama (/api/show) resolve against the backend root even when backend_url ends in /v1.
+        assert_eq!(
+            cfg.backend_url("/props?model=foo&autoload=false"),
+            "http://localhost:11434/props?model=foo&autoload=false"
+        );
+        assert_eq!(
+            cfg.backend_url("/api/v1/models"),
+            "http://localhost:11434/api/v1/models"
+        );
+        assert_eq!(
+            cfg.backend_url("/api/v0/models"),
+            "http://localhost:11434/api/v0/models"
+        );
+        assert_eq!(
+            cfg.backend_url("/api/show"),
+            "http://localhost:11434/api/show"
         );
     }
 

@@ -253,6 +253,7 @@ fn server_reaps_unacknowledged_cancelled_request_after_grace_period() {
                 protocol_version: Some("2026-04-bridge-v1".to_string()),
                 current_load: Some(0),
                 endpoint_prefixes: vec![],
+                model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
             },
         )
         .worker_id;
@@ -489,6 +490,7 @@ async fn server_json_heartbeat_fires_despite_faster_client_ws_pings() {
         protocol_version: Some("2026-04-bridge-v1".to_string()),
         current_load: Some(0),
         endpoint_prefixes: vec![],
+        model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
     }))
     .unwrap();
     ws.send(Message::Text(reg.into())).await.unwrap();
@@ -562,6 +564,7 @@ async fn mid_stream_disconnect_emits_sse_error_without_requeueing() {
             protocol_version: Some("2026-04-bridge-v1".to_string()),
             current_load: Some(0),
             endpoint_prefixes: vec![],
+            model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
         }))
         .unwrap();
         ws.send(Message::Text(reg.into())).await.unwrap();
@@ -973,6 +976,7 @@ async fn request_timeout_emits_504_json_and_cancels_worker() {
         protocol_version: Some("2026-04-bridge-v1".to_string()),
         current_load: Some(0),
         endpoint_prefixes: vec![],
+        model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
     }))
     .unwrap();
     ws.send(Message::Text(reg.into())).await.unwrap();
@@ -1031,6 +1035,7 @@ fn queued_dispatch_enforces_provider_routing_only_and_ignore() {
                 protocol_version: Some("2026-04-bridge-v1".to_string()),
                 current_load: Some(0),
                 endpoint_prefixes: vec![],
+                model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
             },
         )
         .worker_id;
@@ -1061,6 +1066,7 @@ fn queued_dispatch_enforces_provider_routing_only_and_ignore() {
         modelrelay_protocol::ModelsUpdateMessage {
             models: vec!["m1".to_string()],
             current_load: 0,
+            model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
         },
     );
     assert!(
@@ -1079,6 +1085,7 @@ fn queued_dispatch_enforces_provider_routing_only_and_ignore() {
                 protocol_version: Some("2026-04-bridge-v1".to_string()),
                 current_load: Some(0),
                 endpoint_prefixes: vec![],
+                model_metadata: modelrelay_protocol::ModelMetadataMap::new(),
             },
         )
         .worker_id;
