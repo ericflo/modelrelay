@@ -53,7 +53,7 @@ Three temporal liveness properties are checked under weak fairness (`FairSpec`) 
 Run the full default model check (all positive configurations, liveness, and all 13 negative controls):
 
 ```sh
-scripts/check-model.sh        # ~6 minutes; capped at 2 GiB heap, 4 workers, and 10 minutes per configuration
+scripts/check-model.sh        # ~2 minutes locally; capped at 2 GiB heap, 4 workers, and 10 minutes per configuration
 ```
 
 The `model` stage in [`Dockerfile`](../Dockerfile) runs `scripts/check-model.sh` against pinned `tla2tools-1.7.4.jar` (SHA-256 verified) and gates both the `server` and `cloud` targets via the `verified` stage so Woodpecker CI cannot publish images if any positive configuration fails or any negative control stops being refuted.
@@ -64,15 +64,17 @@ The `model` stage in [`Dockerfile`](../Dockerfile) runs `scripts/check-model.sh`
 | --- | --- | --- | --- | --- | --- |
 | `ModelRelay` | 2 workers, 1 tenant, 1 provider, `MaxConcurrent=1`, 2 requests, 1 requeue, queue 2; streaming, backend errors, stray frames | 10,422,451 | 1,799,985 | 31 | 14 safety invariants |
 | `Concurrency` | 1 worker, `MaxConcurrent=2`, 2 requests, 1 requeue, queue 2; heartbeats, wedged workers, backend errors | 453,858 | 85,213 | 24 | 14 safety invariants |
-| `Routing` | 2 workers across 2 providers, `MaxConcurrent=1`, 2 requests, 1 requeue, queue 2; `only`/`ignore`/`allow_fallbacks`, cross-provider requeue | 16,295,085 | 3,526,013 | 21 | 14 safety invariants |
+| `Routing` | 2 workers across 2 providers, `MaxConcurrent=1`, 1 request, 1 requeue, queue 1; all `only`/`ignore`/`allow_fallbacks` combinations, cross-provider requeue | 22,965 | 6,085 | 13 | 14 safety invariants |
 | `MultiTenant` | 2 tenant-scoped workers across 2 tenants, `MaxConcurrent=1`, 2 requests, 1 requeue, queue 2 | 41,085 | 9,155 | 21 | 14 safety invariants |
 | `Lifecycle` | 1 worker, `MaxConcurrent=2`, 2 requests, 1 requeue, queue 1; auth failures, `RegisterAck`, heartbeats/wedged workers, graceful shutdown | 618,365 | 104,990 | 24 | 14 safety invariants |
-| `Liveness` | 2 workers, `MaxConcurrent=1`, 1 request, 1 requeue, queue 1; streaming, heartbeats/wedged workers, graceful shutdown (`FairSpec`) | 730,115 | 79,717 | 25 | 14 safety invariants + 3 liveness properties |
+| `Liveness` | 2 workers, `MaxConcurrent=1`, 1 request, 1 requeue, queue 1; heartbeats/wedged workers, graceful shutdown (`FairSpec`) | 192,278 | 21,341 | 23 | 14 safety invariants + 3 liveness properties |
+| `DeepRouting` *(on-demand)* | 2 workers across 2 providers, `MaxConcurrent=1`, 2 requests, 1 requeue, queue 2; `only`/`ignore`/`allow_fallbacks`, cross-provider requeue | 16,295,085 | 3,526,013 | 21 | 14 safety invariants |
+| `DeepLiveness` *(on-demand)* | 2 workers, `MaxConcurrent=1`, 1 request, 1 requeue, queue 1; streaming, heartbeats/wedged workers, graceful shutdown (`FairSpec`) | 730,115 | 79,717 | 25 | 14 safety invariants + 3 liveness properties |
 
-Two larger on-demand configurations (`spec/DeepLifecycle.cfg`—2 workers, `MaxConcurrent=2`, 2 requests, auth failures, heartbeats, and graceful shutdown—and `spec/DeepModelRelay.cfg`—all feature switches enabled simultaneously with `MaxConcurrent=2` and `MaxRequeue=2`) are skipped in the default run and can be run explicitly:
+Larger on-demand configurations (`DeepRouting`, `DeepLiveness`, `DeepLifecycle`, and `DeepModelRelay`) are skipped in the default CI run so slower build nodes stay well within the per-configuration 10-minute timeout, and can be run explicitly:
 
 ```sh
-TLC_TIMEOUT=3600 scripts/check-model.sh DeepLifecycle
+TLC_TIMEOUT=3600 scripts/check-model.sh DeepRouting
 ```
 
 ### Negative controls
