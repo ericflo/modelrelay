@@ -1,5 +1,15 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 
+# Formal TLA+ protocol model and all 13 negative controls. Bounded: see scripts/check-model.sh.
+FROM eclipse-temurin:21-jre-alpine@sha256:ac05c3c42b7c2f1a52c9bd52f01041fa1958231b15ebeae7420429cbc5baf474 AS model
+WORKDIR /src
+ADD --checksum=sha256:936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88 \
+    https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
+    /src/.tools/tla2tools-1.7.4.jar
+COPY spec/ spec/
+COPY scripts/check-model.sh scripts/check-model.sh
+RUN scripts/check-model.sh && mkdir -p /checks && touch /checks/model.passed
+
 FROM rust:1.94.1-slim@sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c142c53fef3e1a AS build
 WORKDIR /build
 
@@ -43,14 +53,22 @@ RUN --mount=type=cache,id=modelrelay-cargo-registry,target=/usr/local/cargo/regi
     && install -m 0755 target/release/modelrelay-cloud /out/modelrelay-cloud \
     && install -m 0755 target/release/reprovision-server-keys /out/reprovision-server-keys
 
+FROM build AS verified
+COPY --from=model /checks/model.passed /checks/model.passed
+RUN test -f /checks/model.passed \
+    && test -x /out/modelrelay-server \
+    && test -x /out/modelrelay-worker \
+    && test -x /out/modelrelay-cloud \
+    && test -x /out/reprovision-server-keys
+
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS cloud
 WORKDIR /app
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /out/modelrelay-cloud /usr/local/bin/modelrelay-cloud
-COPY --from=build /out/reprovision-server-keys /usr/local/bin/reprovision-server-keys
-COPY --from=build /build/crates/modelrelay-cloud/templates/ /app/templates/
+COPY --from=verified /out/modelrelay-cloud /usr/local/bin/modelrelay-cloud
+COPY --from=verified /out/reprovision-server-keys /usr/local/bin/reprovision-server-keys
+COPY --from=verified /build/crates/modelrelay-cloud/templates/ /app/templates/
 EXPOSE 8000
 CMD ["modelrelay-cloud"]
 
@@ -58,7 +76,7 @@ FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /out/modelrelay-server /usr/local/bin/modelrelay-server
-COPY --from=build /out/modelrelay-worker /usr/local/bin/modelrelay-worker
+COPY --from=verified /out/modelrelay-server /usr/local/bin/modelrelay-server
+COPY --from=verified /out/modelrelay-worker /usr/local/bin/modelrelay-worker
 EXPOSE 8080
 CMD ["modelrelay-server"]

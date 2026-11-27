@@ -2,4 +2,8 @@
 .github
 .woodpecker.yaml
 .ci-tools
+.tools
+spec/states
+spec/*_TTrace_*
+spec/*.out
 target

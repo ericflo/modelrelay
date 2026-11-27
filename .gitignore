@@ -1,5 +1,9 @@
 /target
 /book
+/.tools/
+/spec/states/
+/spec/*_TTrace_*
+/spec/*.out
 .env
 node_modules/
 package.json

@@ -106,7 +106,8 @@ The desktop app uses the same `modelrelay-worker` library under the hood, so it 
 Don't want to run the infrastructure yourself? A fully-managed hosted version is available at [modelrelay.io](https://modelrelay.io) — no server setup, no infrastructure to manage. Just get an API key, point your workers at it, and start routing requests. Same open protocol, zero ops burden.
 
 The hosted service's delivery path is repository-owned and cluster-run: a push
-to `main` enforces formatting, strict Clippy, every non-desktop workspace test,
+to `main` enforces the TLA+ protocol model check (including all 13 negative
+controls), formatting, strict Clippy, every non-desktop workspace test,
 RustSec audit, and cargo-deny policy before building `modelrelay-server` plus
 `modelrelay-cloud` through `.woodpecker.yaml`. Other branches and pull requests
 are tested locally and do not execute inside the production cluster. Epsilon
@@ -519,15 +520,17 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 > **Full documentation:** [ericflo.github.io/modelrelay](https://ericflo.github.io/modelrelay/)
 
 - [Behavior contract](docs/behavior-contract.md) — the full specification of proxy, queue, streaming, and cancellation semantics
+- [Verification](docs/verification.md) — formal TLA+ protocol model (`spec/ModelRelay.tla`), negative controls, bounds, and test suites
 - [Architecture sketch](docs/architecture.md) — how the pieces fit together internally
 - [Protocol walkthrough](docs/protocol-walkthrough.md) — ASCII wire traces for every message flow
 - [Operational runbook](docs/runbook.md) — health checks, draining, scaling, troubleshooting
 
 ## Validation
 
-The behavior matrix is exercised at three layers: black-box contract harnesses in `modelrelay-contract-tests`, live HTTP integration tests in `modelrelay-server`, and end-to-end live backend tests in `modelrelay-worker`.
+The behavior matrix is exercised at four layers: a formal TLA+ protocol model with 13 refuted negative controls in [`spec/ModelRelay.tla`](spec/ModelRelay.tla) (see [Verification](docs/verification.md)), black-box contract harnesses in `modelrelay-contract-tests`, live HTTP integration tests in `modelrelay-server`, and end-to-end live backend tests in `modelrelay-worker`.
 
 ```bash
+./scripts/check-model.sh
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace

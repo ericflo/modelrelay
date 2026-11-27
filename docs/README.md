@@ -83,6 +83,7 @@ For more installation options (pre-built binaries, Docker Compose, building from
 - **[Architecture](architecture.md)** — System design, component overview, and data flow
 - **[Protocol Walkthrough](protocol-walkthrough.md)** — Wire-level protocol details with examples
 - **[Behavior Contract](behavior-contract.md)** — The exact behavioral guarantees the system provides
+- **[Verification](verification.md)** — Formal TLA+ protocol model, negative controls, bounds, and implementation tests
 - **[Operational Runbook](runbook.md)** — Deployment, configuration, monitoring, and troubleshooting
 
 ## Source & Contributing
