@@ -1229,12 +1229,13 @@ async fn forward_request(
         _ => reqwest::Method::POST,
     };
 
-    let response = client
+    let mut req_builder = client
         .request(reqwest_method, &url)
-        .headers(backend_headers)
-        .body(body)
-        .send()
-        .await?;
+        .headers(backend_headers);
+    if !body.is_empty() {
+        req_builder = req_builder.body(body);
+    }
+    let response = req_builder.send().await?;
     let status = response.status();
     let status_code = status.as_u16();
 

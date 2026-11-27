@@ -416,3 +416,127 @@ async fn models_endpoint_probes_legacy_workers_and_caches_metadata() {
 
     worker_task.abort();
 }
+
+async fn send_raw_http_status(addr: SocketAddr, request: &str) -> u16 {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .expect("connect to test server");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write http request");
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read http response");
+    let response = String::from_utf8_lossy(&response);
+    response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .expect("parse response status")
+}
+
+#[tokio::test]
+async fn unsupported_probe_endpoints_fast_fail_with_404_instead_of_queuing() {
+    let (addr, core) = spawn_server().await;
+
+    {
+        let mut core = core.lock().await;
+        core.register_worker(
+            "openai",
+            RegisterMessage {
+                worker_name: "chat-only-worker".to_string(),
+                models: vec!["qwen3.5-27b".to_string()],
+                max_concurrent: 2,
+                protocol_version: Some("2026-04-bridge-v1".to_string()),
+                current_load: Some(0),
+                endpoint_prefixes: vec!["/v1/chat".to_string()],
+                model_metadata: ModelMetadataMap::new(),
+            },
+        );
+    }
+
+    let requests = [
+        format!(
+            "GET /props?model=qwen3.5-27b&autoload=false HTTP/1.1\r\nHost: {addr}\r\nX-Model: qwen3.5-27b\r\nConnection: close\r\n\r\n"
+        ),
+        format!(
+            "GET /api/v1/models HTTP/1.1\r\nHost: {addr}\r\nX-Model: qwen3.5-27b\r\nConnection: close\r\n\r\n"
+        ),
+        format!(
+            "GET /api/v0/models HTTP/1.1\r\nHost: {addr}\r\nX-Model: qwen3.5-27b\r\nConnection: close\r\n\r\n"
+        ),
+        format!(
+            "POST /api/show HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: 23\r\nX-Model: qwen3.5-27b\r\nConnection: close\r\n\r\n{{\"model\":\"qwen3.5-27b\"}}"
+        ),
+    ];
+
+    for raw_req in requests {
+        let status = tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            send_raw_http_status(addr, &raw_req),
+        )
+        .await
+        .expect("unsupported probe path must fail fast instead of hanging in queue");
+        assert_eq!(status, 404);
+    }
+}
+
+#[tokio::test]
+async fn hanging_metadata_probe_times_out_promptly_instead_of_request_timeout() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let worker_socket_app = WorkerSocketApp::new(core.clone())
+        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
+    let app = ProxyHttpApp::new(core.clone())
+        .with_worker_socket_app(worker_socket_app)
+        .with_request_timeout(Some(tokio::time::Duration::from_secs(300)))
+        .router();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("listener local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve proxy app");
+    });
+
+    let mut req = format!("ws://{addr}/v1/worker/connect?provider=openai")
+        .into_client_request()
+        .expect("ws request");
+    req.headers_mut().insert(
+        "x-worker-secret",
+        "top-secret".parse().expect("secret header"),
+    );
+    let (mut ws, _) = connect_async(req).await.expect("connect silent worker");
+    let reg = r#"{"type":"register","worker_name":"silent-worker","models":["qwen3.5-27b"],"max_concurrent":2,"protocol_version":"2026-04-bridge-v1","current_load":0}"#;
+    ws.send(Message::Text(reg.into()))
+        .await
+        .expect("send register");
+    let _ = ws.next().await.expect("register ack").expect("ws text");
+
+    // Keep WS open but never answer the dispatched /props probe.
+    let worker_task = tokio::spawn(async move { while let Some(Ok(_)) = ws.next().await {} });
+
+    let started = std::time::Instant::now();
+    let raw_req = format!(
+        "GET /props?model=qwen3.5-27b&autoload=false HTTP/1.1\r\nHost: {addr}\r\nX-Model: qwen3.5-27b\r\nConnection: close\r\n\r\n"
+    );
+    let status = tokio::time::timeout(
+        tokio::time::Duration::from_secs(7),
+        send_raw_http_status(addr, &raw_req),
+    )
+    .await
+    .expect("hanging /props probe must hit short metadata timeout, not 300s request timeout");
+    assert_eq!(status, 504);
+    assert!(
+        started.elapsed() < tokio::time::Duration::from_secs(6),
+        "expected prompt metadata probe timeout, took {:?}",
+        started.elapsed()
+    );
+
+    worker_task.abort();
+}

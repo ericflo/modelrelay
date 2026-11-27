@@ -258,12 +258,20 @@ console.log("Merged modelrelay into " + p);
 ```
 - **Or manual pre-filled copy-paste:** Point the user to `https://modelrelay.io/integrate#pi`.
 
-Verify Pi discovery:
+Verify Pi setup and live relay discovery:
+- First verify the relay directly (reading the saved key from `~/.pi/agent/auth.json` without echoing it):
 ```bash
-pi update --models
-pi --list-models | grep -i modelrelay
+node -e '
+const fs = require("node:fs"), path = require("node:path");
+const auth = JSON.parse(fs.readFileSync(path.join(process.env.HOME, ".pi/agent/auth.json"), "utf8"));
+const key = auth.modelrelay?.key || auth.modelrelay?.access;
+if (!key) { console.error("Missing modelrelay credential in auth.json"); process.exit(1); }
+fetch("https://api.modelrelay.io/v1/models", { headers: { Authorization: "Bearer " + key } })
+  .then(async (r) => { console.log("HTTP", r.status, await r.text()); if (!r.ok) process.exit(1); });
+'
 ```
-Inside `pi`, run `/model` to select any relayed model and `/thinking` (`Shift+Tab`) to adjust effort.
+- **Important (Pi 1.6+ catalog refresh):** `pi update --models` only refreshes built-in providers and does **not** load `~/.pi/agent/extensions/modelrelay.ts`. Likewise, `pi --list-models` and `pi -p` read the last saved `~/.pi/agent/models-store.json` cache. The `modelrelay` catalog refreshes automatically when interactive `pi` starts or `/model` opens — so tell the user to start `pi` and open `/model` (or if verifying headlessly, launch interactive `pi` briefly in a PTY for ~3s so it writes `~/.pi/agent/models-store.json`, then confirm with `pi --list-models modelrelay`).
+- Inside `pi`, run `/model` to select any relayed model and `/thinking` (`Shift+Tab`) to adjust effort.
 
 ### B2. OpenAI Codex CLI (Only If Explicitly Requested)
 

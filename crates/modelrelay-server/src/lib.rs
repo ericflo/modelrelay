@@ -355,6 +355,21 @@ impl ProxyServerCore {
             });
         }
 
+        if self.has_model_worker_rejecting_endpoint(&request) {
+            self.active_requests.remove(&request.request_id);
+            tracing::debug!(
+                request_id = %request.request_id,
+                provider = %request.provider,
+                model = %request.model,
+                endpoint = %request.transport.endpoint_path,
+                "request rejected: connected worker for model does not support endpoint"
+            );
+            return SubmissionOutcome::Rejected(RequestFailure {
+                request_id: request.request_id,
+                reason: RequestFailureReason::EndpointNotSupported,
+            });
+        }
+
         let policy = self.queue_policy(&request.provider);
         let current_queue_len = self
             .provider_queues
@@ -1525,7 +1540,7 @@ impl ProxyServerCore {
     /// worker to populate cached metadata for legacy workers that did not send
     /// `model_metadata` in `Register`. Returns `None` if the worker is unavailable or busy.
     pub fn submit_worker_models_probe(&mut self, worker_id: &str) -> Option<PendingHttpResponse> {
-        let (provider, owner_key_id) = {
+        let (provider, owner_key_id, probe_model) = {
             let worker = self.workers.get_mut(worker_id)?;
             if worker.is_draining
                 || worker.native_metadata_reported
@@ -1536,15 +1551,26 @@ impl ProxyServerCore {
                 return None;
             }
             worker.legacy_metadata_probed_at = Some(Instant::now());
-            (worker.provider.clone(), worker.owner_key_id.clone())
+            let probe_model = worker
+                .models
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "*".to_string());
+            (
+                worker.provider.clone(),
+                worker.owner_key_id.clone(),
+                probe_model,
+            )
         };
 
         let request_id = format!("request-{}", self.next_request_id);
         self.next_request_id += 1;
+        let mut headers = HeaderMap::new();
+        headers.insert("accept".to_string(), "application/json".to_string());
         let request = RequestRecord {
             request_id: request_id.clone(),
             provider,
-            model: "*".to_string(),
+            model: probe_model,
             owner_key_id,
             queued_at: Instant::now(),
             transport: RequestTransport {
@@ -1552,7 +1578,7 @@ impl ProxyServerCore {
                 method: "GET".to_string(),
                 is_streaming: false,
                 body: String::new(),
-                headers: HeaderMap::new(),
+                headers,
             },
             provider_routing: None,
             requeue_count: 0,
@@ -1951,6 +1977,23 @@ impl ProxyServerCore {
         })
     }
 
+    /// Returns `true` when at least one online worker visible to the caller already
+    /// serves `request.model`, yet no compatible worker supports `endpoint_path`
+    /// (because every matching model worker excludes it via `endpoint_prefixes`).
+    /// Fast-failing avoids queuing unsupported probe/API routes for `queue_timeout`.
+    fn has_model_worker_rejecting_endpoint(&self, request: &RequestRecord) -> bool {
+        !self.has_compatible_worker(request)
+            && self.workers.values().any(|worker| {
+                !worker.is_draining
+                    && worker.visible_to_owner(request.owner_key_id.as_deref())
+                    && worker
+                        .models
+                        .iter()
+                        .any(|supported| supported == "*" || supported == &request.model)
+                    && !worker.supports_endpoint(&request.transport.endpoint_path)
+            })
+    }
+
     fn fail_pending_http_response(
         &mut self,
         request_id: &str,
@@ -2178,6 +2221,7 @@ pub enum RequestFailureReason {
     QueueTimedOut,
     QueueFull,
     NoWorkersAvailable,
+    EndpointNotSupported,
     ProviderDisabled,
     ProviderDeleted,
     GracefulShutdownTimedOut,
@@ -3631,7 +3675,7 @@ mod tests {
             ),
         );
 
-        // Submit to /v1/chat/completions — should not match the embeddings worker
+        // Submit to /v1/chat/completions — should fast-fail with EndpointNotSupported instead of queuing
         let result = core.submit_transport_request(
             "openai",
             "gpt-4",
@@ -3644,8 +3688,14 @@ mod tests {
         );
 
         assert!(
-            !matches!(result, SubmissionOutcome::Dispatched(_)),
-            "embeddings-only worker should not handle /v1/chat/completions"
+            matches!(
+                result,
+                SubmissionOutcome::Rejected(RequestFailure {
+                    reason: RequestFailureReason::EndpointNotSupported,
+                    ..
+                })
+            ),
+            "embeddings-only worker should reject /v1/chat/completions immediately, got {result:?}"
         );
     }
 

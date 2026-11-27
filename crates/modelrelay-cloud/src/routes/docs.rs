@@ -484,13 +484,14 @@ const DOC_PI: &str = r#"
 </div>
 <p>Lock down file permissions with <code>chmod 600 ~/.pi/agent/auth.json</code>. To pull the key from macOS Keychain or a password manager instead of storing plaintext, prefix <code>key</code> with <code>!</code> (for example <code>"!security find-generic-password -ws 'modelrelay'"</code>).</p>
 
-<h2>4. Refresh &amp; Start Coding</h2>
+<h2>4. Launch Pi &amp; Pick a Model</h2>
 <div class="code-shell">
   <div class="code-shell-header"><span>shell</span><button type="button" class="copy-btn" data-copy-target="doc-pi-verify">Copy</button></div>
-  <pre><code id="doc-pi-verify">pi update --models
-pi --list-models</code></pre>
+  <pre><code id="doc-pi-verify">pi   # opens interactive Pi and refreshes ModelRelay models automatically
+# After the first interactive startup or /model open, CLI commands see the saved catalog too:
+pi --list-models modelrelay</code></pre>
 </div>
-<p>Open <code>pi</code>, run <code>/model</code> to select any live ModelRelay model (<code>Ctrl+S</code> saves it as your default), and use <code>/thinking</code> (or <code>Shift+Tab</code>) to cycle through the exact reasoning efforts advertised by your server.</p>
+<p>Inside <code>pi</code>, run <code>/model</code> to refresh and select any live ModelRelay model (<code>Ctrl+S</code> saves it as your default), and use <code>/thinking</code> (or <code>Shift+Tab</code>) to cycle through the exact reasoning efforts advertised by your server. <em>Note: <code>pi update --models</code> only updates built-in providers and does not load user extensions; opening interactive <code>pi</code> or <code>/model</code> refreshes ModelRelay.</em></p>
 
 <h2 id="metadata">How Dynamic Metadata Flows to Pi</h2>
 <p>Whenever your local inference server returns model metadata in <code>GET /v1/models</code>, ModelRelay preserves the full JSON object through the relay so <code>modelrelay.ts</code> configures Pi automatically:</p>
@@ -530,8 +531,8 @@ pi --list-models</code></pre>
 
 <h2>Troubleshooting</h2>
 <ul>
-  <li><strong>No ModelRelay models appear in <code>/model</code>:</strong> Confirm your worker is online with <code>curl https://api.modelrelay.io/v1/models -H "Authorization: Bearer $MODELRELAY_API_KEY"</code>, then run <code>pi update --models</code>.</li>
-  <li><strong>Changed backend context length or efforts:</strong> ModelRelay workers refresh <code>/v1/models</code> metadata automatically; run <code>pi update --models</code> (or <code>/reload</code> inside Pi) to pull the updated values immediately.</li>
+  <li><strong>No ModelRelay models appear in <code>/model</code>:</strong> Confirm your worker is online with <code>curl https://api.modelrelay.io/v1/models -H "Authorization: Bearer $MODELRELAY_API_KEY"</code>, then open interactive <code>pi</code> and run <code>/model</code> (remember that <code>pi update --models</code> does not load extensions, and <code>pi --list-models</code> reads the last saved <code>~/.pi/agent/models-store.json</code> cache).</li>
+  <li><strong>Changed backend context length or efforts:</strong> ModelRelay workers refresh <code>/v1/models</code> metadata automatically; open <code>/model</code> (or run <code>/reload</code>) inside interactive <code>pi</code> to pull the updated values immediately.</li>
 </ul>
 "#;
 

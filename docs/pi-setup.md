@@ -42,14 +42,17 @@ Add a `"modelrelay"` entry to `~/.pi/agent/auth.json` (`chmod 600 ~/.pi/agent/au
 }
 ```
 
-## 4. Refresh & Start Coding
+## 4. Launch Pi & Pick a Model
 
 ```bash
-pi update --models
-pi --list-models
+pi   # starts interactive Pi and refreshes ModelRelay models automatically
+# After the first interactive startup or /model open, CLI commands see the saved catalog too:
+pi --list-models modelrelay
 ```
 
-Inside Pi, run `/model` to select any model advertised by your workers (`Ctrl+S` saves a default), and run `/thinking` (or `Shift+Tab`) to cycle through the exact reasoning efforts advertised by your server.
+Inside Pi, run `/model` to refresh and select any model advertised by your workers (`Ctrl+S` saves a default), and run `/thinking` (or `Shift+Tab`) to cycle through the exact reasoning efforts advertised by your server.
+
+> **Note (Pi 1.6+):** `pi update --models` only updates built-in providers and does not load `~/.pi/agent/extensions/modelrelay.ts`. Likewise, `pi --list-models` and `pi -p` read the last saved `~/.pi/agent/models-store.json` cache — open interactive `pi` or `/model` whenever you want to refresh your live ModelRelay catalog.
 
 ## Zero-Extension Static Alternative (`~/.pi/agent/models.json`)
 

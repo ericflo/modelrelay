@@ -6,6 +6,8 @@ const DEFAULT_BASE_URL =
   process.env.MODELRELAY_BASE_URL || "https://api.modelrelay.io/v1";
 const DEFAULT_SITE_URL =
   process.env.MODELRELAY_SITE_URL || "https://modelrelay.io";
+const PROBE_TIMEOUT_MS = 1_500;
+const ENRICH_BUDGET_MS = 3_000;
 const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const LLAMA_ROUTER_STATUSES = new Set([
   "loaded",
@@ -128,6 +130,15 @@ const OPENAI_EFFORT_MAP: Record<string, string | null> = {
   low: "low",
   medium: "medium",
   high: "high",
+  xhigh: null,
+};
+
+const ALWAYS_ON_THINKING_MAP: Record<string, string | null> = {
+  off: null,
+  minimal: null,
+  low: null,
+  medium: "medium",
+  high: null,
   xhigh: null,
 };
 
@@ -288,7 +299,7 @@ function inferThinkingFromModelName(
     };
   }
 
-  // Hybrid enable_thinking models (Qwen3/3.5 non-instruct/non-coder, GLM-4.5+, SmolLM3).
+  // Hybrid enable_thinking models (Qwen3/3.5 non-instruct/non-coder, GLM-4.5+, SmolLM3, Gemma 4).
   const isHybridQwen3 =
     /qwen[-_.]?3(?:\.5)?(?:$|[-_./\s])/.test(hint) &&
     !/(?:^|[-_./\s])(instruct|coder|thinking|embed|embedding|rerank|reranker|guard)(?:$|[-_./\s])/.test(
@@ -296,12 +307,29 @@ function inferThinkingFromModelName(
     );
   const isHybridGlm = /glm[-_.]?(?:4\.[5-9]|5)(?:$|[-_./\s])/.test(hint);
   const isHybridSmol = /smollm3/.test(hint);
+  const isHybridGemma4 = /gemma[-_.]?4(?:$|[-_./\s:])/.test(hint);
 
-  if (isHybridQwen3 || isHybridGlm || isHybridSmol) {
+  if (isHybridQwen3 || isHybridGlm || isHybridSmol || isHybridGemma4) {
     return {
       reasoning: true,
       thinkingLevelMap: BINARY_THINKING_MAP,
       thinkingFormat: "qwen-chat-template",
+      supportsReasoningEffort: false,
+    };
+  }
+
+  // Dedicated always-on reasoning models that stream reasoning_content without toggle params.
+  const isAlwaysOnReasoning =
+    /(?:^|[-_./\s])(deepseek[-_.]?r1|r1[-_.]?distill|qwq|magistral|sky[-_.]?t1|marco[-_.]?o1)(?:$|[-_./\s:])/.test(
+      hint,
+    ) ||
+    /(?:^|[-_./\s])minimax[-_.]?m2(?:\.\d+)?(?:$|[-_./\s:])/.test(hint) ||
+    /(?:^|[-_./\s])(thinking|reasoning)(?:$|[-_./\s:])/.test(hint);
+
+  if (isAlwaysOnReasoning) {
+    return {
+      reasoning: true,
+      thinkingLevelMap: ALWAYS_ON_THINKING_MAP,
       supportsReasoningEffort: false,
     };
   }
@@ -485,11 +513,9 @@ function resolveThinking(
     };
   }
 
-  // 8. Fallback for stock vLLM, LM Studio v0 (/api/v0/models), and llama.cpp if /props was unreachable
-  if (isVllmModel(m) || isLlamaCppModel(m) || isLmStudioModel(m) || lm !== undefined) {
-    const inferred = inferThinkingFromModelName(m, [lm?.displayName, lm?.arch]);
-    if (inferred) return inferred;
-  }
+  // 8. Fallback for stock vLLM, LM Studio v0, llama.cpp without /props, or bare /v1/models responses
+  const inferred = inferThinkingFromModelName(m, [lm?.displayName, lm?.arch]);
+  if (inferred) return inferred;
 
   return { reasoning: false, supportsReasoningEffort: false };
 }
@@ -538,7 +564,7 @@ function resolveVision(
   return false;
 }
 
-function timedSignal(signal?: AbortSignal, ms = 5_000): AbortSignal {
+function timedSignal(signal?: AbortSignal, ms = PROBE_TIMEOUT_MS): AbortSignal {
   const timeout = AbortSignal.timeout(ms);
   return signal && typeof AbortSignal.any === "function"
     ? AbortSignal.any([signal, timeout])
@@ -551,6 +577,7 @@ async function fetchLlamaProps(
   apiKey: string,
   signal?: AbortSignal,
 ): Promise<LlamaProps | undefined> {
+  if (signal?.aborted) return undefined;
   try {
     const query = new URLSearchParams({ model: modelId, autoload: "false" });
     const res = await fetch(`${serverOrigin}/props?${query}`, {
@@ -568,93 +595,104 @@ async function fetchLlamaProps(
   }
 }
 
-async function fetchLmStudioCatalog(
+type LmStudioProbeResult =
+  | { status: "ok"; catalog: Map<string, LmStudioModelMeta> }
+  | { status: "http_error" }
+  | { status: "timeout_or_network" };
+
+async function fetchLmStudioV1(
+  serverOrigin: string,
+  routingModelId: string,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<LmStudioProbeResult> {
+  if (signal?.aborted) return { status: "timeout_or_network" };
+  try {
+    const res = await fetch(`${serverOrigin}/api/v1/models`, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "X-Model": routingModelId,
+      },
+      signal: timedSignal(signal),
+    });
+    if (!res.ok) return { status: "http_error" };
+    const json = (await res.json()) as {
+      models?: Array<{
+        key?: string;
+        display_name?: string;
+        type?: string;
+        architecture?: string;
+        max_context_length?: number;
+        capabilities?: {
+          vision?: boolean;
+          reasoning?: boolean | { supported?: boolean; efforts?: string[]; allowed_options?: unknown[] };
+        };
+        loaded_instances?: Array<{
+          id?: string;
+          config?: { context_length?: number };
+        }>;
+      }>;
+    };
+    if (!Array.isArray(json?.models)) return { status: "http_error" };
+    const out = new Map<string, LmStudioModelMeta>();
+    for (const entry of json.models) {
+      const t = entry.type?.toLowerCase();
+      const isEmbedding = t === "embedding" || t === "embeddings";
+      const instances = Array.isArray(entry.loaded_instances) ? entry.loaded_instances : [];
+      const defaultCtx =
+        positiveInt(instances[0]?.config?.context_length) ??
+        positiveInt(entry.max_context_length);
+      const baseMeta: Omit<LmStudioModelMeta, "id" | "contextWindow" | "isLoaded"> = {
+        displayName: entry.display_name,
+        arch: entry.architecture,
+        isEmbedding,
+        vision:
+          typeof entry.capabilities?.vision === "boolean"
+            ? entry.capabilities.vision
+            : t === "vlm"
+              ? true
+              : undefined,
+        reasoning: entry.capabilities?.reasoning,
+      };
+      if (entry.key) {
+        out.set(entry.key, {
+          ...baseMeta,
+          id: entry.key,
+          isLoaded: instances.length > 0,
+          contextWindow: defaultCtx,
+        });
+      }
+      for (const inst of instances) {
+        if (inst.id) {
+          out.set(inst.id, {
+            ...baseMeta,
+            id: inst.id,
+            isLoaded: true,
+            contextWindow:
+              positiveInt(inst.config?.context_length) ?? defaultCtx,
+          });
+        }
+      }
+    }
+    return { status: "ok", catalog: out };
+  } catch {
+    return { status: "timeout_or_network" };
+  }
+}
+
+async function fetchLmStudioV0(
   serverOrigin: string,
   routingModelId: string,
   apiKey: string,
   signal?: AbortSignal,
 ): Promise<Map<string, LmStudioModelMeta> | undefined> {
-  const headers = {
-    Authorization: `Bearer ${apiKey}`,
-    "X-Model": routingModelId,
-  };
-
-  // Try LM Studio 0.4+ native REST API: GET /api/v1/models
-  try {
-    const res = await fetch(`${serverOrigin}/api/v1/models`, {
-      headers,
-      signal: timedSignal(signal),
-    });
-    if (res.ok) {
-      const json = (await res.json()) as {
-        models?: Array<{
-          key?: string;
-          display_name?: string;
-          type?: string;
-          architecture?: string;
-          max_context_length?: number;
-          capabilities?: {
-            vision?: boolean;
-            reasoning?: boolean | { supported?: boolean; efforts?: string[]; allowed_options?: unknown[] };
-          };
-          loaded_instances?: Array<{
-            id?: string;
-            config?: { context_length?: number };
-          }>;
-        }>;
-      };
-      if (Array.isArray(json?.models)) {
-        const out = new Map<string, LmStudioModelMeta>();
-        for (const entry of json.models) {
-          const t = entry.type?.toLowerCase();
-          const isEmbedding = t === "embedding" || t === "embeddings";
-          const instances = Array.isArray(entry.loaded_instances) ? entry.loaded_instances : [];
-          const defaultCtx =
-            positiveInt(instances[0]?.config?.context_length) ??
-            positiveInt(entry.max_context_length);
-          const baseMeta: Omit<LmStudioModelMeta, "id" | "contextWindow" | "isLoaded"> = {
-            displayName: entry.display_name,
-            arch: entry.architecture,
-            isEmbedding,
-            vision:
-              typeof entry.capabilities?.vision === "boolean"
-                ? entry.capabilities.vision
-                : t === "vlm"
-                  ? true
-                  : undefined,
-            reasoning: entry.capabilities?.reasoning,
-          };
-          if (entry.key) {
-            out.set(entry.key, {
-              ...baseMeta,
-              id: entry.key,
-              isLoaded: instances.length > 0,
-              contextWindow: defaultCtx,
-            });
-          }
-          for (const inst of instances) {
-            if (inst.id) {
-              out.set(inst.id, {
-                ...baseMeta,
-                id: inst.id,
-                isLoaded: true,
-                contextWindow:
-                  positiveInt(inst.config?.context_length) ?? defaultCtx,
-              });
-            }
-          }
-        }
-        return out;
-      }
-    }
-  } catch {
-    // Fall through to /api/v0/models
-  }
-
-  // Fallback to LM Studio 0.3.x / 0.4.x REST API: GET /api/v0/models
+  if (signal?.aborted) return undefined;
   try {
     const res = await fetch(`${serverOrigin}/api/v0/models`, {
-      headers,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "X-Model": routingModelId,
+      },
       signal: timedSignal(signal),
     });
     if (!res.ok) return undefined;
@@ -706,12 +744,27 @@ async function fetchLmStudioCatalog(
   }
 }
 
+async function fetchLmStudioCatalog(
+  serverOrigin: string,
+  routingModelId: string,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<Map<string, LmStudioModelMeta> | undefined> {
+  // Try LM Studio 0.4+ native REST API first; only fall back to 0.3.x /api/v0/models on an
+  // actual HTTP error (e.g. 404), NOT if /api/v1/models timed out on an unresponsive worker.
+  const v1 = await fetchLmStudioV1(serverOrigin, routingModelId, apiKey, signal);
+  if (v1.status === "ok") return v1.catalog;
+  if (v1.status === "timeout_or_network") return undefined;
+  return fetchLmStudioV0(serverOrigin, routingModelId, apiKey, signal);
+}
+
 async function fetchOllamaShow(
   serverOrigin: string,
   modelId: string,
   apiKey: string,
   signal?: AbortSignal,
 ): Promise<OllamaShowMeta | undefined> {
+  if (signal?.aborted) return undefined;
   try {
     const res = await fetch(`${serverOrigin}/api/show`, {
       method: "POST",
@@ -954,48 +1007,16 @@ export default function (pi: ExtensionAPI) {
         (m) => !m.status?.failed && !isDecisionOnlyModel(m) && !isEmbeddingModel(m),
       );
 
-      // 1. llama.cpp: probe /props in parallel ONLY for loaded llama.cpp models.
+      // Cap all optional backend metadata probes to a strict shared budget so refreshModels
+      // always completes and calls publish() well inside Pi's 15s refresh window, even if a
+      // worker or backend hangs on optional discovery routes (/props, /api/*).
+      const probeSignal = timedSignal(signal, ENRICH_BUDGET_MS);
+
       const propsById = new Map<string, LlamaProps>();
       let routerAutoload: boolean | undefined;
-
-      const llamaModelsToProbe = candidates.filter(
-        (m) =>
-          isLlamaCppModel(m) &&
-          (!isLlamaRouterModel(m) || m.status?.value === "loaded") &&
-          (!hasExplicitReasoningMetadata(m) || !hasExplicitRuntimeContext(m)),
-      );
-
-      await Promise.all(
-        llamaModelsToProbe.map(async (m) => {
-          const props = await fetchLlamaProps(serverOrigin, m.id, apiKey, signal);
-          if (props) {
-            propsById.set(m.id, props);
-            if (typeof props.models_autoload === "boolean") {
-              routerAutoload = props.models_autoload;
-            }
-          }
-        }),
-      );
-
-      const firstUnloadedPreset = candidates.find(
-        (m) => isLlamaRouterModel(m) && m.status?.value === "unloaded" && m.source === "preset",
-      );
-      if (firstUnloadedPreset && routerAutoload === undefined) {
-        const props = await fetchLlamaProps(
-          serverOrigin,
-          firstUnloadedPreset.id,
-          apiKey,
-          signal,
-        );
-        if (typeof props?.models_autoload === "boolean") {
-          routerAutoload = props.models_autoload;
-        }
-      }
-
-      // 2. LM Studio: query /api/v1/models (or /api/v0/models) once per distinct LM Studio worker.
-      //    Each response covers every model on that machine, so models already returned by an
-      //    earlier catalog are skipped while models on a second LM Studio machine get probed.
       const lmById = new Map<string, LmStudioModelMeta>();
+      const ollamaById = new Map<string, OllamaShowMeta>();
+
       const mergeLmCatalog = (catalog: Map<string, LmStudioModelMeta>) => {
         for (const [k, v] of catalog) {
           const existing = lmById.get(k);
@@ -1005,64 +1026,111 @@ export default function (pi: ExtensionAPI) {
         }
       };
 
-      const lmCandidates = candidates.filter(
+      const needsMeta = (m: RelayModel) =>
+        !hasExplicitRuntimeContext(m) || !hasExplicitReasoningMetadata(m);
+
+      // Partition candidates by backend fingerprint so independent probes run concurrently.
+      const llamaModelsToProbe = candidates.filter(
+        (m) =>
+          isLlamaCppModel(m) &&
+          (!isLlamaRouterModel(m) || m.status?.value === "loaded") &&
+          needsMeta(m),
+      );
+      const firstUnloadedPreset = candidates.find(
+        (m) => isLlamaRouterModel(m) && m.status?.value === "unloaded" && m.source === "preset",
+      );
+      const explicitLm = candidates.filter(
+        (m) => !isLlamaCppModel(m) && !isVllmModel(m) && isLmStudioModel(m) && needsMeta(m),
+      );
+      const explicitOllama = candidates.filter(
+        (m) => !isLlamaCppModel(m) && !isVllmModel(m) && !isLmStudioModel(m) && isOllamaModel(m) && needsMeta(m),
+      );
+      const unknownBare = candidates.filter(
         (m) =>
           !isLlamaCppModel(m) &&
           !isVllmModel(m) &&
-          (!hasExplicitRuntimeContext(m) || !hasExplicitReasoningMetadata(m)) &&
-          (isLmStudioModel(m) || !isOllamaModel(m)),
+          !isLmStudioModel(m) &&
+          !isOllamaModel(m) &&
+          needsMeta(m),
       );
-      const explicitLm = lmCandidates.filter(isLmStudioModel);
-      const unknownBare = lmCandidates.filter((m) => !isLmStudioModel(m));
 
-      for (const m of explicitLm) {
-        if (lmById.has(m.id)) continue;
-        const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, apiKey, signal);
-        if (catalog) mergeLmCatalog(catalog);
-      }
-
-      for (const m of unknownBare) {
-        if (lmById.has(m.id)) continue;
-        const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, apiKey, signal);
-        if (!catalog) break;
-        mergeLmCatalog(catalog);
-      }
-
-      // 3. Ollama: probe POST /api/show ONLY for models still missing metadata after LM Studio.
-      const ollamaById = new Map<string, OllamaShowMeta>();
-      const ollamaCandidates = candidates.filter(
-        (m) =>
-          !isLlamaCppModel(m) &&
-          !isVllmModel(m) &&
-          !lmById.has(m.id) &&
-          (!hasExplicitRuntimeContext(m) || !hasExplicitReasoningMetadata(m)),
-      );
-      const explicitOllama = ollamaCandidates.filter(isOllamaModel);
-      if (explicitOllama.length > 0) {
-        await Promise.all(
-          explicitOllama.map(async (m) => {
-            const info = await fetchOllamaShow(serverOrigin, m.id, apiKey, signal);
-            if (info) ollamaById.set(m.id, info);
-          }),
-        );
-      } else if (ollamaCandidates.length > 0) {
-        // Probe the first bare model; only fan out if the backend actually speaks Ollama /api/show.
-        const firstInfo = await fetchOllamaShow(
-          serverOrigin,
-          ollamaCandidates[0].id,
-          apiKey,
-          signal,
-        );
-        if (firstInfo) {
-          ollamaById.set(ollamaCandidates[0].id, firstInfo);
+      await Promise.all([
+        // 1. llama.cpp: probe /props in parallel ONLY for loaded llama.cpp models.
+        (async () => {
           await Promise.all(
-            ollamaCandidates.slice(1).map(async (m) => {
-              const info = await fetchOllamaShow(serverOrigin, m.id, apiKey, signal);
+            llamaModelsToProbe.map(async (m) => {
+              const props = await fetchLlamaProps(serverOrigin, m.id, apiKey, probeSignal);
+              if (props) {
+                propsById.set(m.id, props);
+                if (typeof props.models_autoload === "boolean") {
+                  routerAutoload = props.models_autoload;
+                }
+              }
+            }),
+          );
+          if (firstUnloadedPreset && routerAutoload === undefined && !probeSignal.aborted) {
+            const props = await fetchLlamaProps(
+              serverOrigin,
+              firstUnloadedPreset.id,
+              apiKey,
+              probeSignal,
+            );
+            if (typeof props?.models_autoload === "boolean") {
+              routerAutoload = props.models_autoload;
+            }
+          }
+        })(),
+
+        // 2. Explicit LM Studio: query once per distinct LM Studio worker.
+        (async () => {
+          for (const m of explicitLm) {
+            if (probeSignal.aborted || lmById.has(m.id)) continue;
+            const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, apiKey, probeSignal);
+            if (catalog) mergeLmCatalog(catalog);
+          }
+        })(),
+
+        // 3. Explicit Ollama: probe POST /api/show in parallel.
+        (async () => {
+          await Promise.all(
+            explicitOllama.map(async (m) => {
+              const info = await fetchOllamaShow(serverOrigin, m.id, apiKey, probeSignal);
               if (info) ollamaById.set(m.id, info);
             }),
           );
-        }
-      }
+        })(),
+
+        // 4. Bare models with unknown backend: probe LM Studio v1, LM Studio v0, and Ollama
+        //    IN PARALLEL on the first model (1.5s worst case instead of 15s sequential!).
+        (async () => {
+          if (unknownBare.length === 0 || probeSignal.aborted) return;
+          const first = unknownBare[0];
+          const [v1, v0, ollamaFirst] = await Promise.all([
+            fetchLmStudioV1(serverOrigin, first.id, apiKey, probeSignal),
+            fetchLmStudioV0(serverOrigin, first.id, apiKey, probeSignal),
+            fetchOllamaShow(serverOrigin, first.id, apiKey, probeSignal),
+          ]);
+          const lmCatalog = v1.status === "ok" ? v1.catalog : v0;
+          if (lmCatalog) {
+            mergeLmCatalog(lmCatalog);
+            for (const m of unknownBare.slice(1)) {
+              if (probeSignal.aborted || lmById.has(m.id)) continue;
+              const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, apiKey, probeSignal);
+              if (!catalog) break;
+              mergeLmCatalog(catalog);
+            }
+          } else if (ollamaFirst) {
+            ollamaById.set(first.id, ollamaFirst);
+            await Promise.all(
+              unknownBare.slice(1).map(async (m) => {
+                if (probeSignal.aborted) return;
+                const info = await fetchOllamaShow(serverOrigin, m.id, apiKey, probeSignal);
+                if (info) ollamaById.set(m.id, info);
+              }),
+            );
+          }
+        })(),
+      ]);
 
       const selectable = candidates.filter((m) => {
         if (lmById.get(m.id)?.isEmbedding || ollamaById.get(m.id)?.isEmbedding) {

@@ -36,6 +36,7 @@ use crate::{
 const OPENAI_MODELS_PROVIDER: &str = "openai";
 const LEGACY_MODELS_PROBE_TTL: Duration = Duration::from_secs(30);
 const LEGACY_MODELS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const METADATA_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024; // 64 MiB (supports vision/multimodal payloads)
 const MAX_STREAM_RESPONSE_BYTES: usize = 10 * 1024 * 1024 * 1024; // 10 GB
 const OVERSIZED_STREAM_ERROR_SSE: &str = "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":\"stream exceeded size limit\"}}\n\n";
@@ -341,22 +342,48 @@ async fn probe_legacy_workers_metadata(state: &HttpState, owner_key_id: Option<&
             match result {
                 Ok(Ok(Ok(response))) => {
                     guard.disarm();
-                    if (200..300).contains(&response.status_code)
-                        && let Some(body) = response.body.as_deref()
-                        && let Ok(parsed) = serde_json::from_str::<Value>(body)
-                        && let Some((_, metadata)) = parse_openai_models_response(&parsed)
-                        && !metadata.is_empty()
-                    {
-                        return Some((worker_id, metadata));
+                    if (200..300).contains(&response.status_code) {
+                        if let Some(body) = response.body.as_deref()
+                            && let Ok(parsed) = serde_json::from_str::<Value>(body)
+                            && let Some((_, metadata)) = parse_openai_models_response(&parsed)
+                            && !metadata.is_empty()
+                        {
+                            return Some((worker_id, metadata));
+                        }
+                        tracing::debug!(
+                            worker_id = %worker_id,
+                            status = response.status_code,
+                            "legacy worker /v1/models probe returned empty or unparseable body"
+                        );
+                    } else {
+                        tracing::debug!(
+                            worker_id = %worker_id,
+                            status = response.status_code,
+                            "legacy worker /v1/models probe returned non-2xx status"
+                        );
                     }
                     None
                 }
-                Ok(Ok(Err(_)) | Err(_)) => {
+                Ok(Ok(Err(reason))) => {
+                    guard.disarm();
+                    tracing::debug!(
+                        worker_id = %worker_id,
+                        ?reason,
+                        "legacy worker /v1/models probe failed"
+                    );
+                    None
+                }
+                Ok(Err(_)) => {
                     guard.disarm();
                     None
                 }
                 Err(_) => {
                     guard.disarm();
+                    tracing::warn!(
+                        worker_id = %worker_id,
+                        request_id = %request_id,
+                        "legacy worker /v1/models probe timed out"
+                    );
                     let mut core = core_ref.lock().await;
                     let _ = core.cancel_request(&request_id, CancelReason::RequestTimedOut);
                     None
@@ -752,7 +779,18 @@ async fn wildcard_handler(
 
     let request_id = pending.request_id.clone();
     let mut cancellation_guard = HttpRequestCancellationGuard::new(state.core.clone(), &pending);
-    let wait_result = match state.request_timeout {
+    let effective_timeout = if is_metadata_probe_path(&endpoint_path) {
+        Some(
+            state
+                .request_timeout
+                .map_or(METADATA_PROBE_TIMEOUT, |limit| {
+                    limit.min(METADATA_PROBE_TIMEOUT)
+                }),
+        )
+    } else {
+        state.request_timeout
+    };
+    let wait_result = match effective_timeout {
         Some(limit) => tokio::time::timeout(limit, pending.response_rx).await.ok(),
         None => Some(pending.response_rx.await),
     };
@@ -1126,11 +1164,24 @@ fn gateway_timeout_json_response(message: &str) -> Response {
         .into_response()
 }
 
+fn is_metadata_probe_path(endpoint_path: &str) -> bool {
+    let path = endpoint_path
+        .split_once('?')
+        .map_or(endpoint_path, |(path, _)| path);
+    matches!(
+        path,
+        "/props" | "/api/v1/models" | "/api/v0/models" | "/api/show"
+    )
+}
+
 const fn failure_reason_message(reason: RequestFailureReason) -> &'static str {
     match reason {
         RequestFailureReason::QueueTimedOut => "Request timed out waiting for worker",
         RequestFailureReason::QueueFull => "Service temporarily at capacity, please retry",
         RequestFailureReason::NoWorkersAvailable => "No workers available to handle request",
+        RequestFailureReason::EndpointNotSupported => {
+            "Connected worker does not support this endpoint path"
+        }
         RequestFailureReason::ProviderDisabled => "Provider is currently disabled",
         RequestFailureReason::MaxRequeuesExceeded => {
             "Request could not be processed after multiple attempts"
@@ -1147,6 +1198,7 @@ const fn failure_reason_message(reason: RequestFailureReason) -> &'static str {
 fn availability_failure_response(reason: RequestFailureReason) -> Response {
     let status = match reason {
         RequestFailureReason::WorkerDisconnectedMidStream => StatusCode::BAD_GATEWAY,
+        RequestFailureReason::EndpointNotSupported => StatusCode::NOT_FOUND,
         _ => StatusCode::SERVICE_UNAVAILABLE,
     };
     let message = failure_reason_message(reason);

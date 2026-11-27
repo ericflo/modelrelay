@@ -811,14 +811,14 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
         <div class="pi-step">
           <div class="pi-step-head">
             <span class="pi-num">4</span>
-            <h3>Refresh &amp; Start Coding</h3>
+            <h3>Launch Pi &amp; Pick a Model</h3>
           </div>
-          <p>Pull your live models and verify that Pi picked up their context windows and thinking levels automatically:</p>
+          <p>Start interactive <code>pi</code> and open <code>/model</code> &mdash; Pi loads <code>modelrelay.ts</code> on startup and whenever <code>/model</code> opens, automatically refreshing your live models, context windows, and thinking levels into <code>~/.pi/agent/models-store.json</code> (note: <code>pi update --models</code> only refreshes built-in providers and does not load user extensions):</p>
           <div class="code-shell" style="margin-bottom:0;">
-            <div class="code-shell-header"><span>verify in terminal</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
-            <pre><code class="code-text">pi update --models
-pi --list-models
-pi   # use /model to pick a model and /thinking (Shift+Tab) to adjust effort</code></pre>
+            <div class="code-shell-header"><span>start Pi</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
+            <pre><code class="code-text">pi   # run /model to pick a relayed model (Ctrl+S saves default) and /thinking (Shift+Tab) to adjust effort
+# After your first interactive refresh, non-interactive commands see the cached catalog too:
+pi --list-models modelrelay</code></pre>
           </div>
         </div>
       </div>
