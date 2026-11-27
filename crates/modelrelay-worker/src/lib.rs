@@ -1125,6 +1125,21 @@ fn is_hop_by_hop_header(name: &HeaderName, connection_tokens: &HashSet<String>) 
         || connection_tokens.contains(&name.as_str().to_ascii_lowercase())
 }
 
+fn is_client_hop_header(name: &HeaderName) -> bool {
+    let lower = name.as_str();
+    lower.eq_ignore_ascii_case("origin")
+        || lower.eq_ignore_ascii_case("referer")
+        || lower.eq_ignore_ascii_case("cookie")
+        || lower.eq_ignore_ascii_case("forwarded")
+        || lower.eq_ignore_ascii_case("x-real-ip")
+        || lower.eq_ignore_ascii_case("true-client-ip")
+        || lower.eq_ignore_ascii_case("cdn-loop")
+        || lower.starts_with("sec-fetch-")
+        || lower.starts_with("sec-ch-")
+        || lower.starts_with("x-forwarded-")
+        || lower.starts_with("cf-")
+}
+
 #[allow(clippy::too_many_lines)]
 async fn forward_request(
     client: reqwest::Client,
@@ -1162,6 +1177,7 @@ async fn forward_request(
             || header_name == HOST
             || header_name == ACCEPT_ENCODING
             || is_hop_by_hop_header(&header_name, &req_connection_tokens)
+            || is_client_hop_header(&header_name)
         {
             continue;
         }

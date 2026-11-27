@@ -758,6 +758,27 @@ fn parse_connection_header_tokens(headers: &AxumHeaderMap) -> HashSet<String> {
     tokens
 }
 
+/// Headers that belong strictly to the client↔proxy HTTP hop (browser CORS /
+/// fetch metadata, cookies, and ingress forwarding headers) and must never be
+/// relayed to local inference backends behind a worker. Forwarding `Origin` or
+/// `Referer` causes localhost backends with DNS-rebinding / CORS guards (such
+/// as Ollama, llama-server, or loom) to reject already-authenticated browser
+/// requests with `403 Forbidden`.
+fn is_client_hop_header(name: &HeaderName) -> bool {
+    let lower = name.as_str();
+    lower.eq_ignore_ascii_case("origin")
+        || lower.eq_ignore_ascii_case("referer")
+        || lower.eq_ignore_ascii_case("cookie")
+        || lower.eq_ignore_ascii_case("forwarded")
+        || lower.eq_ignore_ascii_case("x-real-ip")
+        || lower.eq_ignore_ascii_case("true-client-ip")
+        || lower.eq_ignore_ascii_case("cdn-loop")
+        || lower.starts_with("sec-fetch-")
+        || lower.starts_with("sec-ch-")
+        || lower.starts_with("x-forwarded-")
+        || lower.starts_with("cf-")
+}
+
 fn forwarded_request_headers(headers: &AxumHeaderMap, strip_client_auth: bool) -> HeaderMap {
     let connection_tokens = parse_connection_header_tokens(headers);
 
@@ -768,6 +789,7 @@ fn forwarded_request_headers(headers: &AxumHeaderMap, strip_client_auth: bool) -
                 && *name != HOST
                 && *name != ACCEPT_ENCODING
                 && !is_hop_by_hop_header(name, &connection_tokens)
+                && !is_client_hop_header(name)
                 && (!strip_client_auth
                     || (*name != AUTHORIZATION && !name.as_str().eq_ignore_ascii_case("x-api-key")))
         })
@@ -935,7 +957,10 @@ fn response_complete_to_http_response(response: ResponseCompleteMessage) -> Resp
         let Ok(header_name) = HeaderName::try_from(name) else {
             continue;
         };
-        if header_name == CONTENT_LENGTH || is_hop_by_hop_header(&header_name, &connection_tokens) {
+        if header_name == CONTENT_LENGTH
+            || is_hop_by_hop_header(&header_name, &connection_tokens)
+            || header_name.as_str().starts_with("access-control-")
+        {
             continue;
         }
         let Ok(header_value) = HeaderValue::from_str(&value) else {
@@ -1073,5 +1098,98 @@ impl Drop for HttpRequestCancellationGuard {
             let mut core = core.lock().await;
             let _ = core.cancel_request(&request_id, CancelReason::ClientDisconnected);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwarded_request_headers_strips_browser_origin_and_proxy_headers() {
+        let mut raw = AxumHeaderMap::new();
+        raw.insert(
+            "origin",
+            HeaderValue::from_static("https://chat.neuralcolumn.com"),
+        );
+        raw.insert(
+            "referer",
+            HeaderValue::from_static("https://chat.neuralcolumn.com/"),
+        );
+        raw.insert("cookie", HeaderValue::from_static("sid=secret"));
+        raw.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        raw.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+        raw.insert(
+            "sec-ch-ua",
+            HeaderValue::from_static("\"Chromium\";v=\"130\""),
+        );
+        raw.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.10"));
+        raw.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        raw.insert("forwarded", HeaderValue::from_static("for=203.0.113.10"));
+        raw.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.10"));
+        raw.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer mr_live_secret"),
+        );
+        raw.insert("content-type", HeaderValue::from_static("application/json"));
+        raw.insert("accept", HeaderValue::from_static("text/event-stream"));
+        raw.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+        let forwarded = forwarded_request_headers(&raw, true);
+
+        for stripped in [
+            "origin",
+            "referer",
+            "cookie",
+            "sec-fetch-site",
+            "sec-fetch-mode",
+            "sec-ch-ua",
+            "x-forwarded-for",
+            "x-forwarded-proto",
+            "forwarded",
+            "cf-connecting-ip",
+            "authorization",
+        ] {
+            assert!(
+                !forwarded.contains_key(stripped),
+                "expected {stripped} to be stripped from forwarded headers"
+            );
+        }
+        assert_eq!(
+            forwarded.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(
+            forwarded.get("accept").map(String::as_str),
+            Some("text/event-stream")
+        );
+        assert_eq!(
+            forwarded.get("anthropic-version").map(String::as_str),
+            Some("2023-06-01")
+        );
+    }
+
+    #[test]
+    fn response_complete_strips_backend_cors_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "access-control-allow-origin".to_string(),
+            "http://localhost:3000".to_string(),
+        );
+        let resp = response_complete_to_http_response(ResponseCompleteMessage {
+            request_id: "req-1".to_string(),
+            status_code: 200,
+            headers,
+            body: Some("{}".to_string()),
+            token_counts: None,
+        });
+        assert!(!resp.headers().contains_key("access-control-allow-origin"));
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
     }
 }
