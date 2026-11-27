@@ -881,6 +881,7 @@ pub fn page_shell_full(
             <li><a href="/docs/pi">Pi Coding Agent</a></li>
             <li><a href="/docs/workers">Desktop &amp; Workers</a></li>
             <li><a href="/docs/self-hosting">Self-Hosting</a></li>
+            <li><a href="/AGENTS.md">AGENTS.md</a></li>
           </ul>
         </div>
         <div class="footer-col">

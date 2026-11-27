@@ -1121,3 +1121,59 @@ async fn oauth_authorize_deny_redirects_with_access_denied_and_state() {
         Some("https://chat.neuralcolumn.com/?error=access_denied&state=mr.cancel99")
     );
 }
+
+// ─── AGENTS.md & homepage agent-bootstrap section ───────────────────────────
+
+#[tokio::test]
+async fn agents_md_is_served_with_markdown_and_cors_on_both_cases() {
+    for path in ["/AGENTS.md", "/agents.md"] {
+        let resp = app()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "expected 200 for {path}");
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/markdown; charset=utf-8")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("modelrelay-server"));
+        assert!(body.contains("modelrelay-worker"));
+        assert!(body.contains("max_concurrency"));
+        assert!(body.contains("~/.pi/agent/extensions/modelrelay.ts"));
+        assert!(body.contains("~/.pi/agent/auth.json"));
+        assert!(body.contains("Claude Code"));
+        assert!(body.contains("Codex"));
+        assert!(body.contains("/oauth/authorize"));
+    }
+}
+
+#[tokio::test]
+async fn landing_page_includes_agent_bootstrap_prompts_and_agents_md_link() {
+    let (status, body) = get("/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("/AGENTS.md"));
+    assert!(body.contains("https://modelrelay.io/AGENTS.md"));
+    assert!(body.contains("Claude Code"));
+    assert!(body.contains("Codex"));
+    assert!(body.contains("prompt-full"));
+    assert!(body.contains("prompt-worker"));
+    assert!(body.contains("prompt-client"));
+    assert!(body.contains("prompt-cli"));
+}

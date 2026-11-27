@@ -91,6 +91,8 @@ pub fn router(state: Arc<CloudState>) -> Router {
         .route("/webhook/stripe", post(webhook::handle))
         .route("/robots.txt", get(robots_txt))
         .route("/sitemap.xml", get(sitemap_xml))
+        .route("/AGENTS.md", get(agents_md))
+        .route("/agents.md", get(agents_md))
         .route("/favicon.ico", get(favicon_ico))
         .route("/favicon-32.png", get(favicon_32_png))
         .route("/apple-touch-icon.png", get(apple_touch_icon))
@@ -192,6 +194,22 @@ async fn robots_txt() -> impl IntoResponse {
     )
 }
 
+static AGENTS_MD_TEXT: &str = include_str!("../../assets/AGENTS.md");
+
+async fn agents_md() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8",
+            ),
+            (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        AGENTS_MD_TEXT,
+    )
+}
+
 async fn sitemap_xml() -> impl IntoResponse {
     (
         [(
@@ -201,6 +219,7 @@ async fn sitemap_xml() -> impl IntoResponse {
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://modelrelay.io/</loc></url>
+  <url><loc>https://modelrelay.io/AGENTS.md</loc></url>
   <url><loc>https://modelrelay.io/downloads</loc></url>
   <url><loc>https://modelrelay.io/integrate</loc></url>
   <url><loc>https://modelrelay.io/setup</loc></url>
@@ -287,6 +306,8 @@ const SESSION_EXEMPT_ROUTES: &[&str] = &[
     "/health",
     "/robots.txt",
     "/sitemap.xml",
+    "/AGENTS.md",
+    "/agents.md",
     "/favicon.ico",
     "/favicon-32.png",
     "/apple-touch-icon.png",

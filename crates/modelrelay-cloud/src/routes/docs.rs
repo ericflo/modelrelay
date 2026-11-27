@@ -210,6 +210,7 @@ fn render_doc(idx: usize, logged_in: bool) -> Html<String> {
         {sidebar_links}
       </nav>
       <div class="docs-side-ext">
+        <a href="/AGENTS.md" class="nav-item" style="font-size:0.84rem;padding:7px 10px;">AGENTS.md (For Coding Agents) &rarr;</a>
         <a href="/integrate" class="nav-item" style="font-size:0.84rem;padding:7px 10px;">Interactive Pi &amp; API Tool &rarr;</a>
         <a href="/downloads" class="nav-item" style="font-size:0.84rem;padding:7px 10px;">Downloads &rarr;</a>
         <a href="https://github.com/ericflo/modelrelay" target="_blank" rel="noopener" class="nav-item" style="font-size:0.84rem;padding:7px 10px;">GitHub Repository &nearr;</a>
@@ -703,7 +704,7 @@ worker_secret = "mr_live_your_api_key"
 worker_name = "workstation-4090"
 backend_url = "http://127.0.0.1:8000"
 models = ["*"]
-max_concurrent = 4</code></pre>
+max_concurrency = 4</code></pre>
 </div>
 <div class="code-shell">
   <div class="code-shell-header"><span>run worker</span><button type="button" class="copy-btn" data-copy-target="doc-w-run">Copy</button></div>

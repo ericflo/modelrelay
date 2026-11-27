@@ -176,7 +176,44 @@ const LANDING_CSS: &str = r"
   .home-panel { display: none; position: relative; background: var(--bg-code); }
   .home-panel.active { display: block; }
   .home-panel pre { margin: 0; padding: 18px 66px 18px 18px; overflow-x: auto; font-size: 0.82rem; line-height: 1.65; color: var(--code-fg); }
+  .home-panel.prompt-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; font-size: 0.86rem; line-height: 1.68; }
   .home-panel .copy-btn { position: absolute; top: 12px; right: 12px; }
+
+  /* Agent Bootstrap Spotlight */
+  .agent-banner {
+    background: var(--bg-surface); border: 1px solid var(--accent-border);
+    border-radius: var(--radius-xl); padding: 28px; box-shadow: var(--shadow-card);
+    position: relative; overflow: hidden;
+  }
+  .agent-banner::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--cyan));
+  }
+  .agent-top {
+    display: flex; justify-content: space-between; align-items: flex-end; gap: 20px;
+    flex-wrap: wrap; margin-bottom: 22px;
+  }
+  .agent-top h2 {
+    font-size: 1.85rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.15;
+    margin-bottom: 8px; color: var(--text-strong);
+  }
+  .agent-top p { color: var(--text-secondary); font-size: 0.96rem; max-width: 680px; margin: 0; }
+  .agent-links { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .agent-prompt-note {
+    padding: 11px 18px; border-top: 1px solid rgba(148, 163, 184, 0.16);
+    background: var(--bg-code-head); font-size: 0.8rem; color: var(--code-muted);
+    display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .agent-prompt-note code { color: #e0e7ff; background: rgba(99, 102, 241, 0.22); border-color: rgba(129, 140, 248, 0.35); }
+  .agent-pillars {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 18px;
+  }
+  .agent-pillar {
+    background: var(--bg-subtle); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: 15px 16px;
+  }
+  .agent-pillar strong { display: block; font-size: 0.88rem; color: var(--text-strong); margin-bottom: 4px; }
+  .agent-pillar p { font-size: 0.82rem; color: var(--text-secondary); margin: 0; line-height: 1.55; }
 
   /* Desktop Showcase */
   .desktop-grid { display: grid; grid-template-columns: 1.12fr 0.88fr; gap: 36px; align-items: center; }
@@ -217,13 +254,16 @@ const LANDING_CSS: &str = r"
     .hero-grid, .desktop-grid, .split-2 { grid-template-columns: 1fr; }
     .topo-grid { grid-template-columns: 1fr; }
     .topo-arrow-line { width: 2px; height: 24px; }
-    .pillars { grid-template-columns: 1fr; }
+    .pillars, .agent-pillars { grid-template-columns: 1fr; }
     .hero h1 { font-size: 2.35rem; }
   }
   @media (max-width: 600px) {
     .hero { padding: 48px 0; }
     .section { padding: 52px 0; }
     .dl-cards { grid-template-columns: 1fr; }
+    .agent-banner { padding: 20px 16px; }
+    .agent-top h2 { font-size: 1.5rem; }
+    .home-panel.prompt-panel pre { padding: 48px 16px 16px 16px; font-size: 0.82rem; }
     .cta-banner { padding: 32px 20px; }
   }
 ";
@@ -304,7 +344,7 @@ pub async fn page(OptionalSession(session): OptionalSession) -> Response {
     };
 
     let main_html = format!(
-        r#"
+        r##"
   <section class="hero">
     <div class="container hero-grid">
       <div>
@@ -312,15 +352,16 @@ pub async fn page(OptionalSession(session): OptionalSession) -> Response {
         <h1>One endpoint for all your <span class="hl">GPU boxes</span>.</h1>
         <p class="hero-sub">Stop exposing ports or rewriting configs for every machine. Workers connect <em>out</em> over WebSocket to <code>api.modelrelay.io</code>, and Pi Coding Agent or <code>curl</code> routes straight to your live local models.</p>
         <div class="hero-cta">
-          <a href="/integrate#pi" class="btn btn-lg">Set Up Pi Coding Agent &rarr;</a>
-          <a href="/downloads" class="btn btn-lg btn-secondary">Download Desktop App</a>
+          <a href="#agents" class="btn btn-lg">Bootstrap With Your Agent &rarr;</a>
+          <a href="/integrate#pi" class="btn btn-lg btn-secondary">Pi &amp; API Setup</a>
+          <a href="/downloads" class="btn btn-lg btn-secondary">Download Desktop</a>
         </div>
         <div class="hero-meta">
           <span>MIT Open Source</span>
           <span>&middot;</span>
           <span>No inbound ports</span>
           <span>&middot;</span>
-          <span>SSE streaming &amp; cancel</span>
+          <span><a href="/AGENTS.md">AGENTS.md</a></span>
           <span>&middot;</span>
           <span><a href="/docs">Read Docs &rarr;</a></span>
         </div>
@@ -365,6 +406,93 @@ curl -N https://api.modelrelay.io/v1/chat/completions \
         <div class="term-foot">
           <span>Works with llama.cpp, Ollama, vLLM &amp; LM Studio</span>
           <a href="/integrate">Interactive setup &amp; live tester &rarr;</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ Agent-First Bootstrap (/AGENTS.md) ═══ -->
+  <section class="section section-alt" id="agents">
+    <div class="container">
+      <div class="agent-banner">
+        <div class="agent-top">
+          <div>
+            <div class="eyebrow">Agent-First Setup &middot; modelrelay.io/AGENTS.md</div>
+            <h2>Already using Claude Code, Codex, or Pi? Let it bootstrap your self-hosted stack.</h2>
+            <p>Use your existing commercial provider once to build your own local alternative. Paste a prompt below and your coding agent will read <a href="/AGENTS.md"><code>https://modelrelay.io/AGENTS.md</code></a>, inspect your running local LLM, install <code>modelrelay-server</code> and <code>modelrelay-worker</code>, and wire up your clients &mdash; without overwriting your current API keys.</p>
+          </div>
+          <div class="agent-links">
+            <a href="/AGENTS.md" class="btn btn-sm">Read AGENTS.md &rarr;</a>
+            <button type="button" class="btn btn-sm btn-secondary" data-copy-target="agents-md-url">Copy AGENTS.md URL</button>
+            <span id="agents-md-url" style="display:none;">https://modelrelay.io/AGENTS.md</span>
+          </div>
+        </div>
+
+        <div class="home-tabs" data-tab-scope="agent-bootstrap">
+          <div class="home-tab-bar">
+            <button type="button" class="home-tab active" data-tab-btn="ab-full">Full Self-Hosted Stack</button>
+            <button type="button" class="home-tab" data-tab-btn="ab-worker">Connect This GPU Server</button>
+            <button type="button" class="home-tab" data-tab-btn="ab-client">Configure Pi / Codex / Claude</button>
+            <button type="button" class="home-tab" data-tab-btn="ab-cli">CLI One-Liners</button>
+          </div>
+
+          <div class="home-panel prompt-panel active" data-tab-pane="ab-full">
+            <button type="button" class="copy-btn" data-copy-target="prompt-full">Copy</button>
+<pre><code id="prompt-full">Read https://modelrelay.io/AGENTS.md and help me bootstrap a complete self-hosted ModelRelay setup alongside my current provider (do not overwrite my existing commercial API keys). Ask me where to run modelrelay-server and my GPU server's local LLM URL (or detect it on this machine), then deploy the relay with TLS, install modelrelay-worker as a persistent service with models=["*"], configure Pi (~/.pi/agent/extensions/modelrelay.ts + auth.json) and/or my installed coding agents with accurate thinking levels and context limits, and verify streaming chat completions end-to-end.</code></pre>
+            <div class="agent-prompt-note">
+              <span>Paste into <strong>Claude Code</strong>, <strong>Codex</strong>, or <strong>Pi</strong> &mdash; ideal when starting from scratch.</span>
+              <span>Reads <code>https://modelrelay.io/AGENTS.md</code></span>
+            </div>
+          </div>
+
+          <div class="home-panel prompt-panel" data-tab-pane="ab-worker">
+            <button type="button" class="copy-btn" data-copy-target="prompt-worker">Copy</button>
+<pre><code id="prompt-worker">Read https://modelrelay.io/AGENTS.md and connect this GPU machine's local LLM server to ModelRelay. Detect my running local backend (llama-server, Ollama, vLLM, LM Studio, or SGLang) and its context window, install modelrelay-worker, ask me for my relay URL and worker secret/API key, configure it as a persistent background service (systemd, launchd, or Docker) with models=["*"], and verify GET /v1/models and a streaming chat completion through the relay.</code></pre>
+            <div class="agent-prompt-note">
+              <span>Paste into an agent running on your <strong>GPU box</strong> &mdash; works with hosted or self-hosted relays.</span>
+              <span>Sets up persistent worker + live model discovery</span>
+            </div>
+          </div>
+
+          <div class="home-panel prompt-panel" data-tab-pane="ab-client">
+            <button type="button" class="copy-btn" data-copy-target="prompt-client">Copy</button>
+<pre><code id="prompt-client">Read https://modelrelay.io/AGENTS.md and configure my installed coding agents (Pi, Codex CLI, and/or Claude Code) on this machine to talk to my ModelRelay endpoint without overwriting my existing commercial providers. Ask me for my ModelRelay URL and API key, configure Pi as a dynamic provider (~/.pi/agent/extensions/modelrelay.ts + merged ~/.pi/agent/auth.json with proper thinking levels and context limits), add a non-destructive Codex provider or claude-local alias if installed, and verify live models respond.</code></pre>
+            <div class="agent-prompt-note">
+              <span>Paste into an agent on your <strong>laptop / workstation</strong> &mdash; keeps your commercial accounts untouched.</span>
+              <span>Merges configs safely with <code>chmod 600</code></span>
+            </div>
+          </div>
+
+          <div class="home-panel" data-tab-pane="ab-cli">
+            <button type="button" class="copy-btn" data-copy-target="prompt-cli">Copy</button>
+<pre><code id="prompt-cli"># Claude Code (using your existing Anthropic setup)
+claude "Read https://modelrelay.io/AGENTS.md and bootstrap my self-hosted ModelRelay server, GPU worker, and client config without overwriting my existing commercial provider."
+
+# OpenAI Codex CLI (using your existing OpenAI setup)
+codex "Read https://modelrelay.io/AGENTS.md and bootstrap my self-hosted ModelRelay server, GPU worker, and client config without overwriting my existing commercial provider."
+
+# Pi Coding Agent (using any existing provider)
+pi "Read https://modelrelay.io/AGENTS.md and bootstrap my self-hosted ModelRelay server, GPU worker, and client config without overwriting my existing commercial provider."</code></pre>
+            <div class="agent-prompt-note">
+              <span>Run any line directly from your shell to kick off an interactive agent session.</span>
+              <span>Works with Claude Code, Codex &amp; Pi</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="agent-pillars">
+          <div class="agent-pillar">
+            <strong>1. Server &amp; GPU Worker Automation</strong>
+            <p>Exact binary URLs, Docker images, <code>modelrelay-server</code> + Caddy/nginx TLS configs, and <code>systemd</code>/<code>launchd</code> worker units.</p>
+          </div>
+          <div class="agent-pillar">
+            <strong>2. Safe Multi-Provider Client Setup</strong>
+            <p>Wires Pi (<code>modelrelay.ts</code> + <code>auth.json</code>), Codex <code>config.toml</code>, and a <code>claude-local</code> alias without touching existing keys.</p>
+          </div>
+          <div class="agent-pillar">
+            <strong>3. Live End-to-End Verification</strong>
+            <p>Guides your agent to test <code>/health</code>, <code>/v1/models</code>, thinking effort, and unbuffered SSE streaming before finishing.</p>
+          </div>
         </div>
       </div>
     </div>
@@ -645,7 +773,7 @@ curl -N https://api.modelrelay.io/v1/chat/completions \
       </div>
     </div>
   </section>
-"#
+"##
     );
 
     let extra_head = format!("{LANDING_JSONLD}<style>{LANDING_CSS}</style>");
