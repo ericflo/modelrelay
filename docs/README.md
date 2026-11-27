@@ -7,9 +7,10 @@ You have GPU boxes running `llama-server` (or Ollama, or vLLM, or anything OpenA
 ModelRelay flips the model: a central proxy receives standard inference requests while worker daemons on your GPU boxes connect *out* to it over WebSocket. The proxy handles queueing, routing, streaming pass-through, and cancellation propagation. Clients see one stable endpoint and never need to know about your hardware.
 
 ```
-  Clients (curl, Claude Code, LiteLLM, Open WebUI, ...)
+  Clients (Pi Coding Agent, curl, ...)
          |
          |  POST /v1/chat/completions
+         |  POST /v1/responses
          |  POST /v1/messages
          v
   +----------------------+
@@ -80,11 +81,14 @@ For more installation options (pre-built binaries, Docker Compose, building from
 
 ## Documentation
 
+- **[API Reference (`api.modelrelay.io`)](api-reference.md)** — Endpoints, auth headers, and `curl` examples
+- **[Pi Coding Agent Setup](pi-setup.md)** — Register ModelRelay as a dynamic provider + `auth.json`
 - **[Architecture](architecture.md)** — System design, component overview, and data flow
 - **[Protocol Walkthrough](protocol-walkthrough.md)** — Wire-level protocol details with examples
 - **[Behavior Contract](behavior-contract.md)** — The exact behavioral guarantees the system provides
 - **[Verification](verification.md)** — Formal TLA+ protocol model, negative controls, bounds, and implementation tests
 - **[Operational Runbook](runbook.md)** — Deployment, configuration, monitoring, and troubleshooting
+- **[TLS Setup](tls.md)** — Terminating TLS with nginx and Caddy
 
 ## Source & Contributing
 

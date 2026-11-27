@@ -8,7 +8,7 @@ use tower_sessions::Session;
 
 use crate::state::CloudState;
 
-use super::csrf;
+use super::{OptionalSession, csrf};
 
 // ─── Helpers shared across handlers ─────────────────────────────────────────
 
@@ -55,7 +55,7 @@ struct ApiKeyRow {
 
 // ─── GET /dashboard ─────────────────────────────────────────────────────────
 
-/// GET /dashboard — show subscription status and API key info.
+/// GET /dashboard — show live relay telemetry, workers, API keys, and Pi/curl quick connect.
 #[allow(clippy::too_many_lines)]
 pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let Some(ref pool) = state.db else {
@@ -75,7 +75,6 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
 
     let csrf_field = csrf::hidden_field(&session).await;
 
-    // Query user info
     let user = sqlx::query_as::<_, UserRow>(
         "SELECT id, email, stripe_customer_id, is_admin FROM users WHERE id = $1",
     )
@@ -99,7 +98,6 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
     };
 
     if user.is_admin {
-        // ── Admin dashboard ──
         let keys = sqlx::query_as::<_, ApiKeyRow>(
             "SELECT id, key_id, raw_key, name, created_at FROM api_keys \
              WHERE user_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC",
@@ -109,18 +107,17 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
         .await
         .unwrap_or_default();
 
-        let html = admin_dashboard_html(&user.email, &keys, &csrf_field);
+        let html = admin_dashboard_html(&user.email, &state.public_relay_url, &keys, &csrf_field);
         Html(modelrelay_web::templates::page_shell_custom(
             "Dashboard",
             "/dashboard",
             &html,
             true,
-            "",
-            "",
+            dashboard_css(),
+            dashboard_shared_js(),
         ))
         .into_response()
     } else {
-        // ── Regular user dashboard ──
         let subscription = sqlx::query_as::<_, SubscriptionRow>(
             "SELECT id, stripe_subscription_id, status, api_key_id, updated_at \
              FROM subscriptions WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1",
@@ -137,7 +134,6 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
             }
         };
 
-        // Load API keys for the user (from the new table)
         let api_key_display: Option<String> = if sub.is_some() {
             sqlx::query_scalar(
                 "SELECT raw_key FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL \
@@ -155,6 +151,7 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
         let has_stripe_customer = user.stripe_customer_id.is_some();
         let html = subscriber_dashboard_html(
             &user.email,
+            &state.public_relay_url,
             sub.as_ref(),
             has_stripe_customer,
             api_key_display.as_deref(),
@@ -165,8 +162,8 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
             "/dashboard",
             &html,
             true,
-            "",
-            "",
+            dashboard_css(),
+            dashboard_shared_js(),
         ))
         .into_response()
     }
@@ -174,7 +171,6 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
 
 // ─── POST /dashboard/billing-portal ─────────────────────────────────────────
 
-/// POST /dashboard/billing-portal — create a Stripe billing portal session and redirect.
 pub async fn billing_portal(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let Some(ref key) = state.stripe_key else {
         return error_page("/dashboard/billing-portal", "Billing not configured").into_response();
@@ -189,7 +185,6 @@ pub async fn billing_portal(session: Session, State(state): State<Arc<CloudState
         Err(r) => return r,
     };
 
-    // Get customer ID
     let customer_id: Option<String> =
         sqlx::query_scalar("SELECT stripe_customer_id FROM users WHERE id = $1")
             .bind(user_id)
@@ -204,7 +199,7 @@ pub async fn billing_portal(session: Session, State(state): State<Arc<CloudState
             "/dashboard/billing-portal",
             "<div class=\"card\"><h2>No billing account</h2>\
              <p>No Stripe customer found for your account.</p>\
-             <p><a href=\"/dashboard\">&larr; Back to dashboard</a></p></div>",
+             <p class=\"back-link\"><a href=\"/dashboard\">&larr; Back to dashboard</a></p></div>",
             true,
         ))
         .into_response();
@@ -268,7 +263,6 @@ pub async fn billing_portal(session: Session, State(state): State<Arc<CloudState
 
 // ─── POST /dashboard/keys/generate ──────────────────────────────────────────
 
-/// POST /dashboard/keys/generate — admin-only: provision a new API key.
 pub async fn keys_generate(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let Some(ref pool) = state.db else {
         return error_page("/dashboard/keys/generate", "Database not available").into_response();
@@ -279,7 +273,6 @@ pub async fn keys_generate(session: Session, State(state): State<Arc<CloudState>
         Err(r) => return r,
     };
 
-    // Verify admin
     let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(pool)
@@ -306,7 +299,6 @@ pub async fn keys_generate(session: Session, State(state): State<Arc<CloudState>
         .into_response();
     };
 
-    // Get user email for key name
     let email: String = match sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_one(pool)
@@ -379,7 +371,6 @@ pub async fn keys_generate(session: Session, State(state): State<Arc<CloudState>
 
 // ─── POST /dashboard/keys/:id/revoke ────────────────────────────────────────
 
-/// POST /dashboard/keys/:id/revoke — admin-only: revoke an API key.
 pub async fn keys_revoke(
     session: Session,
     State(state): State<Arc<CloudState>>,
@@ -395,7 +386,6 @@ pub async fn keys_revoke(
         Err(r) => return r,
     };
 
-    // Verify admin
     let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(pool)
@@ -407,7 +397,6 @@ pub async fn keys_revoke(
         return (StatusCode::FORBIDDEN, "Forbidden").into_response();
     }
 
-    // Look up the key — must belong to this user and not already revoked
     let key_row: Option<(String,)> = sqlx::query_as(
         "SELECT key_id FROM api_keys WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
     )
@@ -422,8 +411,6 @@ pub async fn keys_revoke(
         return error_page(&path, "API key not found or already revoked.").into_response();
     };
 
-    // Revoke on the relay server BEFORE marking revoked in cloud DB so a
-    // transient server error never hides an still-active key from the admin UI.
     if let (Some(admin_url), Some(admin_token)) = (&state.admin_url, &state.admin_token) {
         if let Err(e) =
             super::webhook::revoke_api_key(&state.http_client, admin_url, admin_token, &key_id)
@@ -453,7 +440,6 @@ pub async fn keys_revoke(
     Redirect::to("/dashboard").into_response()
 }
 
-/// Check whether `user_id` is an administrator in the cloud database.
 async fn user_is_admin(state: &CloudState, user_id: uuid::Uuid) -> bool {
     let Some(ref pool) = state.db else {
         return false;
@@ -468,10 +454,7 @@ async fn user_is_admin(state: &CloudState, user_id: uuid::Uuid) -> bool {
 }
 
 // ─── GET /dashboard/workers ─────────────────────────────────────────────────
-//
-// Admin-only proxy endpoint for fleet-wide worker status via the admin API.
 
-/// GET /dashboard/workers — admin-only proxy to admin API `/admin/workers`.
 pub async fn workers(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let user_id = match require_user(&session).await {
         Ok(id) => id,
@@ -529,11 +512,7 @@ pub async fn workers(session: Session, State(state): State<Arc<CloudState>>) -> 
 }
 
 // ─── GET /dashboard/stats ───────────────────────────────────────────────────
-//
-// Proxy endpoint: admins receive full queue depth breakdown; non-admin users
-// receive only aggregate totals to avoid leaking other tenants' provider names.
 
-/// GET /dashboard/stats — proxy to admin API `/admin/stats`.
 pub async fn stats(session: Session, State(state): State<Arc<CloudState>>) -> Response {
     let user_id = match require_user(&session).await {
         Ok(id) => id,
@@ -596,37 +575,41 @@ pub async fn stats(session: Session, State(state): State<Arc<CloudState>>) -> Re
     }
 }
 
-// ─── GET /setup ─────────────────────────────────────────────────────────────
-
-/// GET /setup — serve the setup wizard with cloud context pre-filled for
-/// authenticated users (public relay URL, API key, proxy poll endpoint).
-pub async fn setup(session: Session, State(state): State<Arc<CloudState>>) -> Response {
-    let cloud_config = if let Ok(user_id) = require_user(&session).await {
-        let pool = state.db.as_ref();
-        let api_key: Option<String> = if let Some(pool) = pool {
-            sqlx::query_scalar(
-                "SELECT raw_key FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL \
-                 ORDER BY created_at DESC LIMIT 1",
-            )
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-        } else {
-            None
-        };
-
-        Some(modelrelay_web::templates::CloudWizardConfig {
-            server_url: state.public_relay_url.clone(),
-            worker_secret: api_key.clone(),
-            api_key,
-            workers_poll_url: "/dashboard/workers".to_string(),
-        })
+async fn load_cloud_config(
+    session: Option<Session>,
+    state: &CloudState,
+) -> Option<modelrelay_web::templates::CloudWizardConfig> {
+    let session = session?;
+    let user_id = require_user(&session).await.ok()?;
+    let api_key: Option<String> = if let Some(ref pool) = state.db {
+        sqlx::query_scalar(
+            "SELECT raw_key FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
     } else {
         None
     };
 
+    Some(modelrelay_web::templates::CloudWizardConfig {
+        server_url: state.public_relay_url.clone(),
+        worker_secret: api_key.clone(),
+        api_key,
+        workers_poll_url: "/dashboard/workers".to_string(),
+    })
+}
+
+// ─── GET /setup ─────────────────────────────────────────────────────────────
+
+pub async fn setup(
+    OptionalSession(session): OptionalSession,
+    State(state): State<Arc<CloudState>>,
+) -> Response {
+    let cloud_config = load_cloud_config(session, &state).await;
     Html(modelrelay_web::templates::setup_wizard_page_with_config(
         cloud_config.as_ref(),
     ))
@@ -635,34 +618,11 @@ pub async fn setup(session: Session, State(state): State<Arc<CloudState>>) -> Re
 
 // ─── GET /integrate ──────────────────────────────────────────────────────────
 
-/// GET /integrate — show integration snippets for tools, agents, and SDKs.
-pub async fn integrate(session: Session, State(state): State<Arc<CloudState>>) -> Response {
-    let cloud_config = if let Ok(user_id) = require_user(&session).await {
-        let pool = state.db.as_ref();
-        let api_key: Option<String> = if let Some(pool) = pool {
-            sqlx::query_scalar(
-                "SELECT raw_key FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL \
-                 ORDER BY created_at DESC LIMIT 1",
-            )
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-        } else {
-            None
-        };
-
-        Some(modelrelay_web::templates::CloudWizardConfig {
-            server_url: state.public_relay_url.clone(),
-            worker_secret: api_key.clone(),
-            api_key,
-            workers_poll_url: "/dashboard/workers".to_string(),
-        })
-    } else {
-        None
-    };
-
+pub async fn integrate(
+    OptionalSession(session): OptionalSession,
+    State(state): State<Arc<CloudState>>,
+) -> Response {
+    let cloud_config = load_cloud_config(session, &state).await;
     Html(modelrelay_web::templates::integrate_page_with_config(
         cloud_config.as_ref(),
     ))
@@ -676,13 +636,9 @@ fn error_page(path: &str, message: &str) -> Html<String> {
         "Error",
         path,
         &format!(
-            "<div class=\"card\" style=\"border-left: 3px solid #f87171;\">\
-             <h2 style=\"display:flex;align-items:center;gap:10px;\">\
-             <svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#f87171\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
-             <circle cx=\"12\" cy=\"12\" r=\"10\"/><line x1=\"15\" y1=\"9\" x2=\"9\" y2=\"15\"/><line x1=\"9\" y1=\"9\" x2=\"15\" y2=\"15\"/></svg>\
-             Something went wrong</h2>\
+            "<div class=\"card\" style=\"border-left: 3px solid var(--danger);\">\
+             <h2>Something went wrong</h2>\
              <p>{}</p>\
-             <p style=\"margin-top:16px;color:#8b949e;font-size:0.9rem;\">Try refreshing the page or returning to the dashboard.</p>\
              <p class=\"back-link\"><a href=\"/dashboard\">&larr; Back to dashboard</a></p></div>",
             html_escape(message)
         ),
@@ -691,12 +647,8 @@ fn error_page(path: &str, message: &str) -> Html<String> {
 }
 
 fn no_db_html() -> String {
-    "<div class=\"card\" style=\"border-left: 3px solid #fbbf24;\">\
-     <h2 style=\"display:flex;align-items:center;gap:10px;\">\
-     <svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#fbbf24\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
-     <path d=\"M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z\"/>\
-     <line x1=\"12\" y1=\"9\" x2=\"12\" y2=\"13\"/><line x1=\"12\" y1=\"17\" x2=\"12.01\" y2=\"17\"/></svg>\
-     Dashboard Unavailable</h2>\
+    "<div class=\"card\" style=\"border-left: 3px solid var(--warning);\">\
+     <h2>Dashboard Unavailable</h2>\
      <p>The database connection is temporarily unavailable. Please check back shortly.</p></div>"
         .to_string()
 }
@@ -711,308 +663,384 @@ fn status_badge(status: &str) -> &'static str {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+fn mask_key(raw: &str) -> String {
+    if raw.len() <= 14 {
+        return "••••••••••••".to_string();
+    }
+    let prefix = &raw[..10];
+    let suffix = &raw[raw.len() - 4..];
+    format!("{prefix}••••••••{suffix}")
+}
+
 fn dashboard_css() -> &'static str {
-    "<style>\
-    /* ── Dashboard Layout ── */\
-    .dash-header { margin-bottom: 32px; }\
-    .dash-header h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 4px; }\
-    .dash-header p { color: #8b949e; font-size: 0.9rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }\
-    .dash-header strong { color: #e6edf3; }\
-    .dash-section-label {\
-      font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;\
-      text-transform: uppercase; color: #484f58; margin-bottom: 12px;\
-    }\
-    .dash-grid {\
-      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 32px;\
-    }\
-    .dash-grid .card { margin-bottom: 0; }\
-    \
-    /* ── Skeleton Loading ── */\
-    .dash-skel {\
-      background: linear-gradient(90deg, #161b22 25%, #1c2129 50%, #161b22 75%);\
-      background-size: 200% 100%; animation: dash-pulse 1.5s ease-in-out infinite;\
-      border-radius: 6px; height: 14px; margin-bottom: 10px;\
-    }\
-    .dash-skel:last-child { width: 60%; margin-bottom: 0; }\
-    .dash-skel-w80 { width: 80%; }\
-    .dash-skel-w70 { width: 70%; }\
-    .dash-skel-w50 { width: 50%; }\
-    .dash-skel-w45 { width: 45%; }\
-    @keyframes dash-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }\
-    \
-    /* ── Card Variants ── */\
-    .card--accent { border-left: 3px solid #7c3aed; }\
-    .card--empty {\
-      border: 1px dashed #30363d; background: #0d1117;\
-      text-align: center; padding: 48px 32px;\
-    }\
-    .card--empty h2 { margin-bottom: 8px; }\
-    .card--empty p { color: #8b949e; margin-bottom: 20px; }\
-    \
-    /* ── API Key Display ── */\
-    .key-wrap { position: relative; margin-top: 12px; }\
-    .key-wrap .key-display { padding-right: 90px; }\
-    .copy-btn {\
-      position: absolute; top: 8px; right: 8px;\
-      padding: 6px 14px; font-size: 0.8rem;\
-      background: #30363d; color: #e6edf3;\
-      border: 1px solid #3d444d; border-radius: 6px;\
-      cursor: pointer; font-family: inherit; font-weight: 600;\
-      transition: background 0.15s, border-color 0.15s;\
-    }\
-    .copy-btn:hover { background: #3d444d; border-color: #484f58; }\
-    .copy-btn.copied { background: #064e3b; border-color: #34d399; color: #34d399; }\
-    .key-actions {\
-      margin-top: 14px; display: flex; gap: 16px; flex-wrap: wrap;\
-    }\
-    .key-actions a { color: #7c3aed; font-size: 0.9rem; font-weight: 600; }\
-    \
-    /* ── Workers Table ── */\
-    .workers-table {\
-      width: 100%; margin-top: 12px; border-collapse: collapse;\
-    }\
-    .workers-table th {\
-      font-weight: 600; color: #484f58;\
-      border-bottom: 1px solid #21262d;\
-      padding: 6px 12px 6px 0; text-align: left;\
-      font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em;\
-    }\
-    .workers-table td { padding: 10px 12px 10px 0; border-bottom: 1px solid #161b22; color: #c9d1d9; }\
-    .workers-table .worker-models { font-family: monospace; font-size: 0.85em; color: #8b949e; }\
-    \
-    /* ── Quick Links ── */\
-    .dash-links {\
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));\
-      gap: 16px; margin-bottom: 32px;\
-    }\
-    .dash-link {\
-      margin-bottom: 0; text-decoration: none;\
-      transition: border-color 0.2s, transform 0.15s;\
-    }\
-    .dash-link:hover { border-color: #30363d; text-decoration: none; transform: translateY(-1px); }\
-    .dash-link h3 { font-size: 0.95rem; margin-bottom: 4px; color: #e6edf3; }\
-    .dash-link p { color: #8b949e; font-size: 0.85rem; margin: 0; }\
-    \
-    /* ── Admin Keys Table ── */\
-    .keys-table { width: 100%; border-collapse: collapse; }\
-    .keys-table th {\
-      font-weight: 600; color: #484f58;\
-      border-bottom: 1px solid #21262d;\
-      padding: 8px 12px 8px 0; text-align: left;\
-      font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em;\
-    }\
-    .keys-table td { padding: 10px 12px 10px 0; border-bottom: 1px solid #161b22; }\
-    .keys-table td:last-child { text-align: right; }\
-    .keys-table code { font-size: 0.8em; word-break: break-all; color: #7c3aed; }\
-    .keys-date { color: #484f58; white-space: nowrap; font-size: 0.85em; }\
-    \
-    /* ── Buttons ── */\
-    .btn-revoke {\
-      background: transparent; padding: 4px 12px; font-size: 0.8rem;\
-      border: 1px solid #da3633; color: #f87171;\
-      border-radius: 6px; cursor: pointer; font-family: inherit; font-weight: 600;\
-      transition: background 0.15s;\
-    }\
-    .btn-revoke:hover { background: rgba(248,113,113,0.08); }\
-    .btn-generate { margin-top: 16px; }\
-    .billing-link {\
-      background: none; border: none; color: #7c3aed; cursor: pointer;\
-      font-size: 0.9rem; font-weight: 600; font-family: inherit; padding: 0;\
-    }\
-    .billing-link:hover { text-decoration: underline; }\
-    \
-    /* ── Misc ── */\
-    .empty-msg { color: #484f58; font-size: 0.9rem; }\
-    .connect-link { margin-top: 12px; }\
-    .connect-link a { color: #7c3aed; font-size: 0.9rem; font-weight: 600; }\
-    .per-model-info { margin-top: 8px; color: #484f58; font-size: 0.85em; }\
-    .relay-error { margin-top: 8px; color: #484f58; }\
-    .provisioned-msg { margin-top: 12px; color: #8b949e; }\
-    .billing-form { margin-top: 12px; }\
-    \
-    /* ── Responsive ── */\
-    @media (max-width: 768px) {\
-      .dash-grid { grid-template-columns: 1fr; }\
-      .dash-links { grid-template-columns: 1fr; }\
-      .key-wrap .key-display { padding-right: 16px; font-size: 0.85rem; }\
-      .copy-btn { position: static; display: block; margin-top: 10px; width: 100%; text-align: center; }\
-      .card--empty { padding: 32px 20px; }\
-      .workers-table th:nth-child(3), .workers-table td:nth-child(3) { display: none; }\
-      .keys-table th:nth-child(3), .keys-table td:nth-child(3) { display: none; }\
-    }\
-    @media (max-width: 480px) {\
-      .dash-header h1 { font-size: 1.25rem; }\
-      .dash-section-label { font-size: 0.65rem; }\
-      .key-wrap .key-display { font-size: 0.78rem; padding: 10px 12px; }\
-      .copy-btn { padding: 8px 12px; font-size: 0.78rem; }\
-      .key-actions { flex-direction: column; gap: 10px; }\
-      .workers-table th, .workers-table td { padding: 6px 8px 6px 0; font-size: 0.85em; }\
-      .keys-table th, .keys-table td { padding: 6px 8px 6px 0; font-size: 0.85em; }\
-      .btn-revoke { padding: 4px 8px; font-size: 0.75em; }\
-      .dash-links { gap: 12px; }\
-      .dash-link h3 { font-size: 0.9rem; }\
-      .dash-link p { font-size: 0.8rem; }\
-      .card--empty { padding: 24px 14px; }\
-    }\
+    r"<style>
+    .dash-head {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      gap: 16px; flex-wrap: wrap; margin-bottom: 24px;
+    }
+    .dash-head h1 { font-size: 1.9rem; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 4px; color: var(--text-strong); }
+    .dash-user { color: var(--text-secondary); font-size: 0.9rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .dash-user strong { color: var(--text-strong); }
+    .dash-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 28px; }
+    .kpi {
+      background: var(--bg-surface); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: 16px 18px;
+      box-shadow: var(--shadow-card);
+    }
+    .kpi-label {
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 6px;
+    }
+    .kpi-value {
+      font-size: 1.35rem; font-weight: 700; color: var(--text-strong);
+      font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .kpi-endpoint { font-family: var(--font-mono); font-size: 0.86rem; color: var(--cyan); word-break: break-all; }
+
+    .sec-label {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--text-muted); margin-bottom: 10px;
+    }
+    .dash-grid { display: grid; grid-template-columns: 1.25fr 0.75fr; gap: 18px; margin-bottom: 26px; }
+    .dash-grid .card { margin-bottom: 0; }
+
+    .card-head {
+      display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .card-head h2 { margin: 0; font-size: 1.08rem; font-weight: 700; color: var(--text-strong); display: flex; align-items: center; gap: 8px; }
+
+    .card--accent { border-left: 3px solid var(--accent); }
+    .card--empty { border: 1px dashed var(--border-strong); background: var(--bg-subtle); text-align: center; padding: 36px 24px; box-shadow: none; }
+
+    .key-row-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+    .key-code-box {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+      padding: 11px 14px; background: var(--bg-input); border: 1px solid var(--border);
+      border-radius: var(--radius-md); font-family: var(--font-mono); font-size: 0.84rem;
+      color: var(--accent-fg); word-break: break-all;
+    }
+
+    .keys-table, .workers-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    .keys-table th, .workers-table th {
+      text-align: left; font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.07em; color: var(--text-muted);
+      padding: 8px 10px 9px 0; border-bottom: 1px solid var(--border);
+    }
+    .keys-table td, .workers-table td {
+      padding: 11px 10px 11px 0; border-bottom: 1px solid var(--border);
+      color: var(--text-primary); vertical-align: middle;
+    }
+    .keys-table tr:last-child td, .workers-table tr:last-child td { border-bottom: none; }
+    .keys-date { color: var(--text-muted); white-space: nowrap; font-size: 0.82rem; }
+    .key-cell { font-family: var(--font-mono); font-size: 0.8rem; color: var(--accent-fg); }
+    .key-cell-btns { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+
+    .model-pill {
+      display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0; border-radius: 5px;
+      background: var(--accent-soft); border: 1px solid var(--accent-border);
+      font-family: var(--font-mono); font-size: 0.76rem; color: var(--accent-fg);
+    }
+    .load-wrap { display: inline-flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; font-size: 0.82rem; color: var(--text-secondary); }
+    .load-track { width: 58px; height: 6px; border-radius: 999px; background: var(--bg-elevated); overflow: hidden; }
+    .load-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--cyan)); border-radius: 999px; }
+
+    .quick-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+    .quick-card {
+      display: block; padding: 16px 18px; background: var(--bg-surface);
+      border: 1px solid var(--border); border-radius: var(--radius-md);
+      text-decoration: none; transition: border-color 0.15s, transform 0.15s;
+      box-shadow: var(--shadow-card);
+    }
+    .quick-card:hover { border-color: var(--accent-border); transform: translateY(-2px); text-decoration: none; }
+    .quick-card h3 { font-size: 0.92rem; color: var(--text-strong); margin-bottom: 4px; }
+    .quick-card p { font-size: 0.82rem; color: var(--text-secondary); margin: 0; }
+
+    .dash-skel {
+      background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-elevated) 50%, var(--bg-surface) 75%);
+      background-size: 200% 100%; animation: dash-pulse 1.4s ease-in-out infinite;
+      border-radius: 6px; height: 14px; margin-bottom: 10px;
+    }
+    .dash-skel-w70 { width: 70%; }
+    .dash-skel-w45 { width: 45%; }
+    @keyframes dash-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    .billing-link {
+      background: none; border: none; color: var(--accent-bright); cursor: pointer;
+      font-size: 0.88rem; font-weight: 600; font-family: inherit; padding: 0; margin-top: 12px;
+    }
+    .billing-link:hover { text-decoration: underline; }
+    .empty-msg { color: var(--text-muted); font-size: 0.88rem; }
+
+    @media (max-width: 860px) {
+      .kpi-row, .quick-grid { grid-template-columns: repeat(2, 1fr); }
+      .dash-grid { grid-template-columns: 1fr; }
+      .keys-table, .workers-table { display: block; overflow-x: auto; }
+    }
+    @media (max-width: 520px) {
+      .kpi-row, .quick-grid { grid-template-columns: 1fr; }
+    }
     </style>"
 }
 
-#[allow(clippy::too_many_lines)]
-fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> String {
-    let email_escaped = html_escape(email);
-    let mut out = String::from(dashboard_css());
+fn dashboard_shared_js() -> &'static str {
+    r"<script>
+(function() {
+  document.addEventListener('click', function(e) {
+    var toggle = e.target.closest('[data-toggle-key]');
+    if (!toggle) return;
+    var target = document.getElementById(toggle.getAttribute('data-toggle-key'));
+    if (!target) return;
+    var revealed = target.getAttribute('data-revealed') === 'true';
+    target.textContent = revealed ? target.getAttribute('data-masked') : target.getAttribute('data-full');
+    target.setAttribute('data-revealed', revealed ? 'false' : 'true');
+    toggle.textContent = revealed ? 'Reveal' : 'Hide';
+  });
+})();
+</script>"
+}
 
-    // ── Header ──
+#[allow(clippy::too_many_lines)]
+fn admin_dashboard_html(
+    email: &str,
+    relay_url: &str,
+    keys: &[ApiKeyRow],
+    csrf_field: &str,
+) -> String {
+    let email_escaped = html_escape(email);
+    let relay_escaped = html_escape(relay_url);
+    let key_count = keys.len();
+    let first_key = keys.first().map(|k| k.raw_key.as_str());
+
+    let mut out = String::new();
+
     let _ = write!(
         out,
-        "<div class=\"dash-header\">\
-           <h1>Dashboard</h1>\
-           <p>Signed in as <strong>{email_escaped}</strong> \
-              <span class=\"badge badge-active\">Admin</span></p>\
-         </div>"
+        r#"<div class="dash-head">
+          <div>
+            <h1>Dashboard</h1>
+            <div class="dash-user">Signed in as <strong>{email_escaped}</strong> <span class="badge badge-active">Admin</span></div>
+          </div>
+          <div class="dash-actions">
+            <a href="/integrate#pi" class="btn btn-sm">Pi &amp; API Setup</a>
+            <a href="/setup" class="btn btn-sm btn-secondary">+ Connect Worker</a>
+            <a href="/downloads" class="btn btn-sm btn-secondary">Downloads</a>
+          </div>
+        </div>
+
+        <div class="kpi-row">
+          <div class="kpi">
+            <div class="kpi-label">Relay Endpoint</div>
+            <div class="kpi-value">
+              <span class="kpi-endpoint">{relay_escaped}</span>
+              <button type="button" class="copy-btn" data-copy-text="{relay_escaped}">Copy</button>
+            </div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Connected Workers</div>
+            <div class="kpi-value" id="kpi-workers">&mdash;</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Queue Depth</div>
+            <div class="kpi-value" id="kpi-queue">&mdash;</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Active API Keys</div>
+            <div class="kpi-value">{key_count}</div>
+          </div>
+        </div>"#
     );
 
     // ── Section: API Keys ──
     out.push_str(
-        "<div class=\"dash-section-label\">API Keys</div>\
-         <div class=\"card\" style=\"margin-bottom:32px;\">",
+        r#"<div class="sec-label">API Keys</div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Your Keys</h2>
+            <form method="POST" action="/dashboard/keys/generate" style="display:inline;">"#,
+    );
+    let _ = write!(
+        out,
+        r#"{csrf_field}<button type="submit" class="btn btn-sm">+ Generate New Key</button></form></div>"#
     );
 
     if keys.is_empty() {
-        out.push_str("<p class=\"empty-msg\">No active API keys. Generate one to get started.</p>");
+        out.push_str("<p class=\"empty-msg\">No active API keys yet. Generate one above to connect workers and Pi Coding Agent.</p>");
     } else {
         out.push_str(
             "<table class=\"keys-table\">\
-             <tr><th>Name</th><th>Key</th><th>Created</th><th></th></tr>",
+             <thead><tr><th>Name</th><th>Key</th><th>Created</th><th style=\"text-align:right;\">Actions</th></tr></thead><tbody>",
         );
-        for key in keys {
+        for (idx, key) in keys.iter().enumerate() {
             let name_escaped = html_escape(&key.name);
             let key_escaped = html_escape(&key.raw_key);
+            let masked = html_escape(&mask_key(&key.raw_key));
             let created = key.created_at.format("%b %d, %Y").to_string();
+            let auth_snippet = html_escape(&format!(
+                "{{\n  \"modelrelay\": {{\n    \"type\": \"api_key\",\n    \"key\": \"{}\"\n  }}\n}}",
+                key.raw_key
+            ));
             let _ = write!(
                 out,
-                "<tr>\
-                   <td>{name_escaped}</td>\
-                   <td><code>{key_escaped}</code></td>\
-                   <td class=\"keys-date\">{created}</td>\
-                   <td>\
-                     <form method=\"POST\" action=\"/dashboard/keys/{}/revoke\" style=\"display:inline\">\
-                       {csrf_field}\
-                       <button type=\"submit\" class=\"btn-revoke\" \
-                         onclick=\"return confirm('Revoke this API key? This cannot be undone.')\">\
-                         Revoke\
-                       </button>\
-                     </form>\
-                   </td>\
-                 </tr>",
+                r#"<tr>
+                  <td>{name_escaped}</td>
+                  <td><span class="key-cell" id="adm-key-{idx}" data-masked="{masked}" data-full="{key_escaped}" data-revealed="false">{masked}</span></td>
+                  <td class="keys-date">{created}</td>
+                  <td>
+                    <div class="key-cell-btns">
+                      <button type="button" class="copy-btn" data-toggle-key="adm-key-{idx}">Reveal</button>
+                      <button type="button" class="copy-btn" data-copy-text="{key_escaped}">Copy Key</button>
+                      <button type="button" class="copy-btn" data-copy-text="{auth_snippet}">Pi auth.json</button>
+                      <form method="POST" action="/dashboard/keys/{}/revoke" style="display:inline">
+                        {csrf_field}
+                        <button type="submit" class="btn btn-sm btn-danger"
+                          onclick="return confirm('Revoke this API key? This cannot be undone.')">
+                          Revoke
+                        </button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>"#,
                 key.id,
             );
         }
-        out.push_str("</table>");
+        out.push_str("</tbody></table>");
     }
+    out.push_str("</div>");
 
+    // ── Section: Workers & Live Telemetry ──
     let _ = write!(
         out,
-        "<div class=\"btn-generate\">\
-           <form method=\"POST\" action=\"/dashboard/keys/generate\">\
-             {csrf_field}\
-             <button type=\"submit\" class=\"btn\">Generate New Key</button>\
-           </form>\
-         </div>\
-       </div>"
+        r#"<div class="sec-label">Fleet &amp; Telemetry</div>
+        <div class="dash-grid">
+          <div class="card">
+            <div class="card-head">
+              <h2>Connected Workers</h2>
+              <a href="/setup" style="font-size:0.84rem;font-weight:600;">+ Add machine &rarr;</a>
+            </div>
+            <div id="admin-workers">
+              <div class="dash-skel dash-skel-w70"></div>
+              <div class="dash-skel dash-skel-w45"></div>
+            </div>
+            <script>
+              (function(){{
+                function pollWorkers(){{
+                  fetch('/dashboard/workers',{{credentials:'same-origin'}})
+                    .then(function(r){{return r.json();}})
+                    .then(function(d){{
+                      var el=document.getElementById('admin-workers');
+                      el.textContent='';
+                      var ws=d.workers||[];
+                      var kpiW=document.getElementById('kpi-workers');
+                      if(kpiW){{kpiW.textContent=String(ws.length);kpiW.style.color=ws.length>0?'var(--success)':'var(--warning)';}}
+                      if(ws.length===0){{
+                        var wrap=document.createElement('div');
+                        wrap.className='card card--empty';
+                        wrap.style.marginBottom='0';
+                        var p=document.createElement('p');
+                        p.textContent='No GPU workers connected right now. Launch the Desktop app or run modelrelay-worker.';
+                        p.style.marginBottom='14px';
+                        var a=document.createElement('a');
+                        a.href='/downloads'; a.className='btn btn-sm'; a.textContent='Download Desktop App \u2192';
+                        wrap.appendChild(p); wrap.appendChild(a);
+                        el.appendChild(wrap);
+                        return;
+                      }}
+                      var tbl=document.createElement('table');
+                      tbl.className='workers-table';
+                      var thead=document.createElement('thead');
+                      var hr=document.createElement('tr');
+                      ['Worker','Models','Load','Status'].forEach(function(col){{var th=document.createElement('th');th.textContent=col;hr.appendChild(th);}});
+                      thead.appendChild(hr); tbl.appendChild(thead);
+                      var tbody=document.createElement('tbody');
+                      ws.forEach(function(w){{
+                        var tr=document.createElement('tr');
+                        var tdName=document.createElement('td');
+                        tdName.textContent=w.worker_name||w.worker_id||'worker';
+                        var tdModels=document.createElement('td');
+                        (w.models||[]).forEach(function(m){{
+                          var sp=document.createElement('span');
+                          sp.className='model-pill';
+                          sp.textContent=m==='*'?'All models':m;
+                          tdModels.appendChild(sp);
+                        }});
+                        var tdLoad=document.createElement('td');
+                        var inflight=w.in_flight_count||0, maxc=w.max_concurrent||0;
+                        var pct=maxc?Math.min(100,Math.round((inflight/maxc)*100)):0;
+                        var lw=document.createElement('span'); lw.className='load-wrap';
+                        var lt=document.createElement('span'); lt.className='load-track';
+                        var lf=document.createElement('span'); lf.className='load-fill'; lf.style.width=pct+'%';
+                        lt.appendChild(lf); lw.appendChild(lt);
+                        lw.appendChild(document.createTextNode(inflight+'/'+maxc));
+                        tdLoad.appendChild(lw);
+                        var tdSt=document.createElement('td');
+                        var b=document.createElement('span');
+                        b.className=w.is_draining?'badge badge-warn':'badge badge-active';
+                        b.textContent=w.is_draining?'Draining':'Active';
+                        tdSt.appendChild(b);
+                        tr.appendChild(tdName); tr.appendChild(tdModels); tr.appendChild(tdLoad); tr.appendChild(tdSt);
+                        tbody.appendChild(tr);
+                      }});
+                      tbl.appendChild(tbody);
+                      el.appendChild(tbl);
+                    }})
+                    .catch(function(){{
+                      var el=document.getElementById('admin-workers');
+                      el.textContent='';
+                      var p=document.createElement('p');
+                      p.className='empty-msg';
+                      p.textContent='Could not load worker status.';
+                      el.appendChild(p);
+                    }});
+                }}
+                function pollStats(){{
+                  fetch('/dashboard/stats',{{credentials:'same-origin'}})
+                    .then(function(r){{return r.json();}})
+                    .then(function(d){{
+                      var qd=d.queue_depth||{{}};
+                      var total=0;
+                      Object.keys(qd).forEach(function(k){{total+=Number(qd[k])||0;}});
+                      var kpiQ=document.getElementById('kpi-queue');
+                      if(kpiQ) kpiQ.textContent=String(total);
+                    }}).catch(function(){{}});
+                }}
+                pollWorkers(); pollStats();
+                setInterval(function(){{pollWorkers();pollStats();}}, 5000);
+              }})();
+            </script>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>Account</h2></div>
+            <table class="info-table" style="margin-top:0;">
+              <tr><td>Email</td><td>{email_escaped}</td></tr>
+              <tr><td>Role</td><td>Administrator</td></tr>
+              <tr><td>Endpoint</td><td><code>{relay_escaped}</code></td></tr>
+            </table>
+          </div>
+        </div>"#
     );
 
-    // ── Section: System ──
-    let _ = write!(
-        out,
-        "<div class=\"dash-section-label\">System</div>\
-         <div class=\"dash-grid\">\
-           <div class=\"card\">\
-             <h2>Workers</h2>\
-             <div id=\"admin-workers\">\
-               <div class=\"dash-skel dash-skel-w70\"></div>\
-               <div class=\"dash-skel dash-skel-w45\"></div>\
-             </div>\
-             <script>\
-               (function(){{\
-                 function poll(){{\
-                   fetch('/dashboard/workers',{{credentials:'same-origin'}})\
-                     .then(function(r){{return r.json();}})\
-                     .then(function(d){{\
-                       var el=document.getElementById('admin-workers');\
-                       el.textContent='';\
-                       var ws=d.workers||[];\
-                       if(ws.length===0){{\
-                         var p=document.createElement('p');\
-                         p.className='empty-msg';\
-                         p.appendChild(document.createTextNode('No workers connected. '));\
-                         var a=document.createElement('a');\
-                         a.href='/setup';\
-                         a.textContent='Set up a worker \u{2192}';\
-                         p.appendChild(a);\
-                         el.appendChild(p);\
-                         return;\
-                       }}\
-                       var tbl=document.createElement('table');\
-                       tbl.className='workers-table';\
-                       var hr=document.createElement('tr');\
-                       ['Name','Models','Load'].forEach(function(col){{var th=document.createElement('th');th.textContent=col;hr.appendChild(th);}});\
-                       tbl.appendChild(hr);\
-                       for(var i=0;i<ws.length;i++){{\
-                         var w=ws[i];\
-                         var tr=document.createElement('tr');\
-                         var tdName=document.createElement('td');\
-                         tdName.textContent=w.worker_name||w.worker_id||'worker';\
-                         var tdModels=document.createElement('td');\
-                         tdModels.className='worker-models';\
-                         tdModels.textContent=(w.models||[]).join(', ');\
-                         var tdLoad=document.createElement('td');\
-                         tdLoad.textContent=(w.in_flight_count||0)+'/'+(w.max_concurrent||0);\
-                         tr.appendChild(tdName);tr.appendChild(tdModels);tr.appendChild(tdLoad);\
-                         tbl.appendChild(tr);\
-                       }}\
-                       el.appendChild(tbl);\
-                       var linkDiv=document.createElement('div');\
-                       linkDiv.className='connect-link';\
-                       var addA=document.createElement('a');\
-                       addA.href='/setup';\
-                       addA.textContent='+ Connect another machine';\
-                       linkDiv.appendChild(addA);\
-                       el.appendChild(linkDiv);\
-                     }})\
-                     .catch(function(){{\
-                       var el=document.getElementById('admin-workers');\
-                       el.textContent='';\
-                       var p=document.createElement('p');\
-                       p.className='empty-msg';\
-                       p.textContent='Could not load worker status.';\
-                       el.appendChild(p);\
-                     }});\
-                 }}\
-                 poll();\
-                 setInterval(poll,5000);\
-               }})();\
-             </script>\
-           </div>\
-           <div class=\"card\">\
-             <h2>Account</h2>\
-             <table class=\"info-table\" style=\"margin-top:8px\">\
-               <tr><td>Email</td><td>{email_escaped}</td></tr>\
-               <tr><td>Role</td><td>Administrator</td></tr>\
-             </table>\
-           </div>\
-         </div>"
-    );
-
-    // ── Onboarding CTA (only when no keys) ──
-    if keys.is_empty() {
-        out.push_str(
-            "<div class=\"card card--accent\">\
-               <h2>Get Started</h2>\
-               <p>Generate an API key above, then connect your first worker machine.</p>\
-               <p style=\"margin-top:16px;\"><a href=\"/setup\" class=\"btn\">Set Up a Worker &rarr;</a></p>\
-             </div>",
+    // ── Quick Connect Strip ──
+    if let Some(key) = first_key {
+        let curl_cmd = html_escape(&format!(
+            "curl {relay_url}/v1/models \\\n  -H \"Authorization: Bearer {key}\""
+        ));
+        let _ = write!(
+            out,
+            r#"<div class="sec-label">Quick Verify</div>
+            <div class="card">
+              <div class="card-head">
+                <h2>Test <code>{relay_escaped}</code> with curl</h2>
+                <a href="/integrate#pi" style="font-size:0.84rem;font-weight:600;">Set up Pi Coding Agent &rarr;</a>
+              </div>
+              <div class="code-shell" style="margin:0;">
+                <div class="code-shell-header"><span>GET /v1/models</span><button type="button" class="copy-btn" data-copy-target="dash-curl-adm">Copy</button></div>
+                <pre><code id="dash-curl-adm">{curl_cmd}</code></pre>
+              </div>
+            </div>"#
         );
     }
 
@@ -1022,116 +1050,199 @@ fn admin_dashboard_html(email: &str, keys: &[ApiKeyRow], csrf_field: &str) -> St
 #[allow(clippy::too_many_lines)]
 fn subscriber_dashboard_html(
     email: &str,
+    relay_url: &str,
     sub: Option<&SubscriptionRow>,
     has_stripe_customer: bool,
     api_key: Option<&str>,
     csrf_field: &str,
 ) -> String {
     let email_escaped = html_escape(email);
-    let mut out = String::from(dashboard_css());
+    let relay_escaped = html_escape(relay_url);
+    let mut out = String::new();
 
-    // ── Header ──
+    let sub_pill = sub.map_or("<span class=\"badge\">No Plan</span>", |s| {
+        status_badge(&s.status)
+    });
+
     let _ = write!(
         out,
-        "<div class=\"dash-header\">\
-           <h1>Dashboard</h1>\
-           <p>Signed in as <strong>{email_escaped}</strong></p>\
-         </div>"
+        r#"<div class="dash-head">
+          <div>
+            <h1>Dashboard</h1>
+            <div class="dash-user">Signed in as <strong>{email_escaped}</strong> {sub_pill}</div>
+          </div>
+          <div class="dash-actions">
+            <a href="/integrate#pi" class="btn btn-sm">Pi &amp; API Setup</a>
+            <a href="/setup" class="btn btn-sm btn-secondary">+ Connect Worker</a>
+            <a href="/downloads" class="btn btn-sm btn-secondary">Downloads</a>
+          </div>
+        </div>
+
+        <div class="kpi-row">
+          <div class="kpi">
+            <div class="kpi-label">Relay Endpoint</div>
+            <div class="kpi-value">
+              <span class="kpi-endpoint">{relay_escaped}</span>
+              <button type="button" class="copy-btn" data-copy-text="{relay_escaped}">Copy</button>
+            </div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Active Workers</div>
+            <div class="kpi-value" id="sub-kpi-workers">&mdash;</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Queue Depth</div>
+            <div class="kpi-value" id="sub-kpi-queue">&mdash;</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Plan Status</div>
+            <div class="kpi-value" style="font-size:1rem;">{sub_pill}</div>
+          </div>
+        </div>"#
     );
 
     // ── Section: API Key ──
-    out.push_str("<div class=\"dash-section-label\">Your API Key</div>");
+    out.push_str("<div class=\"sec-label\">Your API Key</div>");
 
     if let Some(s) = sub {
         if let Some(key) = api_key {
+            let key_escaped = html_escape(key);
+            let masked = html_escape(&mask_key(key));
+            let auth_snippet = html_escape(&format!(
+                "{{\n  \"modelrelay\": {{\n    \"type\": \"api_key\",\n    \"key\": \"{key}\"\n  }}\n}}"
+            ));
             let _ = write!(
                 out,
-                "<div class=\"card card--accent\" style=\"margin-bottom:32px;\">\
-                   <h2>API Key <span class=\"badge badge-active\">Active</span></h2>\
-                   <div class=\"key-wrap\">\
-                     <div class=\"key-display\" id=\"api-key-value\">{}</div>\
-                     <button class=\"copy-btn\" id=\"copy-btn\" type=\"button\">Copy</button>\
-                   </div>\
-                   <div class=\"key-actions\">\
-                     <a href=\"/integrate\">Integration snippets &rarr;</a>\
-                     <a href=\"/setup\">Connect a worker &rarr;</a>\
-                   </div>\
-                 </div>\
-                 <script>\
-                   document.getElementById('copy-btn').addEventListener('click',function(){{\
-                     var btn=this;\
-                     navigator.clipboard.writeText(document.getElementById('api-key-value').textContent.trim()).then(function(){{\
-                       btn.textContent='Copied!';\
-                       btn.classList.add('copied');\
-                       setTimeout(function(){{ btn.textContent='Copy'; btn.classList.remove('copied'); }},2000);\
-                     }});\
-                   }});\
-                 </script>",
-                html_escape(key),
+                r#"<div class="card card--accent">
+                  <div class="card-head">
+                    <h2>API Key <span class="badge badge-active">Active</span></h2>
+                    <span style="font-size:0.8rem;color:var(--text-muted);">Used by workers, curl, and Pi <code>auth.json</code></span>
+                  </div>
+                  <div class="key-code-box">
+                    <span id="sub-api-key" data-masked="{masked}" data-full="{key_escaped}" data-revealed="false">{masked}</span>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                      <button type="button" class="copy-btn" data-toggle-key="sub-api-key">Reveal</button>
+                      <button type="button" class="copy-btn" data-copy-text="{key_escaped}">Copy Key</button>
+                      <button type="button" class="copy-btn" data-copy-text="{auth_snippet}">Copy Pi auth.json</button>
+                    </div>
+                  </div>
+                  <div class="key-row-actions">
+                    <a href="/integrate#pi" class="btn btn-sm">Set up Pi Coding Agent &rarr;</a>
+                    <a href="/setup" class="btn btn-sm btn-secondary">Connect a GPU worker</a>
+                  </div>
+                </div>"#
             );
         } else if s.api_key_id.is_some() {
             out.push_str(
-                "<div class=\"card card--accent\" style=\"margin-bottom:32px;\">\
-                   <h2>API Key <span class=\"badge badge-active\">Provisioned</span></h2>\
-                   <p class=\"provisioned-msg\">Your API key has been provisioned. \
-                      The raw key was shown once at creation and is stored securely.</p>\
-                   <div class=\"key-actions\"><a href=\"/integrate\">Integration snippets &rarr;</a></div>\
+                "<div class=\"card card--accent\">\
+                   <div class=\"card-head\"><h2>API Key <span class=\"badge badge-active\">Provisioned</span></h2></div>\
+                   <p>Your API key has been provisioned and stored securely.</p>\
+                   <div class=\"key-row-actions\"><a href=\"/integrate\" class=\"btn btn-sm\">Pi &amp; API Setup &rarr;</a></div>\
                  </div>",
             );
         } else if s.status == "active" {
             out.push_str(
-                "<div class=\"card\" style=\"margin-bottom:32px;\">\
-                   <h2>API Key <span class=\"badge\">Provisioning&hellip;</span></h2>\
-                   <div style=\"margin-top:12px\">\
-                     <div class=\"dash-skel dash-skel-w80\"></div>\
-                     <div class=\"dash-skel dash-skel-w50\"></div>\
-                   </div>\
-                   <p class=\"provisioned-msg\">Your subscription is active. \
-                      Your API key is being provisioned and will appear here shortly.</p>\
+                "<div class=\"card\">\
+                   <div class=\"card-head\"><h2>API Key <span class=\"badge\">Provisioning&hellip;</span></h2></div>\
+                   <div class=\"dash-skel dash-skel-w70\"></div>\
+                   <p>Your subscription is active. Your API key is being provisioned and will appear here shortly.</p>\
                  </div>",
             );
         } else {
             out.push_str(
-                "<div class=\"card card--empty\" style=\"margin-bottom:32px;\">\
+                "<div class=\"card card--empty\">\
                    <h2>Get Your API Key</h2>\
-                   <p>An active subscription is required for API key access.</p>\
+                   <p style=\"margin-bottom:18px;\">An active subscription is required for hosted API key access.</p>\
                    <a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a>\
                  </div>",
             );
         }
     } else {
         out.push_str(
-            "<div class=\"card card--empty\" style=\"margin-bottom:32px;\">\
+            "<div class=\"card card--empty\">\
                <h2>Start Routing Inference Requests</h2>\
-               <p>Subscribe to get your relay API key and connect your own GPU workers.</p>\
-               <a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a>\
+               <p style=\"margin-bottom:18px;\">Subscribe for a hosted relay key, or self-host ModelRelay for free.</p>\
+               <div style=\"display:flex;gap:10px;justify-content:center;flex-wrap:wrap;\">\
+                 <a href=\"/pricing\" class=\"btn\">View Pricing &rarr;</a>\
+                 <a href=\"/docs/self-hosting\" class=\"btn btn-secondary\">Self-Hosting Guide</a>\
+               </div>\
              </div>",
         );
     }
 
-    // ── Section: Status ──
-    let sub_badge = if let Some(s) = sub {
+    // ── Section: Live Status & Subscription ──
+    let sub_details = if let Some(s) = sub {
         format!(
-            "{}<table class=\"info-table\" style=\"margin-top:8px\">\
+            "<table class=\"info-table\" style=\"margin-top:0\">\
                <tr><td>Status</td><td>{}</td></tr>\
                <tr><td>Updated</td><td>{}</td></tr>\
              </table>",
-            status_badge(&s.status),
             html_escape(&s.status),
             s.updated_at.format("%B %d, %Y"),
         )
     } else {
-        "<span class=\"badge\">No Active Subscription</span>\
-         <p style=\"margin-top:8px\"><a href=\"/pricing\">View pricing &rarr;</a></p>"
-            .to_string()
+        "<p class=\"empty-msg\">No active subscription. <a href=\"/pricing\">View pricing &rarr;</a></p>".to_string()
     };
 
     let billing_btn = if has_stripe_customer {
         format!(
-            "<form method=\"POST\" action=\"/dashboard/billing-portal\" class=\"billing-form\">\
+            "<form method=\"POST\" action=\"/dashboard/billing-portal\">\
                {csrf_field}\
-               <button type=\"submit\" class=\"billing-link\">Manage billing &rarr;</button>\
+               <button type=\"submit\" class=\"billing-link\">Manage billing &amp; invoices &rarr;</button>\
              </form>"
+        )
+    } else {
+        String::new()
+    };
+
+    let live_models_block = if let Some(key) = api_key {
+        let js_url = relay_url.replace('\\', "\\\\").replace('"', "\\\"");
+        let js_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+        format!(
+            r#"<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <span class="sec-label" style="margin:0;">Your Live Models (<code>/v1/models</code>)</span>
+                <button type="button" class="copy-btn" id="refresh-models-btn">Refresh</button>
+              </div>
+              <div id="live-models-box"><span class="empty-msg">Checking <code>{relay_escaped}/v1/models</code>&hellip;</span></div>
+            </div>
+            <script>
+              (function(){{
+                function loadModels(){{
+                  var box=document.getElementById('live-models-box');
+                  if(!box) return;
+                  fetch("{js_url}/v1/models", {{ headers: {{ "Authorization": "Bearer {js_key}" }} }})
+                    .then(function(r){{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }})
+                    .then(function(d){{
+                      var ms=(d.data||[]).map(function(x){{return x.id;}}).filter(Boolean);
+                      box.textContent='';
+                      if(ms.length===0){{
+                        var sp=document.createElement('span');
+                        sp.className='empty-msg';
+                        sp.textContent='No models advertised yet. Start ModelRelay Desktop or modelrelay-worker on your GPU box.';
+                        box.appendChild(sp);
+                        return;
+                      }}
+                      ms.forEach(function(id){{
+                        var tag=document.createElement('span');
+                        tag.className='model-pill';
+                        tag.textContent=id;
+                        box.appendChild(tag);
+                      }});
+                    }})
+                    .catch(function(){{
+                      box.textContent='';
+                      var sp=document.createElement('span');
+                      sp.className='empty-msg';
+                      sp.textContent='Could not query live models right now.';
+                      box.appendChild(sp);
+                    }});
+                }}
+                var btn=document.getElementById('refresh-models-btn');
+                if(btn) btn.addEventListener('click', loadModels);
+                loadModels();
+              }})();
+            </script>"#
         )
     } else {
         String::new()
@@ -1139,108 +1250,90 @@ fn subscriber_dashboard_html(
 
     let _ = write!(
         out,
-        "<div class=\"dash-section-label\">Status</div>\
-         <div class=\"dash-grid\">\
-           <div class=\"card\">\
-             <h2>Relay</h2>\
-             <div id=\"relay-stats\">\
-               <div class=\"dash-skel dash-skel-w70\"></div>\
-               <div class=\"dash-skel dash-skel-w45\"></div>\
-             </div>\
-             <script>\
-               (function(){{\
-                 fetch('/dashboard/stats',{{credentials:'same-origin'}})\
-                   .then(function(r){{return r.json();}})\
-                   .then(function(d){{\
-                     var el=document.getElementById('relay-stats');\
-                     el.textContent='';\
-                     var qd=d.queue_depth||{{}};\
-                     var total=0;\
-                     for(var k in qd){{if(Object.prototype.hasOwnProperty.call(qd,k))total+=Number(qd[k])||0;}}\
-                     var aw=Number(d.active_workers)||0;\
-                     var tbl=document.createElement('table');\
-                     tbl.className='info-table';\
-                     tbl.style.marginTop='8px';\
-                     [['Workers',String(aw)],['Queue depth',String(total)]].forEach(function(pair){{\
-                       var tr=document.createElement('tr');\
-                       var td1=document.createElement('td');td1.textContent=pair[0];\
-                       var td2=document.createElement('td');td2.textContent=pair[1];\
-                       tr.appendChild(td1);tr.appendChild(td2);tbl.appendChild(tr);\
-                     }});\
-                     el.appendChild(tbl);\
-                     if(aw===0){{\
-                       var card=document.createElement('div');\
-                       card.className='card card--empty';\
-                       card.style.marginTop='16px';\
-                       card.style.padding='24px 20px';\
-                       var h2=document.createElement('h2');h2.textContent='Connect Your First Worker';\
-                       var p=document.createElement('p');p.textContent='No GPU workers are connected. Set one up in minutes.';\
-                       var a=document.createElement('a');a.href='/setup';a.className='btn';a.textContent='Set Up a Worker \u{2192}';\
-                       card.appendChild(h2);card.appendChild(p);card.appendChild(a);\
-                       el.appendChild(card);\
-                     }}\
-                     var keys=Object.keys(qd);\
-                     if(keys.length>1){{\
-                       var extra=document.createElement('p');\
-                       extra.className='per-model-info';\
-                       extra.textContent='Per provider: '+keys.map(function(m){{return m+': '+qd[m];}}).join('  ');\
-                       el.appendChild(extra);\
-                     }}\
-                   }})\
-                   .catch(function(){{\
-                     var el=document.getElementById('relay-stats');\
-                     el.textContent='';\
-                     var p=document.createElement('p');\
-                     p.className='relay-error';\
-                     p.textContent='Could not load relay status.';\
-                     el.appendChild(p);\
-                   }});\
-               }})();\
-             </script>\
-           </div>\
-           <div class=\"card\">\
-             <h2>Subscription</h2>\
-             <div>{sub_badge}</div>\
-             {billing_btn}\
-           </div>\
-         </div>"
+        r#"<div class="sec-label">Status &amp; Billing</div>
+        <div class="dash-grid">
+          <div class="card">
+            <div class="card-head">
+              <h2>Relay Health</h2>
+              <span class="badge badge-cyan">Live</span>
+            </div>
+            <div id="relay-stats">
+              <div class="dash-skel dash-skel-w70"></div>
+              <div class="dash-skel dash-skel-w45"></div>
+            </div>
+            {live_models_block}
+            <script>
+              (function(){{
+                fetch('/dashboard/stats',{{credentials:'same-origin'}})
+                  .then(function(r){{return r.json();}})
+                  .then(function(d){{
+                    var el=document.getElementById('relay-stats');
+                    el.textContent='';
+                    var qd=d.queue_depth||{{}};
+                    var total=0;
+                    Object.keys(qd).forEach(function(k){{total+=Number(qd[k])||0;}});
+                    var aw=Number(d.active_workers)||0;
+                    var kw=document.getElementById('sub-kpi-workers');
+                    if(kw){{kw.textContent=String(aw);kw.style.color=aw>0?'var(--success)':'var(--warning)';}}
+                    var kq=document.getElementById('sub-kpi-queue');
+                    if(kq) kq.textContent=String(total);
+                    var tbl=document.createElement('table');
+                    tbl.className='info-table'; tbl.style.marginTop='0';
+                    [['Workers online',String(aw)],['Queued requests',String(total)]].forEach(function(pair){{
+                      var tr=document.createElement('tr');
+                      var td1=document.createElement('td'); td1.textContent=pair[0];
+                      var td2=document.createElement('td'); td2.textContent=pair[1];
+                      tr.appendChild(td1); tr.appendChild(td2); tbl.appendChild(tr);
+                    }});
+                    el.appendChild(tbl);
+                  }})
+                  .catch(function(){{
+                    var el=document.getElementById('relay-stats');
+                    el.textContent='';
+                    var p=document.createElement('p');
+                    p.className='empty-msg'; p.textContent='Could not load relay stats.';
+                    el.appendChild(p);
+                  }});
+              }})();
+            </script>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>Subscription</h2></div>
+            {sub_details}
+            {billing_btn}
+          </div>
+        </div>"#
     );
 
-    // ── Quick Start (only with active key) ──
-    if api_key.is_some() {
-        out.push_str(
-            "<div class=\"dash-section-label\">Quick Start</div>\
-             <div class=\"dash-links\">\
-               <a href=\"/setup\" class=\"card dash-link\">\
-                 <h3>Setup</h3>\
-                 <p>Connect a GPU worker machine</p>\
-               </a>\
-               <a href=\"/integrate\" class=\"card dash-link\">\
-                 <h3>Integrate</h3>\
-                 <p>Code snippets for your favorite tools</p>\
-               </a>\
-               <a href=\"/#download\" class=\"card dash-link\">\
-                 <h3>Desktop App</h3>\
-                 <p>Download the tray app for Windows, macOS, or Linux</p>\
-               </a>\
-               <a href=\"https://ericflo.github.io/modelrelay/\" target=\"_blank\" class=\"card dash-link\">\
-                 <h3>Documentation</h3>\
-                 <p>API reference and examples</p>\
-               </a>\
-             </div>",
-        );
-    }
+    // ── Quick Links ──
+    out.push_str(
+        r#"<div class="sec-label">Next Steps</div>
+        <div class="quick-grid">
+          <a href="/integrate#pi" class="quick-card">
+            <h3>Pi Coding Agent &rarr;</h3>
+            <p>Register ModelRelay as a provider + add token to <code>auth.json</code></p>
+          </a>
+          <a href="/downloads" class="quick-card">
+            <h3>Desktop App &rarr;</h3>
+            <p>Download the native tray worker for macOS, Linux, or Windows</p>
+          </a>
+          <a href="/setup" class="quick-card">
+            <h3>Worker Setup &rarr;</h3>
+            <p>CLI worker config and systemd / launchd persistence guide</p>
+          </a>
+          <a href="/docs" class="quick-card">
+            <h3>Documentation &rarr;</h3>
+            <p><code>api.modelrelay.io</code> reference, curl examples, and self-hosting</p>
+          </a>
+        </div>"#,
+    );
 
     out
 }
 
 /// Minimal HTML entity escaping for untrusted strings.
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
+    modelrelay_web::templates::html_escape(s)
 }
 
 #[cfg(test)]
@@ -1296,5 +1389,13 @@ mod tests {
         assert!(status_badge("past_due").contains("badge-warn"));
         assert!(status_badge("canceled").contains("badge-cancel"));
         assert!(status_badge("unknown_status").contains("Unknown"));
+    }
+
+    #[test]
+    fn mask_key_hides_middle_bytes() {
+        let masked = mask_key("mr_live_1234567890abcdef");
+        assert!(masked.starts_with("mr_live_12"));
+        assert!(masked.ends_with("cdef"));
+        assert!(!masked.contains("567890ab"));
     }
 }

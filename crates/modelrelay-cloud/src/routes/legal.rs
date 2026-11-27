@@ -6,15 +6,21 @@
 
 use axum::response::{Html, IntoResponse, Response};
 
-/// Shared wrapper style applied to both legal pages. Constrains line length
-/// for readability; the surrounding `page_shell` provides the nav/footer and
-/// the document-level `<h1>`.
-const WRAPPER_OPEN: &str =
-    r#"<div class="container" style="max-width:760px;padding:48px 24px;line-height:1.7;">"#;
+use super::OptionalSession;
+
+const WRAPPER_OPEN: &str = r#"<div style="max-width:740px;line-height:1.75;">"#;
 const WRAPPER_CLOSE: &str = "</div>";
 
+async fn is_logged_in(session: Option<tower_sessions::Session>) -> bool {
+    match session {
+        Some(s) => s.get::<String>("user_id").await.ok().flatten().is_some(),
+        None => false,
+    }
+}
+
 /// GET `/terms` — Terms of Service.
-pub async fn terms_page() -> Response {
+pub async fn terms_page(OptionalSession(session): OptionalSession) -> Response {
+    let logged_in = is_logged_in(session).await;
     let body = format!(
         "{WRAPPER_OPEN}{inner}{WRAPPER_CLOSE}",
         inner = terms_inner()
@@ -23,13 +29,14 @@ pub async fn terms_page() -> Response {
         "Terms of Service",
         "/terms",
         &body,
-        false,
+        logged_in,
     ))
     .into_response()
 }
 
 /// GET `/privacy` — Privacy Policy.
-pub async fn privacy_page() -> Response {
+pub async fn privacy_page(OptionalSession(session): OptionalSession) -> Response {
+    let logged_in = is_logged_in(session).await;
     let body = format!(
         "{WRAPPER_OPEN}{inner}{WRAPPER_CLOSE}",
         inner = privacy_inner()
@@ -38,7 +45,7 @@ pub async fn privacy_page() -> Response {
         "Privacy Policy",
         "/privacy",
         &body,
-        false,
+        logged_in,
     ))
     .into_response()
 }

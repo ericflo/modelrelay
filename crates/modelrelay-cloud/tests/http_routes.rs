@@ -822,3 +822,126 @@ async fn csp_connect_src_includes_public_relay_origin() {
         "CSP must never expose internal admin_url: {csp}"
     );
 }
+
+// ─── Overhauled website routes: /downloads, /docs, /integrate, /assets ────
+
+#[tokio::test]
+async fn downloads_page_returns_200_with_platforms_and_cli() {
+    let (status, body) = get("/downloads").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("ModelRelay Desktop"));
+    assert!(body.contains("/download/desktop/macos"));
+    assert!(body.contains("/download/desktop/linux-appimage"));
+    assert!(body.contains("/download/desktop/windows-msi"));
+    assert!(body.contains("/assets/desktop-dashboard.png"));
+    assert!(body.contains(r#"<link rel="canonical" href="https://modelrelay.io/downloads""#));
+}
+
+#[tokio::test]
+async fn docs_hub_and_all_sections_render_cleanly() {
+    for (path, expected) in [
+        ("/docs", "ModelRelay Overview"),
+        ("/docs/api", "api.modelrelay.io"),
+        ("/docs/pi", "pi.registerProvider"),
+        ("/docs/workers", "Desktop App"),
+        ("/docs/self-hosting", "Self-Hosting ModelRelay"),
+        ("/docs/architecture", "Architecture"),
+    ] {
+        let (status, body) = get(path).await;
+        assert_eq!(status, StatusCode::OK, "{path} should return 200");
+        assert!(
+            body.contains(expected),
+            "{path} should contain `{expected}`"
+        );
+        assert!(
+            body.contains(&format!(
+                r#"<link rel="canonical" href="https://modelrelay.io{path}""#
+            )),
+            "{path} missing canonical URL"
+        );
+    }
+
+    let (status, _) = get("/docs/does-not-exist").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn integrate_page_focuses_on_api_curl_and_pi_provider() {
+    let (status, body) = get("/integrate").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("api.modelrelay.io"));
+    assert!(body.contains("pi.registerProvider"));
+    assert!(body.contains("~/.pi/agent/extensions/modelrelay.ts"));
+    assert!(body.contains("~/.pi/agent/auth.json"));
+    assert!(body.contains("@earendil-works/pi-coding-agent"));
+    assert!(body.contains("thinkingLevelMap"));
+    assert!(body.contains("thinkingFormat"));
+    assert!(body.contains("supportsReasoningEffort"));
+    assert!(body.contains("contextWindow"));
+    assert!(body.contains("maxTokens"));
+    assert!(body.contains("MODELRELAY_CONTEXT_WINDOW"));
+    assert!(
+        !body.contains("Codex CLI") && !body.contains("Continue.dev") && !body.contains("Aider"),
+        "/integrate should drop non-Pi agents and stay focused on api.modelrelay.io curl + Pi"
+    );
+    assert!(
+        !body.contains("@mariozechner/pi-coding-agent"),
+        "/integrate should not use the outdated Pi npm package name"
+    );
+
+    let (pi_doc_status, pi_doc) = get("/docs/pi").await;
+    assert_eq!(pi_doc_status, StatusCode::OK);
+    for needle in [
+        "thinkingLevelMap",
+        "thinkingFormat",
+        "thinkingTokenBudgetField",
+        "contextWindow",
+        "maxTokens",
+        "supportsUsageInStreaming",
+    ] {
+        assert!(
+            pi_doc.contains(needle),
+            "/docs/pi should document {needle} for Pi thinking levels & context limits"
+        );
+    }
+}
+
+#[tokio::test]
+async fn desktop_screenshot_assets_return_png() {
+    for path in [
+        "/assets/desktop-dashboard.png",
+        "/assets/desktop-onboarding.png",
+        "/assets/desktop-settings.png",
+    ] {
+        let resp = app()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{path} should return 200");
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            bytes.len() > 1000 && &bytes[..8] == b"\x89PNG\r\n\x1a\n",
+            "{path} should be a valid PNG"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sitemap_includes_downloads_and_docs_routes() {
+    let (status, body) = get("/sitemap.xml").await;
+    assert_eq!(status, StatusCode::OK);
+    for path in &[
+        "/downloads",
+        "/docs",
+        "/docs/api",
+        "/docs/pi",
+        "/docs/workers",
+        "/docs/self-hosting",
+        "/docs/architecture",
+    ] {
+        assert!(
+            body.contains(&format!("<loc>https://modelrelay.io{path}</loc>")),
+            "sitemap missing {path}"
+        );
+    }
+}

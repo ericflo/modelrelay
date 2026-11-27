@@ -36,13 +36,13 @@ fn client_ip(headers: &HeaderMap) -> IpAddr {
 /// (currently `/login`), used for per-page og:url and canonical.
 fn rate_limit_response(path: &str) -> Response {
     let body = "\
-<div class=\"card\" style=\"border-left: 3px solid #fbbf24;\">\
+<div class=\"card\" style=\"border-left: 3px solid var(--warning);\">\
   <h2 style=\"display:flex;align-items:center;gap:10px;\">\
-    <svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#fbbf24\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><polyline points=\"12 6 12 12 16 14\"/></svg>\
+    <svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"var(--warning)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><polyline points=\"12 6 12 12 16 14\"/></svg>\
     Slow down\
   </h2>\
   <p>You've made too many login attempts. Please wait <strong>15 minutes</strong> before trying again.</p>\
-  <p style=\"margin-top:12px;color:#8b949e;font-size:0.9rem;\">This limit protects your account from unauthorized access attempts.</p>\
+  <p style=\"margin-top:12px;color:var(--text-secondary);font-size:0.9rem;\">This limit protects your account from unauthorized access attempts.</p>\
   <a href=\"/\" class=\"btn\" style=\"margin-top:20px;\">Back to Home</a>\
 </div>";
     let html = modelrelay_web::templates::page_shell("Too Many Requests", path, body, false);
@@ -191,11 +191,11 @@ fn login_form_html(error: Option<&str>, csrf_field: &str) -> String {
         r#"<div class="auth-split">
   <div class="auth-value">
     <h1 class="auth-value-headline">Welcome back.</h1>
-    <p class="auth-value-sub">Your AI infrastructure is ready and waiting. Log in to manage your workers, monitor traffic, and grab your API keys.</p>
+    <p class="auth-value-sub">Log in to copy your API key for Pi <code>auth.json</code>, inspect connected GPU workers, and check live models on <code>api.modelrelay.io</code>.</p>
     <ul class="auth-benefits">
-      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill='#7c3aed' opacity="0.15"/><path d="M5.5 9.5l2 2 5-5" stroke='#a78bfa' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Real-time dashboard and usage analytics</li>
-      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill='#7c3aed' opacity="0.15"/><path d="M5.5 9.5l2 2 5-5" stroke='#a78bfa' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Manage API keys and worker connections</li>
-      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill='#7c3aed' opacity="0.15"/><path d="M5.5 9.5l2 2 5-5" stroke='#a78bfa' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Scale from prototype to production</li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill="var(--accent)" opacity="0.18"/><path d="M5.5 9.5l2 2 5-5" stroke="var(--accent-bright)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>One-click API key &amp; Pi <code>auth.json</code> copy</li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill="var(--accent)" opacity="0.18"/><path d="M5.5 9.5l2 2 5-5" stroke="var(--accent-bright)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Live worker telemetry, load bars, and model lists</li>
+      <li><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="9" fill="var(--accent)" opacity="0.18"/><path d="M5.5 9.5l2 2 5-5" stroke="var(--accent-bright)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Pre-filled <code>curl</code> commands and Pi provider setup</li>
     </ul>
   </div>
   <div class="auth-form-panel">
@@ -213,14 +213,14 @@ fn login_form_html(error: Option<&str>, csrf_field: &str) -> String {
           <div class="password-wrapper">
             <input type="password" id="password" name="password" required placeholder="Your password">
             <button type="button" class="password-toggle" aria-label="Show password" onclick="togglePassword(this)">
-              <svg class="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke='#8b949e' stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-              <svg class="eye-closed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke='#8b949e' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              <svg class="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-closed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
             </button>
           </div>
         </div>
         <button type="submit" class="btn auth-submit">Log In</button>
       </form>
-      <p class="auth-switch">New signups are currently closed.</p>
+      <p class="auth-switch">New hosted signups are closed. <a href="/docs/self-hosting">Self-host free (MIT) &rarr;</a></p>
     </div>
   </div>
 </div>

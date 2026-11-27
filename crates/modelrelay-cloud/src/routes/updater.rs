@@ -57,6 +57,15 @@ struct UpdateManifest {
     notes: Option<String>,
 }
 
+/// Return the cached latest desktop release version without performing a network request.
+pub(super) async fn cached_release_version() -> Option<String> {
+    LATEST_CACHE
+        .read()
+        .await
+        .as_ref()
+        .map(|(_, release)| release.version.clone())
+}
+
 /// Shared release lookup used by both `/updater/desktop/...` and `/download/desktop/...`.
 /// Falls back to a previously cached release if GitHub is rate-limited or unreachable.
 pub(super) async fn latest_release(client: &reqwest::Client) -> Option<LatestRelease> {
