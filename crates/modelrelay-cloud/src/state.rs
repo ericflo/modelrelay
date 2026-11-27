@@ -7,6 +7,7 @@ use sqlx::PgPool;
 
 const MAX_TRACKED_RATE_LIMIT_IPS: usize = 10_000;
 pub const DEFAULT_PUBLIC_RELAY_URL: &str = "https://api.modelrelay.io";
+pub const DEFAULT_PUBLIC_SITE_URL: &str = "https://modelrelay.io";
 
 /// Build the shared outbound HTTP client used by cloud routes with sane
 /// connection and overall request timeouts.
@@ -97,9 +98,13 @@ pub struct CloudState {
     pub admin_url: Option<String>,
     /// Bearer token for authenticating with the modelrelay-server admin API.
     pub admin_token: Option<String>,
-    /// Publicly reachable relay URL shown to end users in `/setup`, `/integrate`,
-    /// and allowed by CSP `connect-src` (e.g. `https://api.modelrelay.io`).
+    /// Publicly reachable relay URL shown to end users in `/`, `/setup`, `/integrate`,
+    /// `/AGENTS.md`, `/pi/modelrelay.ts`, and allowed by CSP `connect-src`
+    /// (e.g. `https://api.modelrelay.io`).
     pub public_relay_url: String,
+    /// Publicly reachable site URL shown in bootstrap prompts, `/AGENTS.md`, and OAuth links
+    /// (e.g. `https://modelrelay.io`).
+    pub public_site_url: String,
     /// Shared outbound HTTP client with timeouts.
     pub http_client: reqwest::Client,
     /// Lowercase, trimmed admin email addresses from `ADMIN_EMAILS` env var.

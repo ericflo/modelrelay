@@ -22,6 +22,7 @@ fn test_state() -> Arc<CloudState> {
         admin_url: None,
         admin_token: None,
         public_relay_url: modelrelay_cloud::state::DEFAULT_PUBLIC_RELAY_URL.into(),
+        public_site_url: modelrelay_cloud::state::DEFAULT_PUBLIC_SITE_URL.into(),
         http_client: modelrelay_cloud::state::default_http_client(),
         admin_emails: vec![],
         rate_limiter: std::sync::Arc::new(modelrelay_cloud::state::RateLimiter::new(
@@ -725,6 +726,7 @@ async fn webhook_without_secret_configured_returns_500() {
         admin_url: None,
         admin_token: None,
         public_relay_url: modelrelay_cloud::state::DEFAULT_PUBLIC_RELAY_URL.into(),
+        public_site_url: modelrelay_cloud::state::DEFAULT_PUBLIC_SITE_URL.into(),
         http_client: modelrelay_cloud::state::default_http_client(),
         admin_emails: vec![],
         rate_limiter: std::sync::Arc::new(modelrelay_cloud::state::RateLimiter::new(
@@ -795,6 +797,7 @@ async fn csp_connect_src_includes_public_relay_origin() {
         admin_url: Some("http://proxy.internal:8080".into()),
         admin_token: Some("secret".into()),
         public_relay_url: "https://relay.example.com".into(),
+        public_site_url: "https://site.example.com".into(),
         http_client: modelrelay_cloud::state::default_http_client(),
         admin_emails: vec![],
         rate_limiter: std::sync::Arc::new(modelrelay_cloud::state::RateLimiter::new(
@@ -888,8 +891,14 @@ async fn integrate_page_focuses_on_api_curl_and_pi_provider() {
         "/integrate should stay fully dynamic without manual thinking/context dropdowns or env var hacks"
     );
     assert!(
-        !body.contains("Codex CLI") && !body.contains("Continue.dev") && !body.contains("Aider"),
-        "/integrate should drop non-Pi agents and stay focused on api.modelrelay.io curl + Pi"
+        body.contains("client-codex-code")
+            && body.contains("client-claude-code")
+            && body.contains("/login modelrelay"),
+        "/integrate should provide pre-filled terminal copy-paste setup for Pi, Codex CLI, and Claude Code"
+    );
+    assert!(
+        !body.contains("Continue.dev") && !body.contains("Aider"),
+        "/integrate should not clutter the page with legacy third-party editors"
     );
     assert!(
         !body.contains("@mariozechner/pi-coding-agent"),
@@ -1160,7 +1169,6 @@ async fn agents_md_is_served_with_markdown_and_cors_on_both_cases() {
                 .to_vec(),
         )
         .unwrap();
-        assert!(body.contains("modelrelay-server"));
         assert!(body.contains("modelrelay-worker"));
         assert!(body.contains("max_concurrency"));
         assert!(body.contains("~/.pi/agent/extensions/modelrelay.ts"));
@@ -1168,6 +1176,8 @@ async fn agents_md_is_served_with_markdown_and_cors_on_both_cases() {
         assert!(body.contains("Claude Code"));
         assert!(body.contains("Codex"));
         assert!(body.contains("/oauth/authorize"));
+        assert!(body.contains("/oauth/token"));
+        assert!(body.contains("NEVER ask the user to paste an API key"));
     }
 }
 
@@ -1211,6 +1221,7 @@ async fn pi_extension_endpoint_serves_dynamic_provider_script() {
     assert!(body.contains("fetchLlamaProps"));
     assert!(body.contains("fetchLmStudioCatalog"));
     assert!(body.contains("fetchOllamaShow"));
+    assert!(body.contains("loginWithModelRelayOAuth"));
     assert!(body.contains("max_model_len"));
     assert!(body.contains("qwen-chat-template"));
 }
@@ -1221,6 +1232,7 @@ async fn landing_page_includes_agent_bootstrap_prompts_and_agents_md_link() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("/AGENTS.md"));
     assert!(body.contains("https://modelrelay.io/AGENTS.md"));
+    assert!(body.contains("https://api.modelrelay.io"));
     assert!(body.contains("Serve an LLM"));
     assert!(body.contains("Connect a Client"));
     assert!(body.contains("prompt-serve"));
@@ -1232,4 +1244,68 @@ async fn landing_page_includes_agent_bootstrap_prompts_and_agents_md_link() {
     assert!(body.contains("cmd-connect-codex"));
     assert!(body.contains("cmd-connect-pi"));
     assert!(!body.contains("prompt-full"));
+    assert!(!body.contains("help set up modelrelay-server"));
+    assert!(!body.contains("Ask me for my ModelRelay URL and API key"));
+}
+
+#[tokio::test]
+async fn custom_public_urls_override_landing_agents_md_and_pi_extension() {
+    let state = Arc::new(CloudState {
+        db: None,
+        stripe_key: None,
+        webhook_secret: None,
+        admin_url: None,
+        admin_token: None,
+        public_relay_url: "https://relay.selfhosted.test".into(),
+        public_site_url: "https://ui.selfhosted.test".into(),
+        http_client: modelrelay_cloud::state::default_http_client(),
+        admin_emails: vec![],
+        rate_limiter: std::sync::Arc::new(modelrelay_cloud::state::RateLimiter::new(
+            5,
+            std::time::Duration::from_secs(15 * 60),
+        )),
+    });
+    let router = routes::router(state);
+
+    for (path, expected_relay, expected_site) in [
+        (
+            "/",
+            "https://relay.selfhosted.test",
+            "https://ui.selfhosted.test/AGENTS.md",
+        ),
+        (
+            "/AGENTS.md",
+            "https://relay.selfhosted.test",
+            "https://ui.selfhosted.test/oauth/authorize",
+        ),
+        (
+            "/pi/modelrelay.ts",
+            "https://relay.selfhosted.test/v1",
+            "https://ui.selfhosted.test",
+        ),
+    ] {
+        let resp = router
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "expected 200 for {path}");
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            body.contains(expected_relay),
+            "{path} should contain overridden relay URL `{expected_relay}`"
+        );
+        assert!(
+            body.contains(expected_site),
+            "{path} should contain overridden site URL `{expected_site}`"
+        );
+    }
 }

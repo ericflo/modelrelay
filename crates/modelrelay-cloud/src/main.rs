@@ -8,7 +8,17 @@ use tracing_subscriber::EnvFilter;
 
 use modelrelay_cloud::db;
 use modelrelay_cloud::routes;
-use modelrelay_cloud::state::{self, CloudState, DEFAULT_PUBLIC_RELAY_URL};
+use modelrelay_cloud::state::{
+    self, CloudState, DEFAULT_PUBLIC_RELAY_URL, DEFAULT_PUBLIC_SITE_URL,
+};
+
+fn env_url_or_default(var: &str, default: &str) -> String {
+    std::env::var(var)
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
 
 #[tokio::main]
 async fn main() {
@@ -45,11 +55,8 @@ async fn main() {
         );
     }
 
-    let public_relay_url = std::env::var("PUBLIC_RELAY_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_PUBLIC_RELAY_URL.to_string());
+    let public_relay_url = env_url_or_default("PUBLIC_RELAY_URL", DEFAULT_PUBLIC_RELAY_URL);
+    let public_site_url = env_url_or_default("PUBLIC_SITE_URL", DEFAULT_PUBLIC_SITE_URL);
 
     // Parse admin emails from env var
     let admin_emails =
@@ -57,6 +64,7 @@ async fn main() {
     tracing::info!(
         admin_count = admin_emails.len(),
         public_relay_url = %public_relay_url,
+        public_site_url = %public_site_url,
         "cloud configuration loaded"
     );
 
@@ -101,6 +109,7 @@ async fn main() {
         admin_url,
         admin_token,
         public_relay_url,
+        public_site_url,
         http_client: state::default_http_client(),
         admin_emails,
         rate_limiter: std::sync::Arc::new(state::RateLimiter::new(

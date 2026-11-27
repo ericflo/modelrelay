@@ -197,7 +197,31 @@ async fn robots_txt() -> impl IntoResponse {
 
 static AGENTS_MD_TEXT: &str = include_str!("../../assets/AGENTS.md");
 
-async fn agents_md() -> impl IntoResponse {
+fn rewrite_public_urls(template: &str, state: &CloudState) -> String {
+    let relay = state.public_relay_url.trim().trim_end_matches('/');
+    let site = state.public_site_url.trim().trim_end_matches('/');
+    let mut out = template.to_string();
+    if relay != crate::state::DEFAULT_PUBLIC_RELAY_URL {
+        out = out.replace(crate::state::DEFAULT_PUBLIC_RELAY_URL, relay);
+        let relay_host = relay
+            .strip_prefix("https://")
+            .or_else(|| relay.strip_prefix("http://"))
+            .unwrap_or(relay);
+        out = out.replace("api.modelrelay.io", relay_host);
+    }
+    if site != crate::state::DEFAULT_PUBLIC_SITE_URL {
+        out = out.replace(crate::state::DEFAULT_PUBLIC_SITE_URL, site);
+        let site_host = site
+            .strip_prefix("https://")
+            .or_else(|| site.strip_prefix("http://"))
+            .unwrap_or(site);
+        out = out.replace("modelrelay.io", site_host);
+    }
+    out
+}
+
+async fn agents_md(State(state): State<Arc<CloudState>>) -> impl IntoResponse {
+    let body = rewrite_public_urls(AGENTS_MD_TEXT, &state);
     (
         [
             (
@@ -207,11 +231,12 @@ async fn agents_md() -> impl IntoResponse {
             (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
             (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
         ],
-        AGENTS_MD_TEXT,
+        body,
     )
 }
 
-async fn pi_extension_ts() -> impl IntoResponse {
+async fn pi_extension_ts(State(state): State<Arc<CloudState>>) -> impl IntoResponse {
+    let body = rewrite_public_urls(modelrelay_web::templates::PI_EXTENSION_TS, &state);
     (
         [
             (
@@ -221,7 +246,7 @@ async fn pi_extension_ts() -> impl IntoResponse {
             (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
             (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
         ],
-        modelrelay_web::templates::PI_EXTENSION_TS,
+        body,
     )
 }
 

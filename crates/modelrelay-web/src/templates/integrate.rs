@@ -507,10 +507,16 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
 
     let pi_extension_curl = "curl -fsSL https://modelrelay.io/pi/modelrelay.ts \\\n  --create-dirs -o ~/.pi/agent/extensions/modelrelay.ts";
 
+    let pi_auth_shell = "mkdir -p ~/.pi/agent && node -e '\nconst fs = require(\"node:fs\"), p = process.env.HOME + \"/.pi/agent/auth.json\";\nconst cur = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, \"utf8\")) : {};\ncur.modelrelay = { type: \"api_key\", key: \"__API_KEY__\" };\nfs.writeFileSync(p, JSON.stringify(cur, null, 2) + \"\\n\", { mode: 0o600 });\nfs.chmodSync(p, 0o600);\nconsole.log(\"Saved ModelRelay key to \" + p);\n'";
+
     let pi_auth_json =
         "{\n  \"modelrelay\": {\n    \"type\": \"api_key\",\n    \"key\": \"__API_KEY__\"\n  }\n}";
 
     let pi_auth_keychain = "{\n  \"modelrelay\": {\n    \"type\": \"api_key\",\n    \"key\": \"!security find-generic-password -ws 'modelrelay'\"\n  }\n}";
+
+    let codex_setup_shell = "# 1. Save key privately (chmod 600 — never paste into an LLM)\nmkdir -p ~/.config/modelrelay ~/.codex\n(umask 077 && printf '%s\\n' '__API_KEY__' > ~/.config/modelrelay/api_key)\n\n# 2. Add modelrelay provider alongside commercial OpenAI\ngrep -q '\\[model_providers\\.modelrelay\\]' ~/.codex/config.toml 2>/dev/null || cat >> ~/.codex/config.toml <<'EOF'\n\n[model_providers.modelrelay]\nname = \"ModelRelay\"\nbase_url = \"__SERVER_URL__/v1\"\nenv_key = \"MODELRELAY_API_KEY\"\nwire_api = \"chat\"\nEOF\n\n# 3. Run Codex against ModelRelay on demand (plain `codex` stays on OpenAI)\nMODELRELAY_API_KEY=\"$(cat ~/.config/modelrelay/api_key)\" \\\n  codex -c model_provider=modelrelay -m __MODEL_NAME__";
+
+    let claude_setup_shell = "# 1. Save key privately (chmod 600 — never paste into an LLM)\nmkdir -p ~/.config/modelrelay\n(umask 077 && printf '%s\\n' '__API_KEY__' > ~/.config/modelrelay/api_key)\n\n# 2. Add a separate `claude-local` helper (plain `claude` stays on Anthropic)\ncat >> ~/.zshrc <<'EOF'\n\nclaude-local() {\n  ANTHROPIC_BASE_URL=\"__SERVER_URL__\" \\\n  ANTHROPIC_AUTH_TOKEN=\"$(tr -d '\\r\\n' < ~/.config/modelrelay/api_key)\" \\\n  ANTHROPIC_MODEL=\"${1:-__MODEL_NAME__}\" \\\n  claude \"${@:2}\"\n}\nEOF\nsource ~/.zshrc && claude-local __MODEL_NAME__";
 
     let pi_static_models_json = "{\n  \"$schema\": \"https://pi.dev/schemas/models.schema.json\",\n  \"providers\": {\n    \"modelrelay\": {\n      \"baseUrl\": \"__SERVER_URL__/v1\",\n      \"api\": \"openai-completions\",\n      \"apiKey\": \"$MODELRELAY_API_KEY\",\n      \"models\": [\n        {\n          \"id\": \"__MODEL_NAME__\",\n          \"reasoning\": true,\n          \"contextWindow\": 131072,\n          \"maxTokens\": 32768\n        }\n      ]\n    }\n  }\n}";
 
@@ -529,8 +535,11 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
     let t_messages = esc_attr(curl_messages);
     let t_pi_ts = esc_attr(&pi_extension_tpl);
     let ssr_pi_ts = esc_attr(PI_EXTENSION_TS);
+    let t_pi_auth_shell = esc_attr(pi_auth_shell);
     let t_pi_auth = esc_attr(pi_auth_json);
     let t_pi_keychain = esc_attr(pi_auth_keychain);
+    let t_codex_setup = esc_attr(codex_setup_shell);
+    let t_claude_setup = esc_attr(claude_setup_shell);
     let t_pi_static = esc_attr(pi_static_models_json);
     let ssr_pi_static = esc_attr(
         &pi_static_models_json
@@ -757,27 +766,35 @@ pub fn integrate_page_with_config(cloud_config: Option<&CloudWizardConfig>) -> S
         <div class="pi-step">
           <div class="pi-step-head">
             <span class="pi-num">3</span>
-            <h3>Add Your Token to <code>~/.pi/agent/auth.json</code></h3>
+            <h3>Sign In (Browser OAuth or 1-Command Paste)</h3>
           </div>
-          <p>Store your ModelRelay API key under <code>"modelrelay"</code> in <code>~/.pi/agent/auth.json</code> &mdash; or run <code>/login modelrelay</code> inside Pi.</p>
+          <p>Run <code>/login modelrelay</code> inside Pi for one-click browser OAuth &mdash; or paste the pre-filled command directly into your terminal (never paste API keys into an LLM chat).</p>
           <div class="tab-group" style="margin-bottom:0;">
             <div class="tab-bar">
-              <button type="button" class="tab-btn active" data-tab="auth-file">~/.pi/agent/auth.json</button>
-              <button type="button" class="tab-btn" data-tab="auth-login">/login command</button>
+              <button type="button" class="tab-btn active" data-tab="auth-login">/login modelrelay (OAuth)</button>
+              <button type="button" class="tab-btn" data-tab="auth-shell">1-Command Terminal Paste</button>
+              <button type="button" class="tab-btn" data-tab="auth-file">~/.pi/agent/auth.json</button>
               <button type="button" class="tab-btn" data-tab="auth-cmd">Keychain / Secret Manager</button>
             </div>
-            <div class="tab-panel active" data-tab="auth-file" style="padding:14px;">
-              <p class="tab-note">Merge this entry into your existing <code>~/.pi/agent/auth.json</code> (keep permissions private with <code>chmod 600 ~/.pi/agent/auth.json</code>):</p>
-              <div class="code-shell" style="margin:0;">
-                <div class="code-shell-header"><span>~/.pi/agent/auth.json</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
-                <pre><code class="code-text" data-tpl="{t_pi_auth}"></code></pre>
-              </div>
-            </div>
-            <div class="tab-panel" data-tab="auth-login" style="padding:14px;">
-              <p class="tab-note">Start Pi and run <code>/login</code>. Because <code>modelrelay</code> is registered as a provider, Pi prompts for your API key and writes <code>~/.pi/agent/auth.json</code> for you:</p>
+            <div class="tab-panel active" data-tab="auth-login" style="padding:14px;">
+              <p class="tab-note">Start Pi and run <code>/login modelrelay</code>. The provider opens ModelRelay in your browser, approves via PKCE OAuth, and writes <code>~/.pi/agent/auth.json</code> automatically &mdash; zero key copy-paste:</p>
               <div class="code-shell" style="margin:0;">
                 <div class="code-shell-header"><span>inside Pi TUI</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
                 <pre><code class="code-text">/login modelrelay</code></pre>
+              </div>
+            </div>
+            <div class="tab-panel" data-tab="auth-shell" style="padding:14px;">
+              <p class="tab-note">Paste directly into your local terminal to merge your pre-filled key into <code>~/.pi/agent/auth.json</code> (<code>chmod 600</code>, preserves existing providers):</p>
+              <div class="code-shell" style="margin:0;">
+                <div class="code-shell-header"><span>run in your terminal</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
+                <pre><code class="code-text" data-tpl="{t_pi_auth_shell}"></code></pre>
+              </div>
+            </div>
+            <div class="tab-panel" data-tab="auth-file" style="padding:14px;">
+              <p class="tab-note">Or merge this entry manually into <code>~/.pi/agent/auth.json</code> (<code>chmod 600 ~/.pi/agent/auth.json</code>):</p>
+              <div class="code-shell" style="margin:0;">
+                <div class="code-shell-header"><span>~/.pi/agent/auth.json</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
+                <pre><code class="code-text" data-tpl="{t_pi_auth}"></code></pre>
               </div>
             </div>
             <div class="tab-panel" data-tab="auth-cmd" style="padding:14px;">
@@ -816,6 +833,40 @@ pi   # use /model to pick a model and /thinking (Shift+Tab) to adjust effort</co
           </div>
         </div>
       </details>
+    </section>
+
+    <!-- ═══ 2B. Codex CLI & Claude Code (Pre-Filled Terminal Paste) ═══ -->
+    <section class="int-section" id="clients">
+      <div class="sec-head">
+        <div>
+          <div class="sec-eyebrow">Other Coding Agents &mdash; Pre-Filled Copy-Paste</div>
+          <h2>Codex CLI &amp; Claude Code</h2>
+        </div>
+        <span class="badge">Keeps commercial providers intact</span>
+      </div>
+      <p style="color:var(--text-secondary);margin-bottom:16px;max-width:760px;">
+        Copy and run directly in your local terminal (your key is pre-filled when logged in and saved to <code>~/.config/modelrelay/api_key</code> with <code>chmod 600</code> &mdash; no need to paste keys into an LLM chat).
+      </p>
+      <div class="tab-group">
+        <div class="tab-bar">
+          <button type="button" class="tab-btn active" data-tab="client-codex">Codex CLI</button>
+          <button type="button" class="tab-btn" data-tab="client-claude">Claude Code</button>
+        </div>
+        <div class="tab-panel active" data-tab="client-codex">
+          <p class="tab-note">Adds a separate <code>modelrelay</code> provider to <code>~/.codex/config.toml</code> while leaving plain <code>codex</code> on commercial OpenAI:</p>
+          <div class="code-shell">
+            <div class="code-shell-header"><span>run in your terminal &mdash; Codex CLI</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
+            <pre><code id="client-codex-code" class="code-text" data-tpl="{t_codex_setup}"></code></pre>
+          </div>
+        </div>
+        <div class="tab-panel" data-tab="client-claude">
+          <p class="tab-note">Adds a separate <code>claude-local</code> helper function while leaving plain <code>claude</code> on commercial Anthropic (requires a backend supporting <code>/v1/messages</code>, such as recent <code>llama-server</code>):</p>
+          <div class="code-shell">
+            <div class="code-shell-header"><span>run in your terminal &mdash; Claude Code (replace ~/.zshrc with ~/.bashrc on bash)</span><button type="button" class="copy-btn copy-code-btn">Copy</button></div>
+            <pre><code id="client-claude-code" class="code-text" data-tpl="{t_claude_setup}"></code></pre>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- ═══ 3. Live Playground ═══ -->

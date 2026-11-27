@@ -1,55 +1,89 @@
 # ModelRelay — Agent Setup & Integration Guide (`AGENTS.md`)
 
 > **Canonical URL:** `https://modelrelay.io/AGENTS.md`  
-> **Source & Releases:** `https://github.com/ericflo/modelrelay` (MIT License)  
-> **Hosted Relay Endpoint:** `https://api.modelrelay.io` (Dashboard: `https://modelrelay.io/dashboard`)
+> **Relay Endpoint:** `https://api.modelrelay.io`  
+> **OAuth / Web Console:** `https://modelrelay.io` (`/integrate` for clients · `/setup` for workers · `/dashboard`)
 
-This document is written for coding agents (**Claude Code**, **OpenAI Codex CLI**, **Pi Coding Agent**, Cursor, etc.) helping a user with either of two separate machine setups:
+This guide is for coding agents (**Claude Code**, **OpenAI Codex CLI**, **Pi Coding Agent**, etc.) helping a user set up either of two separate machines against `https://api.modelrelay.io`:
 
-- **Workflow A — Serve an LLM (on a GPU machine):** Detect the local LLM server (`llama-server`, Ollama, vLLM, LM Studio, SGLang, etc.), connect it via `modelrelay-worker` (to hosted `https://api.modelrelay.io` or a self-hosted `modelrelay-server`), **offer to install it permanently to run on startup for whatever OS/platform it's running on**, and verify live `/v1/models` + streaming completions.
-- **Workflow B — Connect a Client (on a laptop / dev machine):** Configure **Pi**, **Codex CLI**, **Claude Code**, OpenAI/Anthropic SDKs, or browser OAuth apps to talk to models through ModelRelay — **alongside** any commercial provider already configured.
-
----
-
-## 0. Agent Operating Rules
-
-Follow these rules whenever bootstrapping ModelRelay for a user:
-
-1. **Never overwrite existing commercial providers.** Merge ModelRelay into `~/.pi/agent/auth.json`, `~/.codex/config.toml`, or shell aliases (`claude-local`) so the user's existing Anthropic/OpenAI/Google credentials stay intact.
-2. **Never print raw secrets to logs, chat transcripts, or git commits.** Generate secrets locally (`openssl rand -hex 32`), write them directly to `chmod 600` config/auth files, and mask them in summaries.
-3. **Prefer loopback (`127.0.0.1`) for local inference backends and behind-proxy relays.** Workers connect *outbound* over WSS, so GPU machines never need inbound firewall ports.
-4. **Ask before assuming missing infrastructure details.** If you don't know whether the user wants to self-host `modelrelay-server` (and on which host/domain) or use an existing relay/hosted key, ask concisely first.
-5. **Verify every layer with live HTTP checks** before reporting success (Step 6 checklist).
+- **Workflow A — Serve an LLM (GPU machine):** Detect the running local LLM server (`llama-server`, Ollama, vLLM, LM Studio, SGLang, etc.), install `modelrelay-worker` pointing at `https://api.modelrelay.io`, authenticate **without pasting API keys into chat**, offer to configure permanent startup persistence for this OS/platform, and verify live `/v1/models` + streaming completions.
+- **Workflow B — Connect a Client (laptop / workstation):** Configure **Pi**, **Codex CLI**, and/or **Claude Code** against `https://api.modelrelay.io` **alongside** existing commercial providers — **without asking for a URL or pasting an API key into chat**.
 
 ---
 
-## Architecture in One Paragraph
+## 0. Security & Operating Rules (Read First!)
 
-```text
-[Clients: Pi / Codex / Claude Code / curl / Browser]
-        │  HTTPS  /v1/models, /v1/chat/completions, /v1/responses, /v1/messages
-        ▼
-[modelrelay-server]  (self-hosted VPS/Docker or hosted https://api.modelrelay.io)
-        ▲  Outbound WSS  /v1/worker/connect  (no inbound ports on GPU boxes!)
-        │
-[modelrelay-worker]  (or ModelRelay Desktop tray app on macOS/Linux/Windows)
-        │  Loopback HTTP  http://127.0.0.1:<port>
-        ▼
-[Local LLM Server]   (llama-server, Ollama, vLLM, LM Studio, SGLang, etc.)
-```
-
-- Workers register supported models (or `--models "*"` to poll the local backend's `/v1/models` every 30s and publish changes dynamically) **and preserve full per-model `/v1/models` metadata** (context length, max output tokens, reasoning efforts, vision modalities, `compat`) through `GET /v1/models`.
-- `modelrelay-server` routes by `"model"` in the JSON body (or `X-Model` header), queues/load-balances across workers, streams SSE unbuffered, and propagates client cancellation immediately to abort GPU generation.
-- `modelrelay-server` strips browser hop headers (`Origin`, `Referer`, `Sec-Fetch-*`, `Cookie`) before forwarding to workers so third-party web apps work cleanly against localhost backends without per-origin allowlisting.
+1. **NEVER ask the user to paste an API key into the LLM chat.** Always keep secrets out of the conversation transcript using one of the zero-paste methods in **Section 1** below:
+   - **Local loopback OAuth** (spin up a temporary `127.0.0.1` callback server so the key goes straight from `https://modelrelay.io/oauth/token` to a `chmod 600` file on disk — **never print the raw key to stdout**),
+   - **Pi's built-in `/login modelrelay`** (opens browser OAuth directly inside Pi), or
+   - **Pre-filled copy-paste pages** at `https://modelrelay.io/integrate` (clients) or `https://modelrelay.io/setup` (workers), where the logged-in user can copy exact commands with their key pre-filled and run them directly in their own terminal outside the LLM.
+2. **Assume `https://api.modelrelay.io` as the relay URL.** Do not ask the user for a relay URL or offer to set up a self-hosted `modelrelay-server` unless they explicitly ask for self-hosting (in which case see `https://modelrelay.io/docs/self-hosting`).
+3. **Never overwrite existing commercial providers.** Merge into `~/.pi/agent/auth.json`, `~/.codex/config.toml`, or a separate `claude-local` shell helper so existing Anthropic/OpenAI/Google credentials stay untouched.
+4. **Lock down every file that holds a key with `chmod 600`** and never print, log, or commit the raw `mr_live_...` secret.
 
 ---
 
-## Step 1 — Inspect the Local LLM Server (on the GPU Machine)
+## 1. Zero-Paste Authentication (Loopback OAuth)
 
-Before installing a worker, detect what local model server is already running and determine its **base URL**, **model IDs**, and **real context limit**:
+ModelRelay supports RFC 7636 PKCE OAuth 2.0 with loopback `http://127.0.0.1:<port>/callback` redirects:
+- Authorize: `GET https://modelrelay.io/oauth/authorize?callback_url=...&code_challenge=...&code_challenge_method=S256&state=...&key_label=...`
+- Exchange: `POST https://modelrelay.io/oauth/token` with `{ code, code_verifier, code_challenge_method: "S256", callback_url }` → returns `{ "key": "mr_live_...", "api_base_url": "https://api.modelrelay.io/v1" }`
+
+**Note:** On `https://api.modelrelay.io`, the same `mr_live_...` account key authenticates **both** `modelrelay-worker` (`worker_secret`) and API clients (`Authorization: Bearer ...`).
+
+### Succinct Loopback OAuth Helper (Writes Key Straight to Disk, Never Prints Secret)
+
+Run this zero-dependency Node.js command to save the user's key directly to `~/.config/modelrelay/api_key` (`chmod 600`) without exposing it to the LLM:
 
 ```bash
-# Probe common local OpenAI-compatible ports
+node -e '
+const http = require("node:http"), crypto = require("node:crypto"), fs = require("node:fs"), path = require("node:path");
+const verifier = crypto.randomBytes(32).toString("base64url");
+const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+const state = crypto.randomBytes(16).toString("base64url");
+const outFile = path.join(process.env.HOME, ".config", "modelrelay", "api_key");
+const srv = http.createServer(async (req, res) => {
+  const u = new URL(req.url, "http://127.0.0.1");
+  if (u.pathname !== "/callback") return res.writeHead(404).end();
+  if (u.searchParams.get("state") !== state || !u.searchParams.get("code")) {
+    res.writeHead(400).end("OAuth failed or cancelled.");
+    srv.close(); process.exit(1);
+  }
+  const r = await fetch("https://modelrelay.io/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: u.searchParams.get("code"), code_verifier: verifier, code_challenge_method: "S256", callback_url: cb }),
+  });
+  const { key } = await r.json();
+  if (!key) { res.writeHead(500).end("Token exchange failed."); srv.close(); process.exit(1); }
+  fs.mkdirSync(path.dirname(outFile), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(outFile, key.trim() + "\n", { mode: 0o600 });
+  fs.chmodSync(outFile, 0o600);
+  res.writeHead(200, { "Content-Type": "text/html" }).end("<h2>Connected! You can close this tab.</h2>");
+  console.log("Saved ModelRelay key (" + key.slice(0, 10) + "..." + key.slice(-4) + ") to " + outFile);
+  srv.close();
+});
+let cb = "";
+srv.listen(0, "127.0.0.1", () => {
+  cb = `http://127.0.0.1:${srv.address().port}/callback`;
+  const authUrl = "https://modelrelay.io/oauth/authorize?" + new URLSearchParams({
+    callback_url: cb, code_challenge: challenge, code_challenge_method: "S256", state, key_label: "CLI Setup"
+  });
+  console.log("Open this URL in your browser to approve access:\n" + authUrl);
+});
+'
+```
+
+- **When a local browser is available:** Print the URL for the user (or open it via `open` / `xdg-open`) and wait for approval. Once saved to `~/.config/modelrelay/api_key`, reference it inside local scripts/commands without ever echoing its contents.
+- **When on a headless/SSH machine (no local browser):** Skip loopback OAuth and send the user to **`https://modelrelay.io/setup`** (for GPU workers) or **`https://modelrelay.io/integrate`** (for clients) — when signed in, both pages pre-fill their live key into exact one-click copy-paste commands they can run directly in their own terminal.
+
+---
+
+## Workflow A — Serve an LLM (GPU Machine)
+
+### A1. Detect the Local LLM Server
+
+```bash
 for port in 8000 8080 11434 1234 30000; do
   if out=$(curl -fsS --max-time 2 "http://127.0.0.1:${port}/v1/models" 2>/dev/null); then
     echo "=== Found backend on http://127.0.0.1:${port} ==="
@@ -59,209 +93,19 @@ for port in 8000 8080 11434 1234 30000; do
 done
 ```
 
-Common defaults:
-- **llama.cpp (`llama-server`)**: `http://127.0.0.1:8000` or `:8080` (check `-c` / `--ctx-size` or `meta.n_ctx` in `/v1/models`)
-- **vLLM**: `http://127.0.0.1:8000` (check `--max-model-len`)
-- **Ollama**: `http://127.0.0.1:11434` (exposes `/v1/models` and `/v1/chat/completions`)
-- **LM Studio**: `http://127.0.0.1:1234`
-- **SGLang**: `http://127.0.0.1:30000`
+Common defaults: **llama.cpp (`llama-server`)** `:8000` / `:8080` · **vLLM** `:8000` · **Ollama** `:11434` · **LM Studio** `:1234` · **SGLang** `:30000`.
+*(Note: `modelrelay-worker` handles both `http://127.0.0.1:<port>` and `.../v1` seamlessly, including root metadata paths `/props` and `/api/*`.)*
 
-> Note: `modelrelay-worker` automatically deduplicates `/v1` if `backend_url` ends with `/v1`, so both `http://127.0.0.1:8000` and `http://127.0.0.1:8000/v1` work.
+If no local server is running yet, ask the user which runtime/model they want started before proceeding.
 
-If no local LLM server is running yet, ask the user which runtime/model they want started on the GPU host before continuing.
+### A2. Install `modelrelay-worker` (or Desktop App)
 
----
-
-## Step 2 — Choose & Set Up the Central Relay
-
-### Option 2A — Self-Host `modelrelay-server` (MIT, Free, Full Control)
-
-Run `modelrelay-server` on any small VPS, home router/NAS with a domain, Tailscale host, or container host reachable by both your GPU worker(s) and your client laptop(s).
-
-#### Download Binary or Pull Docker Image
-
-Pre-built binaries from GitHub Releases (`https://github.com/ericflo/modelrelay/releases/latest/download/...`):
-- Linux x86_64: `modelrelay-server-linux-amd64`
-- Linux arm64: `modelrelay-server-linux-arm64`
-- macOS Apple Silicon: `modelrelay-server-darwin-arm64`
-- macOS Intel: `modelrelay-server-darwin-amd64`
-- Windows x86_64 / arm64: `modelrelay-server-windows-amd64.exe` / `modelrelay-server-windows-arm64.exe`
-
-Docker image: `ghcr.io/ericflo/modelrelay/modelrelay-server:latest`
-
-#### Generate Secrets
-
-```bash
-WORKER_SECRET="$(openssl rand -hex 32)"
-ADMIN_TOKEN="$(openssl rand -hex 32)"
-```
-
-#### Environment Variables & Flags (`modelrelay-server`)
-
-| Env Var | CLI Flag | Default | Purpose |
-|---|---|---|---|
-| `LISTEN_ADDR` | `--listen` | `127.0.0.1:8080` | Bind address (`127.0.0.1:8080` behind TLS proxy; `0.0.0.0:8080` in Docker). |
-| `WORKER_SECRET` | `--worker-secret` | *optional if `DATABASE_URL` set* | Shared secret authenticating worker WebSocket handshakes (`x-worker-secret`). |
-| `MODELRELAY_ADMIN_TOKEN` | `--admin-token` | *none* | Bearer token enabling `/admin/workers`, `/admin/stats`, and `/admin/keys`. |
-| `MODELRELAY_REQUIRE_API_KEYS` | `--require-api-keys` | `false` | Set `true` to require Bearer / `x-api-key` auth on all `/v1/*` requests. |
-| `DATABASE_URL` | `--database-url` | *none (in-memory)* | Optional PostgreSQL URL for persistent API keys across restarts. |
-| `MODELRELAY_BOOTSTRAP_API_KEY` | `--bootstrap-api-key` | *none* | Optional existing native key to hash-import into PostgreSQL on startup. |
-| `TRUST_PROXY_HEADERS` | `--trust-proxy-headers` | `false` | Set `true` behind a trusted TLS proxy (Caddy/nginx) for accurate rate-limit IPs. |
-| `MAX_QUEUE_LEN` | `--max-queue-len` | `100` | Max queued requests (`0` = unlimited) before HTTP `503`. |
-| `QUEUE_TIMEOUT_SECS` | `--queue-timeout` | `30` | Max seconds waiting in queue (`0` = no timeout) before HTTP `504`. |
-| `REQUEST_TIMEOUT_SECS` | `--request-timeout` | `300` | Unary timeout / streaming chunk idle timeout in seconds. |
-| `MAX_BODY_MB` | `--max-body-mb` | `64` | Max HTTP body size in MiB (supports multimodal/vision payloads). |
-| `CORS_ALLOWED_ORIGINS` | `--cors-allowed-origins` | *public `*`, admin none* | Comma-separated origins or `*`. Leave unset for standard browser access on `/v1/*`. |
-| `PROVIDER_NAME` | `--provider` | `local` | Default provider namespace (match `--provider` on workers). |
-| `LOG_LEVEL` | `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
-
-> **Persistence tip:** Without `DATABASE_URL`, client API keys created via `POST /admin/keys` are held in memory and reset when `modelrelay-server` restarts. For a zero-database single-user VPS setup, either run behind private Tailscale/VPN with `MODELRELAY_REQUIRE_API_KEYS=false`, or attach PostgreSQL (`DATABASE_URL`), or use a startup script / reverse-proxy bearer check. With PostgreSQL enabled, API keys persist permanently and can also authenticate workers directly.
-
-#### Run via Docker
-
-```bash
-docker run -d --name modelrelay-server --restart unless-stopped \
-  -p 127.0.0.1:8080:8080 \
-  -e LISTEN_ADDR=0.0.0.0:8080 \
-  -e WORKER_SECRET="$WORKER_SECRET" \
-  -e MODELRELAY_ADMIN_TOKEN="$ADMIN_TOKEN" \
-  -e MODELRELAY_REQUIRE_API_KEYS=true \
-  -e TRUST_PROXY_HEADERS=true \
-  ghcr.io/ericflo/modelrelay/modelrelay-server:latest
-```
-
-#### Or Run as a Linux `systemd` Service
-
-```bash
-sudo curl -fsSL https://github.com/ericflo/modelrelay/releases/latest/download/modelrelay-server-linux-amd64 \
-  -o /usr/local/bin/modelrelay-server
-sudo chmod 0755 /usr/local/bin/modelrelay-server
-sudo install -d -m 0700 /etc/modelrelay
-```
-
-Write `/etc/modelrelay/server.env` (`chmod 600`):
-```dotenv
-LISTEN_ADDR=127.0.0.1:8080
-WORKER_SECRET=<generated-worker-secret>
-MODELRELAY_ADMIN_TOKEN=<generated-admin-token>
-MODELRELAY_REQUIRE_API_KEYS=true
-TRUST_PROXY_HEADERS=true
-REQUEST_TIMEOUT_SECS=300
-LOG_LEVEL=info
-```
-
-Write `/etc/systemd/system/modelrelay-server.service`:
-```ini
-[Unit]
-Description=ModelRelay Proxy Server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=/etc/modelrelay/server.env
-ExecStart=/usr/local/bin/modelrelay-server
-Restart=always
-RestartSec=2
-KillSignal=SIGTERM
-TimeoutStopSec=20
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now modelrelay-server
-curl -fsS http://127.0.0.1:8080/health
-```
-
-#### Put TLS in Front (Caddy or nginx)
-
-**Caddy** (recommended — automatic HTTPS, WebSockets, and unbuffered SSE out of the box):
-```caddyfile
-relay.example.com {
-    reverse_proxy 127.0.0.1:8080
-}
-```
-
-**nginx** (must forward WebSocket `Upgrade` on `/v1/worker/connect` and disable buffering on `/v1/`):
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name relay.example.com;
-    # ssl_certificate / ssl_certificate_key ...
-    client_max_body_size 64m;
-
-    location /v1/worker/connect {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-    }
-
-    location /v1/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 300s;
-    }
-
-    location /health {
-        proxy_pass http://127.0.0.1:8080;
-    }
-}
-```
-
-#### Provision a Client API Key (Self-Hosted)
-
-```bash
-curl -fsS -X POST http://127.0.0.1:8080/admin/keys \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "my-laptop"}'
-# Returns JSON containing `secret` (save this as the client's MODELRELAY_API_KEY)
-```
-
-Admin endpoints (require `Authorization: Bearer $MODELRELAY_ADMIN_TOKEN`):
-- `GET /admin/workers` — list connected workers, models, and live load
-- `GET /admin/stats` — queue depth and active worker count
-- `GET /admin/keys` — list API key metadata
-- `POST /admin/keys` — create an API key (`{"name":"..."}`)
-- `DELETE /admin/keys/{id}` — revoke an API key
-
----
-
-### Option 2B — Hosted Relay (`https://api.modelrelay.io`)
-
-If the user already has a hosted account on `https://modelrelay.io`:
-- Relay URL: `https://api.modelrelay.io`
-- Get the API key (`mr_live_...`) from `https://modelrelay.io/dashboard`
-- **Important:** On hosted `api.modelrelay.io`, pass the user's `mr_live_...` API key as **both** the worker's `WORKER_SECRET` and the client's API key. Tenant-scoped workers route strictly to requests authenticated with the matching API key.
-
----
-
-## Step 3 — Install & Run `modelrelay-worker` on the GPU Server
-
-### Option 3A — Native Desktop Tray App (macOS / Linux / Windows Desktop)
-
-Download from `https://modelrelay.io/downloads` (or `/download/desktop/macos`, `/download/desktop/linux`, `/download/desktop/windows`). Enter the Relay URL, Worker Secret / API key, Backend URL, and `models = "*"` in Settings.
-
-### Option 3B — Headless `modelrelay-worker` Binary (Recommended for Servers)
-
-Download the release binary matching the GPU host architecture:
-- Linux x86_64: `https://github.com/ericflo/modelrelay/releases/latest/download/modelrelay-worker-linux-amd64`
-- Linux arm64: `https://github.com/ericflo/modelrelay/releases/latest/download/modelrelay-worker-linux-arm64`
-- macOS Apple Silicon: `https://github.com/ericflo/modelrelay/releases/latest/download/modelrelay-worker-darwin-arm64`
-- macOS Intel: `https://github.com/ericflo/modelrelay/releases/latest/download/modelrelay-worker-darwin-amd64`
-- Windows x86_64: `https://github.com/ericflo/modelrelay/releases/latest/download/modelrelay-worker-windows-amd64.exe`
+- **Desktop GUI (macOS / Linux / Windows):** `https://modelrelay.io/downloads` (tray worker with Launch at Login).
+- **Standalone CLI binary** from `https://github.com/ericflo/modelrelay/releases/latest/download/`:
+  - Linux x86_64: `modelrelay-worker-linux-amd64`
+  - Linux arm64: `modelrelay-worker-linux-arm64`
+  - macOS Apple Silicon / Intel: `modelrelay-worker-darwin-arm64` / `modelrelay-worker-darwin-amd64`
+  - Windows x86_64: `modelrelay-worker-windows-amd64.exe`
 
 ```bash
 # Example: Linux x86_64
@@ -270,51 +114,39 @@ sudo curl -fsSL https://github.com/ericflo/modelrelay/releases/latest/download/m
 sudo chmod 0755 /usr/local/bin/modelrelay-worker
 ```
 
-#### Worker TOML Config Format (`--config <path>`)
+### A3. Authenticate & Write `~/.config/modelrelay/worker.toml` (`chmod 600`)
 
-Precedence: **CLI flags > environment variables > config file > defaults**.
+Run the **Section 1 loopback OAuth helper** (or if headless, direct the user to `https://modelrelay.io/setup` to copy their pre-filled `worker.toml` command), then write `~/.config/modelrelay/worker.toml` reading the key from `~/.config/modelrelay/api_key` without printing it:
 
-Create `~/.config/modelrelay/worker.toml` (or `/etc/modelrelay/worker.toml`) with `chmod 600`:
-
-```toml
-proxy_url = "https://relay.example.com"     # or "https://api.modelrelay.io"
-worker_secret = "<worker-secret-or-mr_live-key>"
-worker_name = "gpu-box-4090"
-provider = "local"                          # must match server PROVIDER_NAME (default: "local")
-backend_url = "http://127.0.0.1:8000"       # local llama-server / Ollama / vLLM / LM Studio
-models = ["*"]                              # "*" auto-discovers live /v1/models every 30s
+```bash
+mkdir -p ~/.config/modelrelay
+(
+  umask 077
+  KEY="$(tr -d '\r\n' < ~/.config/modelrelay/api_key)"
+  cat > ~/.config/modelrelay/worker.toml <<EOF
+proxy_url = "https://api.modelrelay.io"
+worker_secret = "${KEY}"
+worker_name = "$(hostname)"
+provider = "local"
+backend_url = "http://127.0.0.1:<DETECTED_PORT>"
+models = ["*"]
 max_concurrency = 4
 models_poll_interval_secs = 30
 log_level = "info"
+EOF
+)
+chmod 600 ~/.config/modelrelay/worker.toml
 ```
 
-> **Important field name:** In TOML, the concurrency field is `max_concurrency` (CLI: `--max-concurrency`, env: `MAX_CONCURRENCY`).
+> In TOML, the concurrency field is `max_concurrency` (`models = ["*"]` auto-discovers live `/v1/models` every 30s and preserves full model metadata).
 
-#### Worker Environment Variables & Flags
+### A4. Offer Permanent Startup Persistence for This Platform
 
-| Env Var | CLI Flag | Default | Notes |
-|---|---|---|---|
-| `PROXY_URL` | `--proxy-url` | `http://127.0.0.1:8080` | Relay base URL (`https://...` converts to `wss://.../v1/worker/connect`). |
-| `WORKER_SECRET` | `--worker-secret` | *required* | Server `WORKER_SECRET` (self-hosted) or `mr_live_...` API key (hosted). |
-| `BACKEND_URL` | `--backend-url` | `http://127.0.0.1:8000` | Local inference backend URL. |
-| `MODELS` | `--models` | `default` | Comma-separated model IDs, or `*` for automatic `/v1/models` discovery. |
-| `WORKER_NAME` | `--worker-name` | `worker` | Label shown in logs and dashboards. |
-| `PROVIDER_NAME` | `--provider` | `local` | Provider group name on the relay. |
-| `MAX_CONCURRENCY` | `--max-concurrency` | `1` | Max simultaneous requests sent to the local backend. |
-| `MODELS_POLL_INTERVAL_SECS` | `--models-poll-interval` | `30` | Re-poll interval for `*` discovery (`0` = disabled). |
-| `ENDPOINT_PREFIXES` | `--endpoint-prefixes` | *(all)* | Optional comma-separated allowed paths, e.g. `/v1/chat,/v1/messages`. |
-| `LOG_LEVEL` | `--log-level` | `info` | Tracing filter (overridden by `RUST_LOG`). |
-
-#### Offer Permanent Startup Persistence for This Platform
-
-Always **offer to set up `modelrelay-worker` to start automatically on boot** for whichever OS the GPU machine is running:
+Always **offer to configure `modelrelay-worker` to start permanently on boot** for whichever OS this GPU machine is running:
 
 - **Linux (`systemd` user service — no root needed):**
-
 ```bash
-mkdir -p ~/.config/modelrelay ~/.config/systemd/user
-chmod 600 ~/.config/modelrelay/worker.toml
-
+mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/modelrelay-worker.service <<'EOF'
 [Unit]
 Description=ModelRelay GPU Worker
@@ -332,17 +164,14 @@ TimeoutStopSec=20
 [Install]
 WantedBy=default.target
 EOF
-
 systemctl --user daemon-reload
 systemctl --user enable --now modelrelay-worker
 systemctl --user status modelrelay-worker --no-pager
 ```
-*(For headless Linux servers where the user isn't logged in, also run `loginctl enable-linger "$USER"` — or install as a system service under `/etc/systemd/system/modelrelay-worker.service`.)*
+*(For headless Linux servers, also offer `loginctl enable-linger "$USER"` so it runs before interactive login.)*
 
 - **macOS (`launchd` LaunchAgent):**
-
-Save to `~/Library/LaunchAgents/io.modelrelay.worker.plist` and load with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.modelrelay.worker.plist`:
-
+Save to `~/Library/LaunchAgents/io.modelrelay.worker.plist` and run `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.modelrelay.worker.plist`:
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -363,10 +192,8 @@ Save to `~/Library/LaunchAgents/io.modelrelay.worker.plist` and load with `launc
 </plist>
 ```
 
-- **Windows (PowerShell Scheduled Task on startup, or ModelRelay Desktop Launch at Login):**
-
+- **Windows (PowerShell Scheduled Task on startup, or Desktop Launch at Login):**
 ```powershell
-# Download binary & write %USERPROFILE%\.config\modelrelay\worker.toml first, then register to run at startup:
 $action = New-ScheduledTaskAction -Execute "$env:LOCALAPPDATA\modelrelay\modelrelay-worker.exe" `
   -Argument "--config `"$env:USERPROFILE\.config\modelrelay\worker.toml`""
 $trigger = New-ScheduledTaskTrigger -AtStartup
@@ -374,200 +201,122 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName "ModelRelayWorker" -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -Force
 Start-ScheduledTask -TaskName "ModelRelayWorker"
 ```
-*(Or install ModelRelay Desktop from `https://modelrelay.io/download/desktop/windows` and enable **Launch at Login** in Settings.)*
+*(Or install ModelRelay Desktop from `https://modelrelay.io/download/desktop/windows` and enable **Launch at Login**.)*
 
 - **Docker (`--restart unless-stopped`):**
-
 ```bash
-# Linux (reaches loopback LLM directly via --network host)
 docker run -d --name modelrelay-worker --restart unless-stopped \
   --network host \
-  -e PROXY_URL="https://relay.example.com" \
-  -e WORKER_SECRET="$WORKER_SECRET" \
-  -e WORKER_NAME="$(hostname)" \
-  -e BACKEND_URL="http://127.0.0.1:8000" \
-  -e MODELS="*" \
-  -e MAX_CONCURRENCY=4 \
-  ghcr.io/ericflo/modelrelay/modelrelay-worker:latest
+  -v ~/.config/modelrelay/worker.toml:/etc/modelrelay/worker.toml:ro \
+  ghcr.io/ericflo/modelrelay/modelrelay-worker:latest \
+  --config /etc/modelrelay/worker.toml
 ```
-*(On macOS/Windows Docker Desktop, omit `--network host` and set `BACKEND_URL=http://host.docker.internal:8000`.)*
+*(On macOS/Windows Docker Desktop, omit `--network host` and set `backend_url = "http://host.docker.internal:<PORT>"`.)*
 
----
-
-## Step 4 — Verify the Relay End-to-End with `curl`
-
-Set `RELAY_URL` (e.g. `https://relay.example.com` or `https://api.modelrelay.io`) and `MODELRELAY_API_KEY`:
+### A5. Verify End-to-End (Without Echoing the Key)
 
 ```bash
-# 1. Relay health
-curl -fsS "${RELAY_URL}/health"
-
-# 2. List live models advertised by your worker(s)
-curl -fsS "${RELAY_URL}/v1/models" \
-  -H "Authorization: Bearer ${MODELRELAY_API_KEY}"
-
-# 3. Streaming Chat Completion (replace MODEL_ID with an ID returned above)
-curl -N -fsS "${RELAY_URL}/v1/chat/completions" \
+curl -fsS https://api.modelrelay.io/health
+curl -fsS https://api.modelrelay.io/v1/models \
+  -H "Authorization: Bearer $(tr -d '\r\n' < ~/.config/modelrelay/api_key)"
+curl -N -fsS https://api.modelrelay.io/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ${MODELRELAY_API_KEY}" \
-  -d '{"model":"MODEL_ID","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"Reply with OK."}]}'
+  -H "Authorization: Bearer $(tr -d '\r\n' < ~/.config/modelrelay/api_key)" \
+  -d '{"model":"<MODEL_ID>","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"Reply with OK."}]}'
 ```
-
-Also supported (whenever the underlying local backend implements the route):
-- `POST ${RELAY_URL}/v1/responses` (`Authorization: Bearer ...`)
-- `POST ${RELAY_URL}/v1/messages` (`x-api-key: ...` or `Authorization: Bearer ...`, plus `anthropic-version: 2023-06-01`)
-- Routing headers: `X-Model` (fallback if `model` omitted from body) and `X-Provider` (or `"provider": "name"` in body) for targeting a specific worker group.
 
 ---
 
-## Step 5 — Configure Coding Agents & Clients (Alongside Commercial Providers)
+## Workflow B — Connect a Client (Laptop / Workstation)
 
-### 5A. Pi Coding Agent (`@earendil-works/pi-coding-agent`) — Recommended
+Check which coding agents are installed (`command -v pi codex claude`) and configure each one against `https://api.modelrelay.io` **without overwriting existing commercial providers** and **without asking the user to paste an API key into chat**.
 
-Install Pi if not already present:
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
-# or: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-```
+### B1. Pi Coding Agent (`@earendil-works/pi-coding-agent`) — Recommended
 
-#### 1. Enable Dynamic API Discovery (1 Command — Zero `models.json` Needed)
-
-Install the hosted ModelRelay provider file so Pi discovers live models, runtime context lengths, max output tokens, reasoning efforts / thinking formats, and vision support dynamically from your backend APIs with **zero `models.json` config** — supporting **llama.cpp** (single-model & router mode `/props`), **vLLM** (`max_model_len` & `root`), **LM Studio** (`/api/v1/models` & `/api/v0/models`), **Ollama** (`/api/show`), and custom OpenAI-compatible servers:
+Install Pi if needed (`curl -fsSL https://pi.dev/install.sh | sh`), then install the hosted dynamic provider extension (**zero `models.json` config required** — auto-discovers live models, runtime context limits, vision, and thinking formats across **llama.cpp**, **vLLM**, **LM Studio**, **Ollama**, and custom OpenAI servers):
 
 ```bash
 curl -fsSL https://modelrelay.io/pi/modelrelay.ts \
   --create-dirs -o ~/.pi/agent/extensions/modelrelay.ts
 ```
 
-For a self-hosted relay URL, keep the exact same file and export `MODELRELAY_BASE_URL=https://relay.example.com/v1` (no `models.json` needed).
-
-#### 2. Merge Token into `~/.pi/agent/auth.json` (Preserving Existing Providers!)
-
-Do **not** replace `~/.pi/agent/auth.json` if it already exists — merge the `"modelrelay"` entry into the existing JSON object and lock down permissions:
-
+Authenticate Pi with **zero key pasting**:
+- **Best (built-in OAuth):** Tell the user to run `/login modelrelay` inside `pi` — the extension opens `https://modelrelay.io/oauth/authorize` in their browser and stores the credential in `~/.pi/agent/auth.json` automatically!
+- **Or via Section 1 loopback OAuth helper** (if authenticating multiple clients in one step): merge `~/.config/modelrelay/api_key` into `~/.pi/agent/auth.json` without touching existing providers:
 ```bash
-mkdir -p ~/.pi/agent
 node -e '
-const fs = require("fs");
-const p = process.env.HOME + "/.pi/agent/auth.json";
+const fs = require("node:fs"), path = require("node:path");
+const key = fs.readFileSync(path.join(process.env.HOME, ".config/modelrelay/api_key"), "utf8").trim();
+const p = path.join(process.env.HOME, ".pi/agent/auth.json");
+fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
 const cur = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : {};
-cur.modelrelay = { type: "api_key", key: process.env.MODELRELAY_API_KEY };
+cur.modelrelay = { type: "api_key", key };
 fs.writeFileSync(p, JSON.stringify(cur, null, 2) + "\n", { mode: 0o600 });
 fs.chmodSync(p, 0o600);
+console.log("Merged modelrelay into " + p);
 '
 ```
-*(Alternatively, the user can run `/login modelrelay` inside Pi, or use `"key": "!security find-generic-password -ws 'modelrelay'"` for keychain resolution.)*
+- **Or manual pre-filled copy-paste:** Point the user to `https://modelrelay.io/integrate#pi`.
 
-#### 3. Verify Pi Discovery
-
+Verify Pi discovery:
 ```bash
 pi update --models
 pi --list-models | grep -i modelrelay
 ```
-Inside `pi`, run `/model` to switch between ModelRelay and existing commercial providers, and `/thinking` (or `Shift+Tab`) to adjust thinking effort (`off`, `low`, `medium`, `high`).
+Inside `pi`, run `/model` to select any relayed model and `/thinking` (`Shift+Tab`) to adjust effort.
 
----
+### B2. OpenAI Codex CLI (Alongside Commercial OpenAI)
 
-### 5B. OpenAI Codex CLI (Alongside Commercial OpenAI)
-
-Add a separate `modelrelay` provider to `~/.codex/config.toml` **without** changing the user's default `model_provider` unless they ask you to:
-
+1. Run the **Section 1 loopback OAuth helper** (if `~/.config/modelrelay/api_key` does not already exist) — or direct the user to `https://modelrelay.io/integrate#clients` for a pre-filled 1-click copy-paste command.
+2. Append a separate `modelrelay` provider to `~/.codex/config.toml` **without** changing their default `model_provider`:
 ```toml
 [model_providers.modelrelay]
 name = "ModelRelay"
-base_url = "https://relay.example.com/v1"   # or "https://api.modelrelay.io/v1"
+base_url = "https://api.modelrelay.io/v1"
 env_key = "MODELRELAY_API_KEY"
-wire_api = "chat"                           # use "responses" if your backend implements /v1/responses
+wire_api = "chat"
+```
+3. Load `MODELRELAY_API_KEY` from `~/.config/modelrelay/api_key` in the user's shell rc (`export MODELRELAY_API_KEY="$(cat ~/.config/modelrelay/api_key 2>/dev/null)"`), keeping the secret out of `~/.zshrc`/`~/.bashrc` and out of chat!
+4. Run on demand while keeping plain `codex` on commercial OpenAI:
+```bash
+codex -c model_provider=modelrelay -m <MODEL_ID>
 ```
 
-Export `MODELRELAY_API_KEY` in the user's shell profile (or pass inline), then invoke Codex against ModelRelay on demand while keeping plain `codex` on commercial OpenAI:
+### B3. Claude Code (Alongside Commercial Anthropic)
 
+Claude Code uses the Anthropic Messages API (`POST https://api.modelrelay.io/v1/messages`, forwarded transparently when the local backend supports `/v1/messages`, e.g. `llama-server`).
+
+1. Ensure `~/.config/modelrelay/api_key` exists via the **Section 1 loopback OAuth helper** (or direct the user to `https://modelrelay.io/integrate#clients`).
+2. Add a non-destructive `claude-local` helper function to `~/.zshrc` or `~/.bashrc` (keeps normal `claude` on commercial Anthropic and never embeds the raw key in shell rc files):
 ```bash
-codex -c model_provider=modelrelay -m <model-id>
-```
-
----
-
-### 5C. Claude Code (Alongside Commercial Anthropic)
-
-Claude Code speaks the **Anthropic Messages API** (`POST /v1/messages`). ModelRelay forwards `/v1/messages` transparently — make sure the local backend supports Anthropic Messages (for example, recent `llama-server` builds support `/v1/messages` natively).
-
-To keep the user's normal `claude` command on commercial Anthropic, add a non-destructive shell helper function (in `~/.zshrc` or `~/.bashrc`) that points a separate command `claude-local` at ModelRelay:
-
-```bash
-# Add to ~/.zshrc or ~/.bashrc (keeps `claude` using commercial Anthropic)
 claude-local() {
-  ANTHROPIC_BASE_URL="https://relay.example.com" \
-  ANTHROPIC_AUTH_TOKEN="${MODELRELAY_API_KEY}" \
-  ANTHROPIC_MODEL="${1:-MODEL_ID}" \
+  ANTHROPIC_BASE_URL="https://api.modelrelay.io" \
+  ANTHROPIC_AUTH_TOKEN="$(tr -d '\r\n' < ~/.config/modelrelay/api_key)" \
+  ANTHROPIC_MODEL="${1:-<MODEL_ID>}" \
   claude "${@:2}"
 }
 ```
-*(Verify first with `curl -fsS "${RELAY_URL}/v1/messages" -H "Content-Type: application/json" -H "x-api-key: ${MODELRELAY_API_KEY}" -H "anthropic-version: 2023-06-01" -d '{"model":"MODEL_ID","max_tokens":32,"messages":[{"role":"user","content":"Hi"}]}'` that the local backend handles `/v1/messages`.)*
+
+### B4. OpenAI / Anthropic SDKs & Browser Apps
+
+- OpenAI SDKs: `base_url="https://api.modelrelay.io/v1"`, `Authorization: Bearer <key>`
+- Browser apps (PKCE OAuth 2.0): authorize via `GET https://modelrelay.io/oauth/authorize` (`callback_url` must be `https://` or loopback `http://localhost|127.0.0.1|[::1]`), exchange via CORS-enabled `POST https://modelrelay.io/api/v1/auth/keys` or `POST https://modelrelay.io/oauth/token`.
 
 ---
 
-### 5D. OpenAI & Anthropic SDKs / Generic Clients
+## Verification Checklist & Troubleshooting
 
-```bash
-# OpenAI-compatible clients & scripts
-export OPENAI_BASE_URL="https://relay.example.com/v1"
-export OPENAI_API_KEY="${MODELRELAY_API_KEY}"
-```
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="https://relay.example.com/v1",  # or "https://api.modelrelay.io/v1"
-    api_key=os.environ["MODELRELAY_API_KEY"],
-)
-```
-
----
-
-### 5E. Browser & Web Apps (OAuth 2.0 PKCE on `modelrelay.io`)
-
-Third-party browser apps (such as `https://chat.neuralcolumn.com`, `folkreel.neuralcolumn.com`, `trellis.neuralcolumn.com`, `explainer-studio.neuralcolumn.com`, `riff.neuralcolumn.com`) can connect hosted ModelRelay accounts without users copy-pasting API keys:
-
-1. Generate a 32-byte random `code_verifier`, compute `code_challenge = BASE64URL(SHA256(code_verifier))`, and redirect to:
-   ```text
-   https://modelrelay.io/oauth/authorize?callback_url=https://your.app/&code_challenge=...&code_challenge_method=S256&state=...&key_label=Your+App
-   ```
-   (`redirect_uri` and `client_name` aliases are also accepted; `callback_url` must be `https://` or loopback `http://localhost|127.0.0.1|[::1]`.)
-2. On approval, ModelRelay redirects to `callback_url?code=mrc_...&state=...` (single-use, 5-minute TTL; `?error=access_denied` on cancel).
-3. Exchange directly from the browser via CORS-enabled `POST https://modelrelay.io/api/v1/auth/keys` (JSON) or `POST https://modelrelay.io/oauth/token` (JSON or form):
-   ```json
-   { "code": "mrc_...", "code_verifier": "...", "code_challenge_method": "S256" }
-   ```
-   Response:
-   ```json
-   { "key": "mr_live_...", "access_token": "mr_live_...", "token_type": "Bearer", "api_base_url": "https://api.modelrelay.io/v1", "label": "Your App" }
-   ```
-4. Discover live models via `GET https://api.modelrelay.io/v1/models` (`Authorization: Bearer <key>`) and stream completions via `POST https://api.modelrelay.io/v1/chat/completions`.
-
----
-
-## Step 6 — Final Verification Checklist & Troubleshooting
-
-Before reporting completion to the user, verify every applicable item:
-
-- [ ] Local LLM backend responds on `http://127.0.0.1:<port>/v1/models` with expected model IDs.
-- [ ] Relay responds `200 OK` on `GET ${RELAY_URL}/health`.
-- [ ] `modelrelay-worker` is running persistently (`systemd`/`launchd`/Docker) and connected (`RegisterAck` in logs).
-- [ ] `GET ${RELAY_URL}/v1/models` with `Authorization: Bearer <key>` returns the GPU worker's live model IDs.
-- [ ] Streaming `POST ${RELAY_URL}/v1/chat/completions` (`"stream": true`) returns tokens end-to-end.
-- [ ] Configured client(s) (Pi / Codex / Claude Code) list or invoke the ModelRelay model cleanly.
-- [ ] Existing commercial provider keys/configs were **not** overwritten, and secret files are `chmod 600`.
-
-### Common Failure Modes
+- [ ] No raw `mr_live_...` secret was asked for in chat or printed to stdout; key files are `chmod 600`.
+- [ ] Existing commercial provider configs (`auth.json`, `config.toml`, `claude`) were preserved untouched.
+- [ ] `GET https://api.modelrelay.io/v1/models` returns the expected live models.
+- [ ] A streaming completion (`"stream": true`) responds cleanly end-to-end.
+- [ ] (GPU machine) Offered permanent startup service (`systemd` / `launchd` / Windows Scheduled Task / Docker).
 
 | Symptom | Cause & Fix |
 |---|---|
-| `401 Unauthorized` | Wrong/revoked API key, or self-hosted server restarted without `DATABASE_URL` (clearing in-memory keys). Recreate key or attach PostgreSQL. |
-| `503 Service Unavailable` | No connected worker advertises the requested `model` ID, or `PROVIDER_NAME` mismatch between server and worker, or tenant key mismatch on hosted `api.modelrelay.io`. Check `GET /v1/models`. |
-| `502 Bad Gateway` | Worker cannot reach `BACKEND_URL` locally, or backend crashed/returned malformed response. Test `curl http://127.0.0.1:<port>/v1/models` on the GPU host. |
-| Streaming arrives all at once | Reverse proxy is buffering responses. Add `proxy_buffering off;` in nginx or switch to Caddy. |
-| Worker WS closes with code `1008` | Invalid `WORKER_SECRET` (or revoked API key on hosted relay). Verify secret matches server/dashboard. |
-| Pi `/thinking` only shows `off` | Check `GET ${RELAY_URL}/v1/models` to verify your backend advertises `reasoning_efforts` / `reasoning` (or add a `modelOverrides` entry in `models.json`), then run `pi update --models`. |
-| Pi hits context overflow early | Check `context_length` / `meta.n_ctx` in `GET ${RELAY_URL}/v1/models` and run `pi update --models` (or set `modelOverrides.<id>.contextWindow` for bare backends). |
+| `401 Unauthorized` | Missing or revoked key — re-run `/login modelrelay` or local OAuth helper. |
+| `503 Service Unavailable` | No connected worker advertises that model ID, or worker is using a different account key. Check `GET https://api.modelrelay.io/v1/models`. |
+| `502 Bad Gateway` | Local LLM backend isn't reachable on `backend_url`. Verify `curl http://127.0.0.1:<port>/v1/models` on the GPU box. |
+| Worker WS closes with `1008` | Invalid/revoked `worker_secret` in `worker.toml`. Re-authenticate via OAuth or `https://modelrelay.io/setup`. |
+
+*(Looking to self-host the `modelrelay-server` binary itself? See `https://modelrelay.io/docs/self-hosting`.)*

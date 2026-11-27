@@ -1,7 +1,11 @@
+import { createHash, randomBytes } from "node:crypto";
+import { createServer } from "node:http";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_BASE_URL =
   process.env.MODELRELAY_BASE_URL || "https://api.modelrelay.io/v1";
+const DEFAULT_SITE_URL =
+  process.env.MODELRELAY_SITE_URL || "https://modelrelay.io";
 const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const LLAMA_ROUTER_STATUSES = new Set([
   "loaded",
@@ -762,11 +766,162 @@ async function fetchOllamaShow(
   }
 }
 
+function extractOAuthCode(input: string, expectedState: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error("Empty authorization input");
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    const parsed = new URL(trimmed);
+    const err = parsed.searchParams.get("error");
+    if (err) throw new Error(`ModelRelay authorization failed: ${err}`);
+    const state = parsed.searchParams.get("state");
+    if (state && state !== expectedState) throw new Error("OAuth state mismatch");
+    const code = parsed.searchParams.get("code");
+    if (!code) throw new Error("Missing authorization code in callback URL");
+    return code;
+  }
+  return trimmed;
+}
+
+async function loginWithModelRelayOAuth(callbacks: {
+  onAuth(info: { url: string; instructions?: string }): void;
+  onProgress?(message: string): void;
+  onManualCodeInput?(): Promise<string>;
+  signal?: AbortSignal;
+}) {
+  const siteOrigin = DEFAULT_SITE_URL.replace(/\/+$/, "");
+  const codeVerifier = randomBytes(32).toString("base64url");
+  const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+  const state = randomBytes(16).toString("base64url");
+
+  let resolveCode!: (code: string) => void;
+  let rejectCode!: (err: Error) => void;
+  const callbackPromise = new Promise<string>((resolve, reject) => {
+    resolveCode = resolve;
+    rejectCode = reject;
+  });
+
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (req.method !== "GET" || url.pathname !== "/callback") {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Not found");
+      return;
+    }
+    const err = url.searchParams.get("error");
+    if (err) {
+      res.writeHead(400, { "content-type": "text/html; charset=utf-8" });
+      res.end("<h1>ModelRelay sign-in cancelled</h1><p>You can close this tab.</p>");
+      rejectCode(new Error(`ModelRelay authorization failed: ${err}`));
+      return;
+    }
+    const gotState = url.searchParams.get("state");
+    const code = url.searchParams.get("code");
+    if (!code || gotState !== state) {
+      res.writeHead(400, { "content-type": "text/html; charset=utf-8" });
+      res.end("<h1>Invalid OAuth callback</h1><p>Please retry /login modelrelay in Pi.</p>");
+      rejectCode(new Error("Invalid OAuth callback state or missing code"));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    res.end("<h1>Connected to Pi!</h1><p>You can close this tab and return to your terminal.</p>");
+    resolveCode(code);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  const addr = server.address();
+  if (!addr || typeof addr === "string") {
+    server.close();
+    throw new Error("Failed to bind local OAuth callback server");
+  }
+
+  const callbackUrl = `http://127.0.0.1:${addr.port}/callback`;
+  const authorizeParams = new URLSearchParams({
+    callback_url: callbackUrl,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+    state,
+    key_label: "Pi Coding Agent",
+  });
+  const authorizeUrl = `${siteOrigin}/oauth/authorize?${authorizeParams}`;
+
+  const onAbort = () => rejectCode(new Error("Login cancelled"));
+  callbacks.signal?.addEventListener("abort", onAbort, { once: true });
+
+  callbacks.onAuth({
+    url: authorizeUrl,
+    instructions:
+      "Approve access in your browser to connect Pi to ModelRelay (no API key copy-paste needed).",
+  });
+
+  try {
+    const racers: Promise<string>[] = [callbackPromise];
+    if (callbacks.onManualCodeInput) {
+      racers.push(
+        callbacks
+          .onManualCodeInput()
+          .then((input) => extractOAuthCode(input, state)),
+      );
+    }
+    const code = await Promise.race(racers);
+    callbacks.onProgress?.("Exchanging ModelRelay authorization code...");
+
+    const tokenRes = await fetch(`${siteOrigin}/oauth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        code,
+        code_verifier: codeVerifier,
+        code_challenge_method: "S256",
+        callback_url: callbackUrl,
+      }),
+      signal: callbacks.signal,
+    });
+    if (!tokenRes.ok) {
+      const text = await tokenRes.text().catch(() => "");
+      throw new Error(`ModelRelay token exchange failed (${tokenRes.status}): ${text}`);
+    }
+    const token = (await tokenRes.json()) as { key?: string; access_token?: string };
+    const apiKey = token.key || token.access_token;
+    if (!apiKey) {
+      throw new Error("ModelRelay token exchange did not return an API key");
+    }
+    return {
+      access: apiKey,
+      refresh: apiKey,
+      expires: Date.now() + 100 * 365 * 24 * 60 * 60 * 1000,
+    };
+  } finally {
+    callbacks.signal?.removeEventListener("abort", onAbort);
+    server.close();
+    if (typeof server.closeAllConnections === "function") {
+      server.closeAllConnections();
+    }
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerProvider("modelrelay", {
     name: "ModelRelay",
     baseUrl: DEFAULT_BASE_URL,
+    apiKey: "$MODELRELAY_API_KEY",
     api: "openai-completions",
+    oauth: {
+      name: "ModelRelay (Browser OAuth)",
+      login: loginWithModelRelayOAuth,
+      async refreshToken(credentials) {
+        return credentials;
+      },
+      getApiKey(credentials) {
+        return credentials.access;
+      },
+    },
     async refreshModels({ credential, stored, publish, allowNetwork, baseUrl, signal }) {
       const root = (baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
       const serverOrigin = root.replace(/\/v1$/u, "");
@@ -775,12 +930,19 @@ export default function (pi: ExtensionAPI) {
         .map(({ api: _a, provider: _p, baseUrl: _b, ...rest }) => rest);
       const cachedById = new Map(cached.map((m) => [m.id, m]));
 
-      if (!allowNetwork || credential?.type !== "api_key" || !credential.key) {
+      const apiKey =
+        credential?.type === "api_key"
+          ? credential.key
+          : credential?.type === "oauth"
+            ? credential.access
+            : process.env.MODELRELAY_API_KEY;
+
+      if (!allowNetwork || !apiKey) {
         return cached;
       }
 
       const res = await fetch(`${root}/models`, {
-        headers: { Authorization: `Bearer ${credential.key}` },
+        headers: { Authorization: `Bearer ${apiKey}` },
         signal,
       });
       if (!res.ok) return cached;
@@ -805,7 +967,7 @@ export default function (pi: ExtensionAPI) {
 
       await Promise.all(
         llamaModelsToProbe.map(async (m) => {
-          const props = await fetchLlamaProps(serverOrigin, m.id, credential.key!, signal);
+          const props = await fetchLlamaProps(serverOrigin, m.id, apiKey, signal);
           if (props) {
             propsById.set(m.id, props);
             if (typeof props.models_autoload === "boolean") {
@@ -822,7 +984,7 @@ export default function (pi: ExtensionAPI) {
         const props = await fetchLlamaProps(
           serverOrigin,
           firstUnloadedPreset.id,
-          credential.key,
+          apiKey,
           signal,
         );
         if (typeof props?.models_autoload === "boolean") {
@@ -855,13 +1017,13 @@ export default function (pi: ExtensionAPI) {
 
       for (const m of explicitLm) {
         if (lmById.has(m.id)) continue;
-        const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, credential.key, signal);
+        const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, apiKey, signal);
         if (catalog) mergeLmCatalog(catalog);
       }
 
       for (const m of unknownBare) {
         if (lmById.has(m.id)) continue;
-        const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, credential.key, signal);
+        const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, apiKey, signal);
         if (!catalog) break;
         mergeLmCatalog(catalog);
       }
@@ -879,7 +1041,7 @@ export default function (pi: ExtensionAPI) {
       if (explicitOllama.length > 0) {
         await Promise.all(
           explicitOllama.map(async (m) => {
-            const info = await fetchOllamaShow(serverOrigin, m.id, credential.key!, signal);
+            const info = await fetchOllamaShow(serverOrigin, m.id, apiKey, signal);
             if (info) ollamaById.set(m.id, info);
           }),
         );
@@ -888,14 +1050,14 @@ export default function (pi: ExtensionAPI) {
         const firstInfo = await fetchOllamaShow(
           serverOrigin,
           ollamaCandidates[0].id,
-          credential.key,
+          apiKey,
           signal,
         );
         if (firstInfo) {
           ollamaById.set(ollamaCandidates[0].id, firstInfo);
           await Promise.all(
             ollamaCandidates.slice(1).map(async (m) => {
-              const info = await fetchOllamaShow(serverOrigin, m.id, credential.key!, signal);
+              const info = await fetchOllamaShow(serverOrigin, m.id, apiKey, signal);
               if (info) ollamaById.set(m.id, info);
             }),
           );

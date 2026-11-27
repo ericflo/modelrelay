@@ -1,4 +1,9 @@
+use std::sync::Arc;
+
+use axum::extract::State;
 use axum::response::{Html, IntoResponse, Response};
+
+use crate::state::CloudState;
 
 use super::OptionalSession;
 
@@ -352,11 +357,25 @@ const LANDING_JS: &str = r#"
 
 /// GET / — session-aware overhauled landing page.
 #[allow(clippy::too_many_lines)]
-pub async fn page(OptionalSession(session): OptionalSession) -> Response {
+pub async fn page(
+    OptionalSession(session): OptionalSession,
+    State(state): State<Arc<CloudState>>,
+) -> Response {
     let logged_in = match session {
         Some(s) => s.get::<String>("user_id").await.ok().flatten().is_some(),
         None => false,
     };
+
+    let relay_url = state.public_relay_url.trim().trim_end_matches('/');
+    let relay_host = relay_url
+        .strip_prefix("https://")
+        .or_else(|| relay_url.strip_prefix("http://"))
+        .unwrap_or(relay_url);
+    let site_url = state.public_site_url.trim().trim_end_matches('/');
+    let site_host = site_url
+        .strip_prefix("https://")
+        .or_else(|| site_url.strip_prefix("http://"))
+        .unwrap_or(site_url);
 
     let account_cta = if logged_in {
         r#"<h2>Your Relay Is Ready</h2>
@@ -381,7 +400,7 @@ pub async fn page(OptionalSession(session): OptionalSession) -> Response {
       <div>
         <div class="eyebrow-pill"><span class="eyebrow-dot"></span> Open-source LLM relay &middot; Built for Pi Coding Agent</div>
         <h1>One endpoint for all your <span class="hl">GPU boxes</span>.</h1>
-        <p class="hero-sub">Stop exposing ports or rewriting configs for every machine. Workers connect <em>out</em> over WebSocket to <code>api.modelrelay.io</code>, and Pi Coding Agent or <code>curl</code> routes straight to your live local models.</p>
+        <p class="hero-sub">Stop exposing ports or rewriting configs for every machine. Workers connect <em>out</em> over WebSocket to <code>{relay_host}</code>, and Pi Coding Agent or <code>curl</code> routes straight to your live local models.</p>
         <div class="hero-cta">
           <a href="#agents" class="btn btn-lg">Bootstrap With Your Agent &rarr;</a>
           <a href="/integrate#pi" class="btn btn-lg btn-secondary">Pi &amp; API Setup</a>
@@ -402,27 +421,27 @@ pub async fn page(OptionalSession(session): OptionalSession) -> Response {
         <div class="term-top">
           <div class="term-dots"><i></i><i></i><i></i></div>
           <div class="term-tabs">
-            <button type="button" class="term-tab active" data-tab-btn="hero-pi">Pi Provider + auth.json</button>
-            <button type="button" class="term-tab" data-tab-btn="hero-curl">curl api.modelrelay.io</button>
+            <button type="button" class="term-tab active" data-tab-btn="hero-pi">Pi Provider + OAuth</button>
+            <button type="button" class="term-tab" data-tab-btn="hero-curl">curl {relay_host}</button>
           </div>
         </div>
         <div class="term-pane active" data-tab-pane="hero-pi">
 <pre><span class="tk-c"># 1. Install live /v1/models discovery for Pi (1 command)</span>
-curl -fsSL https://modelrelay.io/pi/modelrelay.ts \
+curl -fsSL {site_url}/pi/modelrelay.ts \
   --create-dirs -o ~/.pi/agent/extensions/modelrelay.ts
 
-<span class="tk-c"># 2. Log in inside Pi (writes ~/.pi/agent/auth.json)</span>
+<span class="tk-c"># 2. Sign in via browser OAuth inside Pi (zero key pasting)</span>
 pi
 <span class="tk-k">/login</span> <span class="tk-s">modelrelay</span>
 <span class="tk-c"># Context length &amp; reasoning efforts auto-populate from /v1/models</span></pre>
         </div>
         <div class="term-pane" data-tab-pane="hero-curl">
 <pre><span class="tk-c"># List live models across your connected GPU workers</span>
-curl https://api.modelrelay.io/v1/models \
+curl {relay_url}/v1/models \
   -H <span class="tk-s">"Authorization: Bearer $MODELRELAY_API_KEY"</span>
 
 <span class="tk-c"># Stream chat completions directly from your home rig</span>
-curl -N https://api.modelrelay.io/v1/chat/completions \
+curl -N {relay_url}/v1/chat/completions \
   -H <span class="tk-s">"Content-Type: application/json"</span> \
   -H <span class="tk-s">"Authorization: Bearer $MODELRELAY_API_KEY"</span> \
   -d <span class="tk-g">'{{"model":"qwen3.5-27b","stream":true,"messages":[{{"role":"user","content":"Hi!"}}]}}'</span></pre>
@@ -441,14 +460,14 @@ curl -N https://api.modelrelay.io/v1/chat/completions \
       <div class="agent-banner">
         <div class="agent-top">
           <div>
-            <div class="eyebrow">Agent-First Setup &middot; modelrelay.io/AGENTS.md</div>
+            <div class="eyebrow">Agent-First Setup &middot; {site_host}/AGENTS.md</div>
             <h2>Already using Claude Code, Codex, or Pi? Let it set up ModelRelay.</h2>
-            <p>Use your existing commercial provider once to wire up your self-hosted alternative. Pick the machine you&rsquo;re on &mdash; <strong>Serve an LLM</strong> on your GPU box or <strong>Connect a Client</strong> on your laptop &mdash; and paste the prompt or run a one-liner below.</p>
+            <p>Use your existing commercial provider once to wire up your local models through <code>{relay_host}</code>. Pick the machine you&rsquo;re on &mdash; <strong>Serve an LLM</strong> on your GPU box or <strong>Connect a Client</strong> on your laptop &mdash; and authenticate via browser OAuth (never paste API keys into chat).</p>
           </div>
           <div class="agent-links">
             <a href="/AGENTS.md" class="btn btn-sm">Read AGENTS.md &rarr;</a>
             <button type="button" class="btn btn-sm btn-secondary" data-copy-target="agents-md-url">Copy AGENTS.md URL</button>
-            <span id="agents-md-url" style="display:none;">https://modelrelay.io/AGENTS.md</span>
+            <span id="agents-md-url" style="display:none;">{site_url}/AGENTS.md</span>
           </div>
         </div>
 
@@ -460,27 +479,27 @@ curl -N https://api.modelrelay.io/v1/chat/completions \
 
           <div class="home-panel prompt-panel active" data-tab-pane="ab-serve">
             <button type="button" class="copy-btn" data-copy-target="prompt-serve">Copy prompt</button>
-<pre><code id="prompt-serve">Read https://modelrelay.io/AGENTS.md and set up this machine to serve its local LLM through ModelRelay. Detect my running local LLM server (llama-server, Ollama, vLLM, LM Studio, SGLang, etc.), ask whether I'm connecting to api.modelrelay.io or a self-hosted relay (and help set up modelrelay-server if needed), install modelrelay-worker with models=["*"], offer to configure it to start permanently on boot for whatever platform this machine is running (systemd on Linux, launchd on macOS, Windows Service/Scheduled Task on Windows, or Docker), and verify GET /v1/models and a streaming chat completion end-to-end.</code></pre>
+<pre><code id="prompt-serve">Read {site_url}/AGENTS.md and set up this machine to serve its local LLM to {relay_url}. Detect my running local LLM server (llama-server, Ollama, vLLM, LM Studio, SGLang, etc.), install modelrelay-worker with models=["*"], authenticate via ModelRelay's local loopback OAuth flow without asking me to paste an API key into chat (or direct me to {site_url}/setup if headless), offer to configure it to start permanently on boot for whatever platform this machine is running (systemd on Linux, launchd on macOS, Scheduled Task on Windows, or Docker), and verify GET /v1/models and a streaming chat completion end-to-end.</code></pre>
             <div class="agent-prompt-note">
               <span>Paste into an existing <strong>Claude Code</strong>, <strong>Codex</strong>, or <strong>Pi</strong> session on your <strong>GPU machine</strong>.</span>
-              <span>Offers permanent startup service for Linux, macOS &amp; Windows</span>
+              <span>Browser OAuth (no keys in chat) &middot; Startup service for Linux, macOS &amp; Windows</span>
             </div>
             <div class="agent-oneliners">
               <div class="agent-oneliners-label">Or run a CLI one-liner on your GPU machine</div>
               <div class="oneliner-list">
                 <div class="oneliner-row">
                   <span class="oneliner-client">Claude Code</span>
-                  <code class="oneliner-code" id="cmd-serve-claude">claude "Read https://modelrelay.io/AGENTS.md and set up this machine to serve its local LLM through ModelRelay, offering to configure it to run permanently on startup for this platform."</code>
+                  <code class="oneliner-code" id="cmd-serve-claude">claude "Read {site_url}/AGENTS.md and set up this machine to serve its local LLM to {relay_url} via local OAuth (no keys pasted in chat), and offer permanent startup persistence for this platform."</code>
                   <button type="button" class="copy-btn" data-copy-target="cmd-serve-claude">Copy</button>
                 </div>
                 <div class="oneliner-row">
                   <span class="oneliner-client">Codex CLI</span>
-                  <code class="oneliner-code" id="cmd-serve-codex">codex "Read https://modelrelay.io/AGENTS.md and set up this machine to serve its local LLM through ModelRelay, offering to configure it to run permanently on startup for this platform."</code>
+                  <code class="oneliner-code" id="cmd-serve-codex">codex "Read {site_url}/AGENTS.md and set up this machine to serve its local LLM to {relay_url} via local OAuth (no keys pasted in chat), and offer permanent startup persistence for this platform."</code>
                   <button type="button" class="copy-btn" data-copy-target="cmd-serve-codex">Copy</button>
                 </div>
                 <div class="oneliner-row">
                   <span class="oneliner-client">Pi Agent</span>
-                  <code class="oneliner-code" id="cmd-serve-pi">pi "Read https://modelrelay.io/AGENTS.md and set up this machine to serve its local LLM through ModelRelay, offering to configure it to run permanently on startup for this platform."</code>
+                  <code class="oneliner-code" id="cmd-serve-pi">pi "Read {site_url}/AGENTS.md and set up this machine to serve its local LLM to {relay_url} via local OAuth (no keys pasted in chat), and offer permanent startup persistence for this platform."</code>
                   <button type="button" class="copy-btn" data-copy-target="cmd-serve-pi">Copy</button>
                 </div>
               </div>
@@ -489,27 +508,27 @@ curl -N https://api.modelrelay.io/v1/chat/completions \
 
           <div class="home-panel prompt-panel" data-tab-pane="ab-connect">
             <button type="button" class="copy-btn" data-copy-target="prompt-connect">Copy prompt</button>
-<pre><code id="prompt-connect">Read https://modelrelay.io/AGENTS.md and connect my installed coding agents (Pi, Codex CLI, and/or Claude Code) on this machine to my ModelRelay endpoint without overwriting my existing commercial providers. Ask me for my ModelRelay URL and API key, configure each installed client cleanly (keeping secrets chmod 600 and letting Pi pick up live models, context limits, and reasoning efforts dynamically from /v1/models), and verify a live completion responds.</code></pre>
+<pre><code id="prompt-connect">Read {site_url}/AGENTS.md and connect my installed coding agents (Pi, Codex CLI, and/or Claude Code) on this machine to {relay_url} without overwriting my existing commercial providers. Do not ask me for a URL or to paste an API key into chat — use ModelRelay's local loopback OAuth flow (or /login modelrelay for Pi, or pre-filled commands at {site_url}/integrate) so secrets go straight to chmod 600 files, let Pi discover models and limits dynamically, and verify a live completion responds.</code></pre>
             <div class="agent-prompt-note">
               <span>Paste into an existing <strong>Claude Code</strong>, <strong>Codex</strong>, or <strong>Pi</strong> session on your <strong>laptop / workstation</strong>.</span>
-              <span>Merges cleanly alongside your existing commercial keys</span>
+              <span>Zero keys pasted in chat &middot; Merges alongside existing commercial keys</span>
             </div>
             <div class="agent-oneliners">
               <div class="agent-oneliners-label">Or run a CLI one-liner on your dev machine</div>
               <div class="oneliner-list">
                 <div class="oneliner-row">
                   <span class="oneliner-client">Claude Code</span>
-                  <code class="oneliner-code" id="cmd-connect-claude">claude "Read https://modelrelay.io/AGENTS.md and connect my installed coding agents on this machine to my ModelRelay endpoint without overwriting my existing commercial providers."</code>
+                  <code class="oneliner-code" id="cmd-connect-claude">claude "Read {site_url}/AGENTS.md and connect my installed coding agents on this machine to {relay_url} via local OAuth (or /login modelrelay for Pi) without pasting keys into chat or overwriting existing providers."</code>
                   <button type="button" class="copy-btn" data-copy-target="cmd-connect-claude">Copy</button>
                 </div>
                 <div class="oneliner-row">
                   <span class="oneliner-client">Codex CLI</span>
-                  <code class="oneliner-code" id="cmd-connect-codex">codex "Read https://modelrelay.io/AGENTS.md and connect my installed coding agents on this machine to my ModelRelay endpoint without overwriting my existing commercial providers."</code>
+                  <code class="oneliner-code" id="cmd-connect-codex">codex "Read {site_url}/AGENTS.md and connect my installed coding agents on this machine to {relay_url} via local OAuth (or /login modelrelay for Pi) without pasting keys into chat or overwriting existing providers."</code>
                   <button type="button" class="copy-btn" data-copy-target="cmd-connect-codex">Copy</button>
                 </div>
                 <div class="oneliner-row">
                   <span class="oneliner-client">Pi Agent</span>
-                  <code class="oneliner-code" id="cmd-connect-pi">pi "Read https://modelrelay.io/AGENTS.md and connect my installed coding agents on this machine to my ModelRelay endpoint without overwriting my existing commercial providers."</code>
+                  <code class="oneliner-code" id="cmd-connect-pi">pi "Read {site_url}/AGENTS.md and connect my installed coding agents on this machine to {relay_url} via local OAuth (or /login modelrelay for Pi) without pasting keys into chat or overwriting existing providers."</code>
                   <button type="button" class="copy-btn" data-copy-target="cmd-connect-pi">Copy</button>
                 </div>
               </div>
