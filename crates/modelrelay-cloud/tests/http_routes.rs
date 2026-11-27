@@ -945,3 +945,179 @@ async fn sitemap_includes_downloads_and_docs_routes() {
         );
     }
 }
+
+// ─── OAuth 2.0 PKCE provider ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn oauth_authorize_rejects_invalid_params_with_400() {
+    let challenge = modelrelay_cloud::routes::oauth::compute_s256_challenge(
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    );
+
+    // Non-HTTPS non-localhost callback rejected
+    let (status, _) = get_with_session(&format!(
+        "/oauth/authorize?callback_url=http://evil.example/&code_challenge={challenge}&code_challenge_method=S256"
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Non-S256 PKCE rejected
+    let (status, _) = get_with_session(&format!(
+        "/oauth/authorize?callback_url=https://chat.neuralcolumn.com/&code_challenge={challenge}&code_challenge_method=plain"
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn oauth_authorize_logged_out_redirects_to_login_with_next() {
+    let challenge = modelrelay_cloud::routes::oauth::compute_s256_challenge(
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    );
+    let uri = format!(
+        "/oauth/authorize?callback_url=https%3A%2F%2Fchat.neuralcolumn.com%2F&code_challenge={challenge}&code_challenge_method=S256&state=mr.teststate&key_label=NeuralColumn+Chat"
+    );
+    let resp = app_with_session()
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        loc.starts_with("/login?next=%2Foauth%2Fauthorize"),
+        "expected redirect to /login?next=..., got: {loc}"
+    );
+}
+
+#[tokio::test]
+async fn login_preserves_safe_next_and_strips_open_redirect() {
+    let (status, body) = get_with_session("/login?next=%2Foauth%2Fauthorize%3Fstate%3Dmr.1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(r#"name="next" value="/oauth/authorize?state=mr.1""#));
+
+    let (status, body) = get_with_session("/login?next=https%3A%2F%2Fevil.example%2F").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("evil.example"));
+}
+
+#[tokio::test]
+async fn oauth_token_endpoints_support_cors_preflight_and_bypass_csrf() {
+    for path in ["/api/v1/auth/keys", "/oauth/token"] {
+        let preflight = app()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri(path)
+                    .header("origin", "https://chat.neuralcolumn.com")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            preflight
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "{path} OPTIONS must include Access-Control-Allow-Origin: *"
+        );
+
+        // POST JSON with missing verifier returns 400 JSON (NOT 403 CSRF) with CORS header
+        let resp = app_with_session()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"code":"mrc_bad","code_verifier":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "{path} should bypass CSRF and return 400 on missing verifier"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+    }
+}
+
+#[tokio::test]
+async fn oauth_authorize_deny_redirects_with_access_denied_and_state() {
+    let challenge = modelrelay_cloud::routes::oauth::compute_s256_challenge(
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    );
+    let router = app_with_session();
+
+    // First GET /login to acquire session cookie and CSRF token
+    let login_resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = login_resp
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(';').next())
+        .unwrap()
+        .to_owned();
+    let login_html = String::from_utf8(
+        login_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let csrf_marker = r#"name="_csrf" value=""#;
+    let start = login_html.find(csrf_marker).unwrap() + csrf_marker.len();
+    let end = login_html[start..].find('"').unwrap() + start;
+    let csrf_token = &login_html[start..end];
+
+    let form_body = format!(
+        "_csrf={csrf_token}&decision=deny&callback_url=https%3A%2F%2Fchat.neuralcolumn.com%2F&code_challenge={challenge}&code_challenge_method=S256&state=mr.cancel99&key_label=NeuralColumn+Chat"
+    );
+    let deny_resp = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/oauth/authorize")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(deny_resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        deny_resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok()),
+        Some("https://chat.neuralcolumn.com/?error=access_denied&state=mr.cancel99")
+    );
+}

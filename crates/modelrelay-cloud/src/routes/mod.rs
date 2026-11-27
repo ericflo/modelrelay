@@ -21,6 +21,7 @@ mod docs;
 mod downloads;
 mod landing;
 mod legal;
+pub mod oauth;
 mod pricing;
 mod updater;
 mod webhook;
@@ -64,6 +65,18 @@ pub fn router(state: Arc<CloudState>) -> Router {
         .route("/terms", get(legal::terms_page))
         .route("/login", get(auth::login_page).post(auth::login_submit))
         .route("/logout", post(auth::logout))
+        .route(
+            "/oauth/authorize",
+            get(oauth::authorize_get).post(oauth::authorize_post),
+        )
+        .route(
+            "/api/v1/auth/keys",
+            post(oauth::exchange_code).options(oauth::token_preflight),
+        )
+        .route(
+            "/oauth/token",
+            post(oauth::exchange_code).options(oauth::token_preflight),
+        )
         .route("/checkout", post(checkout::create))
         .route("/checkout/success", get(checkout::success))
         .route("/checkout/cancel", get(checkout::cancel))
@@ -283,6 +296,8 @@ const SESSION_EXEMPT_ROUTES: &[&str] = &[
     "/terms",
     "/privacy",
     "/signup",
+    "/api/v1/auth/keys",
+    "/oauth/token",
 ];
 
 /// URL prefixes that do not require a session.

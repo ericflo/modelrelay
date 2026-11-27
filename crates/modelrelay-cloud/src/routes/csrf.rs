@@ -65,7 +65,11 @@ pub async fn csrf_middleware(request: Request, next: Next) -> Response {
     }
 
     let path = request.uri().path().to_owned();
-    if path.starts_with("/webhook/") || path == "/logout" {
+    if path.starts_with("/webhook/")
+        || path == "/logout"
+        || path == "/api/v1/auth/keys"
+        || path == "/oauth/token"
+    {
         return next.run(request).await;
     }
 

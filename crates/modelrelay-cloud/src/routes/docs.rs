@@ -421,6 +421,27 @@ const DOC_API: &str = r#"
     </tbody>
   </table>
 </div>
+
+<h2 id="oauth">OAuth PKCE for Browser &amp; Web Apps</h2>
+<p>Browser applications (such as <a href="https://chat.neuralcolumn.com" target="_blank" rel="noopener">chat.neuralcolumn.com</a>) can connect a user&rsquo;s ModelRelay account with OAuth 2.0 PKCE (<code>S256</code>) so users never copy-paste an API key:</p>
+<ol>
+  <li>Generate a 32-byte random <code>code_verifier</code>, compute <code>code_challenge = BASE64URL(SHA256(code_verifier))</code>, and redirect the browser to:<br>
+    <code>https://modelrelay.io/oauth/authorize?callback_url=https://your.app/&amp;code_challenge=...&amp;code_challenge_method=S256&amp;state=...&amp;key_label=Your+App</code>
+  </li>
+  <li>After the user approves, ModelRelay redirects back to <code>callback_url?code=...&amp;state=...</code> (or <code>?error=access_denied</code> on cancel).</li>
+  <li>Exchange the single-use code directly from the browser via CORS-enabled <code>POST https://modelrelay.io/api/v1/auth/keys</code> (or <code>POST /oauth/token</code>):</li>
+</ol>
+<div class="code-shell">
+  <div class="code-shell-header"><span>POST https://modelrelay.io/api/v1/auth/keys</span><button type="button" class="copy-btn" data-copy-target="doc-api-oauth">Copy</button></div>
+  <pre><code id="doc-api-oauth">curl -X POST https://modelrelay.io/api/v1/auth/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "code": "mrc_...",
+    "code_verifier": "...",
+    "code_challenge_method": "S256"
+  }'
+# Returns: {"key":"mr_live_...","access_token":"mr_live_...","token_type":"Bearer","api_base_url":"https://api.modelrelay.io/v1"}</code></pre>
+</div>
 "#;
 
 const DOC_PI: &str = r#"

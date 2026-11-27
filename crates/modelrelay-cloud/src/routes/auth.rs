@@ -9,7 +9,7 @@ use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::Form;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
@@ -50,23 +50,47 @@ fn rate_limit_response(path: &str) -> Response {
 }
 
 #[derive(Deserialize)]
+pub struct LoginQuery {
+    next: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct LoginForm {
     email: String,
     password: String,
+    #[serde(default)]
+    next: Option<String>,
     #[allow(dead_code)]
     _csrf: Option<String>,
 }
 
+/// Allow only safe same-origin relative redirect targets (e.g. `/oauth/authorize?...`).
+fn safe_next_path(raw: Option<&str>) -> Option<&str> {
+    let s = raw?.trim();
+    if s.is_empty()
+        || s.len() > 2048
+        || !s.starts_with('/')
+        || s.starts_with("//")
+        || s.contains('\r')
+        || s.contains('\n')
+        || s.contains('\\')
+    {
+        return None;
+    }
+    Some(s)
+}
+
 /// GET /login — render the login form.
-pub async fn login_page(session: Session) -> Response {
+pub async fn login_page(session: Session, Query(query): Query<LoginQuery>) -> Response {
+    let next = safe_next_path(query.next.as_deref());
     if let Ok(Some(_)) = session.get::<String>("user_id").await {
-        return Redirect::to("/dashboard").into_response();
+        return Redirect::to(next.unwrap_or("/dashboard")).into_response();
     }
     let csrf_field = csrf::hidden_field(&session).await;
     Html(modelrelay_web::templates::page_shell(
         "Log In",
         "/login",
-        &login_form_html(None, &csrf_field),
+        &login_form_html(None, &csrf_field, next),
         false,
     ))
     .into_response()
@@ -85,6 +109,7 @@ pub async fn login_submit(
     }
 
     let csrf_field = csrf::hidden_field(&session).await;
+    let next = safe_next_path(form.next.as_deref());
 
     let Some(ref pool) = state.db else {
         return Html(modelrelay_web::templates::page_shell(
@@ -115,6 +140,7 @@ pub async fn login_submit(
                         &login_form_html(
                             Some("Service temporarily unavailable. Please try again in a moment."),
                             &csrf_field,
+                            next,
                         ),
                         false,
                     )),
@@ -128,7 +154,7 @@ pub async fn login_submit(
         return Html(modelrelay_web::templates::page_shell(
             "Log In",
             "/login",
-            &login_form_html(Some("Invalid email or password."), &csrf_field),
+            &login_form_html(Some("Invalid email or password."), &csrf_field, next),
             false,
         ))
         .into_response();
@@ -139,7 +165,7 @@ pub async fn login_submit(
         return Html(modelrelay_web::templates::page_shell(
             "Log In",
             "/login",
-            &login_form_html(Some("Invalid email or password."), &csrf_field),
+            &login_form_html(Some("Invalid email or password."), &csrf_field, next),
             false,
         ))
         .into_response();
@@ -152,7 +178,7 @@ pub async fn login_submit(
         tracing::error!("session insert error: {e}");
     }
 
-    Redirect::to("/dashboard").into_response()
+    Redirect::to(next.unwrap_or("/dashboard")).into_response()
 }
 
 /// POST /logout — clear session and redirect to home.
@@ -182,9 +208,17 @@ fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-fn login_form_html(error: Option<&str>, csrf_field: &str) -> String {
+fn login_form_html(error: Option<&str>, csrf_field: &str, next: Option<&str>) -> String {
     let error_html = error
         .map(|e| format!("<div class=\"error-msg\">{e}</div>"))
+        .unwrap_or_default();
+    let next_field = next
+        .map(|n| {
+            format!(
+                "<input type=\"hidden\" name=\"next\" value=\"{}\">",
+                modelrelay_web::templates::html_escape(n)
+            )
+        })
         .unwrap_or_default();
 
     format!(
@@ -204,6 +238,7 @@ fn login_form_html(error: Option<&str>, csrf_field: &str) -> String {
       {error_html}
       <form method="POST" action="/login" class="auth-form" id="login-form">
         {csrf_field}
+        {next_field}
         <div class="form-group">
           <label for="email">Email</label>
           <input type="email" id="email" name="email" required placeholder="you@example.com" autofocus>
@@ -294,5 +329,18 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
         assert_eq!(client_ip(&headers), "127.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn safe_next_path_rejects_open_redirects() {
+        assert_eq!(
+            safe_next_path(Some("/oauth/authorize?state=mr.1")),
+            Some("/oauth/authorize?state=mr.1")
+        );
+        assert_eq!(safe_next_path(Some("https://evil.example/")), None);
+        assert_eq!(safe_next_path(Some("//evil.example/")), None);
+        assert_eq!(safe_next_path(Some("/\\evil.example")), None);
+        assert_eq!(safe_next_path(Some("")), None);
+        assert_eq!(safe_next_path(None), None);
     }
 }

@@ -229,12 +229,29 @@ async fn main() {
 fn build_cors_layers(configured_origins: Option<&str>) -> (Option<CorsLayer>, Option<CorsLayer>) {
     let public_methods = AllowMethods::list([Method::GET, Method::POST, Method::OPTIONS]);
     let public_headers = AllowHeaders::list([
+        HeaderName::from_static("accept"),
         HeaderName::from_static("authorization"),
         HeaderName::from_static("content-type"),
         HeaderName::from_static("x-api-key"),
         HeaderName::from_static("x-model"),
         HeaderName::from_static("x-provider"),
         HeaderName::from_static("anthropic-version"),
+        HeaderName::from_static("anthropic-beta"),
+        HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
+        HeaderName::from_static("http-referer"),
+        HeaderName::from_static("x-title"),
+        HeaderName::from_static("x-client-request-id"),
+        HeaderName::from_static("x-session-affinity"),
+        HeaderName::from_static("session_id"),
+        HeaderName::from_static("x-stainless-lang"),
+        HeaderName::from_static("x-stainless-package-version"),
+        HeaderName::from_static("x-stainless-os"),
+        HeaderName::from_static("x-stainless-arch"),
+        HeaderName::from_static("x-stainless-runtime"),
+        HeaderName::from_static("x-stainless-runtime-version"),
+        HeaderName::from_static("x-stainless-retry-count"),
+        HeaderName::from_static("x-stainless-timeout"),
+        HeaderName::from_static("x-stainless-helper-method"),
     ]);
 
     match configured_origins.map(str::trim) {
