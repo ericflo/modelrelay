@@ -508,27 +508,27 @@ curl -N {relay_url}/v1/chat/completions \
 
           <div class="home-panel prompt-panel" data-tab-pane="ab-connect">
             <button type="button" class="copy-btn" data-copy-target="prompt-connect">Copy prompt</button>
-<pre><code id="prompt-connect">Read {site_url}/AGENTS.md and connect my installed coding agents (Pi, Codex CLI, and/or Claude Code) on this machine to {relay_url} without overwriting my existing commercial providers. Do not ask me for a URL or to paste an API key into chat — use ModelRelay's local loopback OAuth flow (or /login modelrelay for Pi, or pre-filled commands at {site_url}/integrate) so secrets go straight to chmod 600 files, let Pi discover models and limits dynamically, and verify a live completion responds.</code></pre>
+<pre><code id="prompt-connect">Read {site_url}/AGENTS.md and connect Pi on this machine to {relay_url} (if Pi isn't installed, ask whether to install Pi or which client I'd like to configure instead — don't modify Claude Code or Codex unless I ask). Do not ask me for a URL or to paste an API key into chat — use /login modelrelay for Pi or ModelRelay's local loopback OAuth flow (or pre-filled commands at {site_url}/integrate) so secrets go straight to chmod 600 files, keep existing commercial providers intact, and verify a live completion responds.</code></pre>
             <div class="agent-prompt-note">
               <span>Paste into an existing <strong>Claude Code</strong>, <strong>Codex</strong>, or <strong>Pi</strong> session on your <strong>laptop / workstation</strong>.</span>
-              <span>Zero keys pasted in chat &middot; Merges alongside existing commercial keys</span>
+              <span>Configures Pi by default &middot; Zero keys pasted in chat</span>
             </div>
             <div class="agent-oneliners">
               <div class="agent-oneliners-label">Or run a CLI one-liner on your dev machine</div>
               <div class="oneliner-list">
                 <div class="oneliner-row">
                   <span class="oneliner-client">Claude Code</span>
-                  <code class="oneliner-code" id="cmd-connect-claude">claude "Read {site_url}/AGENTS.md and connect my installed coding agents on this machine to {relay_url} via local OAuth (or /login modelrelay for Pi) without pasting keys into chat or overwriting existing providers."</code>
+                  <code class="oneliner-code" id="cmd-connect-claude">claude "Read {site_url}/AGENTS.md and connect Pi on this machine to {relay_url} via /login modelrelay or local OAuth (if Pi isn't installed, ask which client to configure; don't touch Claude Code or Codex unless asked, and never ask me to paste keys in chat)."</code>
                   <button type="button" class="copy-btn" data-copy-target="cmd-connect-claude">Copy</button>
                 </div>
                 <div class="oneliner-row">
                   <span class="oneliner-client">Codex CLI</span>
-                  <code class="oneliner-code" id="cmd-connect-codex">codex "Read {site_url}/AGENTS.md and connect my installed coding agents on this machine to {relay_url} via local OAuth (or /login modelrelay for Pi) without pasting keys into chat or overwriting existing providers."</code>
+                  <code class="oneliner-code" id="cmd-connect-codex">codex "Read {site_url}/AGENTS.md and connect Pi on this machine to {relay_url} via /login modelrelay or local OAuth (if Pi isn't installed, ask which client to configure; don't touch Claude Code or Codex unless asked, and never ask me to paste keys in chat)."</code>
                   <button type="button" class="copy-btn" data-copy-target="cmd-connect-codex">Copy</button>
                 </div>
                 <div class="oneliner-row">
                   <span class="oneliner-client">Pi Agent</span>
-                  <code class="oneliner-code" id="cmd-connect-pi">pi "Read {site_url}/AGENTS.md and connect my installed coding agents on this machine to {relay_url} via local OAuth (or /login modelrelay for Pi) without pasting keys into chat or overwriting existing providers."</code>
+                  <code class="oneliner-code" id="cmd-connect-pi">pi "Read {site_url}/AGENTS.md and connect Pi on this machine to {relay_url} via /login modelrelay or local OAuth without pasting keys into chat or overwriting existing providers."</code>
                   <button type="button" class="copy-btn" data-copy-target="cmd-connect-pi">Copy</button>
                 </div>
               </div>

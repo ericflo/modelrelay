@@ -7,7 +7,7 @@
 This guide is for coding agents (**Claude Code**, **OpenAI Codex CLI**, **Pi Coding Agent**, etc.) helping a user set up either of two separate machines against `https://api.modelrelay.io`:
 
 - **Workflow A — Serve an LLM (GPU machine):** Detect the running local LLM server (`llama-server`, Ollama, vLLM, LM Studio, SGLang, etc.), install `modelrelay-worker` pointing at `https://api.modelrelay.io`, authenticate **without pasting API keys into chat**, offer to configure permanent startup persistence for this OS/platform, and verify live `/v1/models` + streaming completions.
-- **Workflow B — Connect a Client (laptop / workstation):** Configure **Pi**, **Codex CLI**, and/or **Claude Code** against `https://api.modelrelay.io` **alongside** existing commercial providers — **without asking for a URL or pasting an API key into chat**.
+- **Workflow B — Connect a Client (laptop / workstation):** Configure **Pi** against `https://api.modelrelay.io` (if Pi isn't installed, ask whether to install Pi or which client to configure — **do not modify Claude Code or Codex CLI unless the user explicitly asks**) alongside existing commercial providers, **without asking for a URL or pasting an API key into chat**.
 
 ---
 
@@ -229,7 +229,7 @@ curl -N -fsS https://api.modelrelay.io/v1/chat/completions \
 
 ## Workflow B — Connect a Client (Laptop / Workstation)
 
-Check which coding agents are installed (`command -v pi codex claude`) and configure each one against `https://api.modelrelay.io` **without overwriting existing commercial providers** and **without asking the user to paste an API key into chat**.
+Check whether **Pi** is installed (`command -v pi`). If Pi is installed, configure Pi against `https://api.modelrelay.io` (Section B1). If Pi is **not** installed, ask the user whether they want to install Pi or which client they want configured instead. **Do not modify Claude Code or Codex CLI configs unless the user explicitly asks you to.** Always keep existing commercial providers intact and **never ask the user to paste an API key into chat**.
 
 ### B1. Pi Coding Agent (`@earendil-works/pi-coding-agent`) — Recommended
 
@@ -265,7 +265,7 @@ pi --list-models | grep -i modelrelay
 ```
 Inside `pi`, run `/model` to select any relayed model and `/thinking` (`Shift+Tab`) to adjust effort.
 
-### B2. OpenAI Codex CLI (Alongside Commercial OpenAI)
+### B2. OpenAI Codex CLI (Only If Explicitly Requested)
 
 1. Run the **Section 1 loopback OAuth helper** (if `~/.config/modelrelay/api_key` does not already exist) — or direct the user to `https://modelrelay.io/integrate#clients` for a pre-filled 1-click copy-paste command.
 2. Append a separate `modelrelay` provider to `~/.codex/config.toml` **without** changing their default `model_provider`:
@@ -282,7 +282,7 @@ wire_api = "chat"
 codex -c model_provider=modelrelay -m <MODEL_ID>
 ```
 
-### B3. Claude Code (Alongside Commercial Anthropic)
+### B3. Claude Code (Only If Explicitly Requested)
 
 Claude Code uses the Anthropic Messages API (`POST https://api.modelrelay.io/v1/messages`, forwarded transparently when the local backend supports `/v1/messages`, e.g. `llama-server`).
 

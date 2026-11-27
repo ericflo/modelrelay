@@ -1246,6 +1246,8 @@ async fn landing_page_includes_agent_bootstrap_prompts_and_agents_md_link() {
     assert!(!body.contains("prompt-full"));
     assert!(!body.contains("help set up modelrelay-server"));
     assert!(!body.contains("Ask me for my ModelRelay URL and API key"));
+    assert!(!body.contains("my installed coding agents (Pi, Codex CLI, and/or Claude Code)"));
+    assert!(body.contains("connect Pi on this machine"));
 
     let (setup_status, setup_body) = get("/setup").await;
     assert_eq!(setup_status, StatusCode::OK);
