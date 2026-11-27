@@ -87,6 +87,7 @@ type LmStudioModelMeta = {
   displayName?: string;
   arch?: string;
   isEmbedding: boolean;
+  isLoaded: boolean;
   contextWindow?: number;
   vision?: boolean;
   reasoning?: boolean | { supported?: boolean; efforts?: string[]; allowed_options?: unknown[] };
@@ -607,7 +608,7 @@ async function fetchLmStudioCatalog(
           const defaultCtx =
             positiveInt(instances[0]?.config?.context_length) ??
             positiveInt(entry.max_context_length);
-          const baseMeta: Omit<LmStudioModelMeta, "id" | "contextWindow"> = {
+          const baseMeta: Omit<LmStudioModelMeta, "id" | "contextWindow" | "isLoaded"> = {
             displayName: entry.display_name,
             arch: entry.architecture,
             isEmbedding,
@@ -620,13 +621,19 @@ async function fetchLmStudioCatalog(
             reasoning: entry.capabilities?.reasoning,
           };
           if (entry.key) {
-            out.set(entry.key, { ...baseMeta, id: entry.key, contextWindow: defaultCtx });
+            out.set(entry.key, {
+              ...baseMeta,
+              id: entry.key,
+              isLoaded: instances.length > 0,
+              contextWindow: defaultCtx,
+            });
           }
           for (const inst of instances) {
             if (inst.id) {
               out.set(inst.id, {
                 ...baseMeta,
                 id: inst.id,
+                isLoaded: true,
                 contextWindow:
                   positiveInt(inst.config?.context_length) ?? defaultCtx,
               });
@@ -652,6 +659,7 @@ async function fetchLmStudioCatalog(
         id?: string;
         type?: string;
         arch?: string;
+        state?: string;
         max_context_length?: number;
         loaded_context_length?: number;
         capabilities?: string[] | { vision?: boolean; reasoning?: boolean };
@@ -677,6 +685,8 @@ async function fetchLmStudioCatalog(
         id: entry.id,
         arch: entry.arch,
         isEmbedding,
+        isLoaded:
+          entry.state === "loaded" || positiveInt(entry.loaded_context_length) !== undefined,
         contextWindow:
           positiveInt(entry.loaded_context_length) ?? positiveInt(entry.max_context_length),
         vision,
@@ -820,9 +830,19 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // 2. LM Studio: one catalog call (/api/v1/models or /api/v0/models) enriches every model
-      //    from that LM Studio worker with loaded_context_length, vision, and reasoning capabilities.
+      // 2. LM Studio: query /api/v1/models (or /api/v0/models) once per distinct LM Studio worker.
+      //    Each response covers every model on that machine, so models already returned by an
+      //    earlier catalog are skipped while models on a second LM Studio machine get probed.
       const lmById = new Map<string, LmStudioModelMeta>();
+      const mergeLmCatalog = (catalog: Map<string, LmStudioModelMeta>) => {
+        for (const [k, v] of catalog) {
+          const existing = lmById.get(k);
+          if (!existing || (!existing.isLoaded && v.isLoaded)) {
+            lmById.set(k, v);
+          }
+        }
+      };
+
       const lmCandidates = candidates.filter(
         (m) =>
           !isLlamaCppModel(m) &&
@@ -830,17 +850,20 @@ export default function (pi: ExtensionAPI) {
           (!hasExplicitRuntimeContext(m) || !hasExplicitReasoningMetadata(m)) &&
           (isLmStudioModel(m) || !isOllamaModel(m)),
       );
-      const lmProbeFirst = lmCandidates.find(isLmStudioModel) ?? lmCandidates[0];
-      if (lmProbeFirst) {
-        const catalog = await fetchLmStudioCatalog(
-          serverOrigin,
-          lmProbeFirst.id,
-          credential.key,
-          signal,
-        );
-        if (catalog) {
-          for (const [k, v] of catalog) lmById.set(k, v);
-        }
+      const explicitLm = lmCandidates.filter(isLmStudioModel);
+      const unknownBare = lmCandidates.filter((m) => !isLmStudioModel(m));
+
+      for (const m of explicitLm) {
+        if (lmById.has(m.id)) continue;
+        const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, credential.key, signal);
+        if (catalog) mergeLmCatalog(catalog);
+      }
+
+      for (const m of unknownBare) {
+        if (lmById.has(m.id)) continue;
+        const catalog = await fetchLmStudioCatalog(serverOrigin, m.id, credential.key, signal);
+        if (!catalog) break;
+        mergeLmCatalog(catalog);
       }
 
       // 3. Ollama: probe POST /api/show ONLY for models still missing metadata after LM Studio.
