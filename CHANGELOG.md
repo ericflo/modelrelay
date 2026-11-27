@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## Desktop [0.1.8] — 2026-11-26
+
+### Fixed
+
+- Report connected status only after authentication succeeds and `RegisterAck` arrives instead of optimistically marking connected on TCP open
+- Surface backend/worker error states reliably in the tray and dashboard, preserve existing settings on partial JSON updates, and harden reconnect/lifecycle handling
+- Includes all `modelrelay-worker` 0.1.8 reliability fixes (cancellation `499` acks, split UTF-8 SSE chunk reassembly, isolated per-request backend errors, non-2xx streaming error status propagation, atomic load accounting, and bounded reconnect jitter)
+
+### Changed
+
+- Bumped desktop package metadata and `tauri.conf.json` to `0.1.8` for the coordinated `desktop-v0.1.8` release
+
+## [0.1.8] — 2026-11-26
+
+### Added
+
+- Formal TLA+ verification of the proxy–worker protocol (`spec/ModelRelay.tla`, `scripts/check-model.sh`, `docs/verification.md`) checking 14 safety invariants, 3 temporal liveness properties, and 13 refuted `Unsafe*` negative controls, wired into the `Dockerfile` build gate
+- Targeted adversarial reliability test suite (`crates/modelrelay-server/tests/adversarial_reliability.rs`) and `--healthcheck` flag for container health probes
+
+### Fixed
+
+- **Slot leaks & cancellation:** workers acknowledge `Cancel` frames with status `499` and the server arms a grace-period cancel-reap timer so disconnected clients can no longer permanently leak worker concurrency slots
+- **Heartbeats & wedged workers:** decoupled application-level JSON `Ping`/`Pong` heartbeat tracking from transport-level WebSocket `Ping` frames and replaced 25ms busy-polling with per-worker `Notify` wakeups
+- **Queueing, routing & streaming:** drained compatible queued/requeued requests immediately on worker registration and disconnect, requeued disconnected work under `request.provider` (not `worker.provider`), enforced `ProviderRouting` (`only`/`ignore`/`order`/`sort`/`allow_fallbacks`) on queued and fallback dispatch, terminated mid-stream disconnects cleanly with SSE errors instead of requeueing Franken-streams, preserved non-2xx streaming error HTTP status codes, and reassembled split multi-byte UTF-8 chunks incrementally
+- **Isolation, security & lifecycle:** isolated per-request backend failures from sibling requests and WebSocket sessions, verified worker ownership before touching client response channels, removed finished requests before sending `ResponseComplete` for accurate heartbeat load reporting, enforced tenant isolation for API-key workers, added Anthropic `x-api-key` support, stripped client credentials and RFC 9110 hop-by-hop headers, raised request body limit to 64 MiB, wired `SIGTERM` graceful drain, and updated `cookie` (`0.18.3`, `RUSTSEC-2026-0594`) and `url` (`2.5.9`, `RUSTSEC-2026-0592`)
+
+### Changed
+
+- Bumped workspace crate versions to `0.1.8` for this coordinated release cut
+
 ## Desktop [0.1.7] — 2026-04-23
 
 ### Changed
@@ -294,7 +324,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform release binaries (Linux x86_64/aarch64, macOS x86_64/aarch64) via GitHub Actions.
 - CI pipeline with formatting, linting, and test checks.
 
-[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/ericflo/modelrelay/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/ericflo/modelrelay/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/ericflo/modelrelay/compare/v0.1.6...v0.1.7
 [0.2.1]: https://github.com/ericflo/modelrelay/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ericflo/modelrelay/compare/v0.1.6...v0.2.0

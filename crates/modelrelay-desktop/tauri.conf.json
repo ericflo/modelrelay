@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nickel-org/nickel.rs/master/docs/tauri.conf.json",
   "productName": "ModelRelay",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "identifier": "com.modelrelay.desktop",
   "build": {
     "frontendDist": "./ui"
