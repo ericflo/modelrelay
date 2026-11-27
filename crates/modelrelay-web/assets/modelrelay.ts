@@ -55,6 +55,8 @@ type RelayModel = {
   reasoning?: boolean | { supported?: boolean; efforts?: string[]; allowed_options?: unknown[] };
   reasoning_efforts?: string[];
   supported_reasoning_efforts?: string[];
+  supported_reasoning_levels?: string[];
+  reasoning_levels?: string[];
   reasoning_effort_levels?: string[];
   reasoning_effort?: string[];
   thinking_levels?: string[];
@@ -71,9 +73,17 @@ type RelayModel = {
         reasoning_efforts?: string[];
       };
   modalities?: { vision?: boolean; audio?: boolean };
+  input_modalities?: string[];
   vision?: boolean;
   multimodal?: boolean;
   meta?: { n_ctx?: number; n_ctx_train?: number; multimodal?: boolean };
+  limits?: {
+    context_length?: number;
+    context_window?: number;
+    max_output_tokens?: number;
+    max_completion_tokens?: number;
+    max_tokens?: number;
+  };
   top_provider?: { context_length?: number; max_completion_tokens?: number };
   architecture?: { input_modalities?: string[]; output_modalities?: string[] };
   compat?: Record<string, unknown>;
@@ -218,6 +228,8 @@ function hasExplicitRuntimeContext(m: RelayModel): boolean {
       positiveInt(m.max_model_len) ??
       positiveInt(m.max_context_length) ??
       positiveInt(m.n_ctx) ??
+      positiveInt(m.limits?.context_length) ??
+      positiveInt(m.limits?.context_window) ??
       positiveInt(m.top_provider?.context_length),
   );
 }
@@ -229,6 +241,8 @@ function hasExplicitReasoningMetadata(m: RelayModel): boolean {
       m.thinking_level_map ||
       m.reasoning_efforts ||
       m.supported_reasoning_efforts ||
+      m.supported_reasoning_levels ||
+      m.reasoning_levels ||
       m.reasoning_effort_levels ||
       caps?.reasoning_efforts ||
       m.thinking_levels ||
@@ -373,6 +387,8 @@ function resolveThinking(
   const rawEfforts =
     m.reasoning_efforts ??
     m.supported_reasoning_efforts ??
+    m.supported_reasoning_levels ??
+    m.reasoning_levels ??
     m.reasoning_effort_levels ??
     caps?.reasoning_efforts ??
     m.thinking_levels ??
@@ -529,6 +545,9 @@ function resolveVision(
   const caps = capsObject(m);
   if (Array.isArray(m.architecture?.input_modalities)) {
     return m.architecture.input_modalities.includes("image");
+  }
+  if (Array.isArray(m.input_modalities)) {
+    return m.input_modalities.includes("image");
   }
   if (typeof props?.modalities?.vision === "boolean") {
     return props.modalities.vision;
@@ -1160,6 +1179,8 @@ export default function (pi: ExtensionAPI) {
           positiveInt(m.max_model_len) ??
           positiveInt(m.max_context_length) ??
           positiveInt(m.n_ctx) ??
+          positiveInt(m.limits?.context_length) ??
+          positiveInt(m.limits?.context_window) ??
           positiveInt(m.top_provider?.context_length) ??
           positiveInt(props?.default_generation_settings?.n_ctx) ??
           positiveInt(lm?.contextWindow) ??
@@ -1174,6 +1195,9 @@ export default function (pi: ExtensionAPI) {
             positiveInt(m.max_output_tokens) ??
             positiveInt(m.max_completion_tokens) ??
             positiveInt(m.max_tokens) ??
+            positiveInt(m.limits?.max_output_tokens) ??
+            positiveInt(m.limits?.max_completion_tokens) ??
+            positiveInt(m.limits?.max_tokens) ??
             positiveInt(m.top_provider?.max_completion_tokens) ??
             32768,
           contextWindow,

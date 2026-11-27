@@ -1518,7 +1518,8 @@ impl ProxyServerCore {
                 }
                 if worker.native_metadata_reported
                     || worker.is_draining
-                    || !worker.supports_endpoint("/v1/models")
+                    || !(worker.supports_endpoint("/v1/models")
+                        || worker.supports_endpoint("/models"))
                     || !self.worker_notifiers.contains_key(worker_id)
                     || worker.selection_load() >= worker.max_concurrent
                 {
@@ -1540,12 +1541,22 @@ impl ProxyServerCore {
     /// worker to populate cached metadata for legacy workers that did not send
     /// `model_metadata` in `Register`. Returns `None` if the worker is unavailable or busy.
     pub fn submit_worker_models_probe(&mut self, worker_id: &str) -> Option<PendingHttpResponse> {
+        self.submit_worker_models_probe_path(worker_id, "/v1/models")
+    }
+
+    /// Dispatches a non-queued `GET <endpoint_path>` metadata probe directly to a specific
+    /// connected legacy worker (e.g. `"/v1/models"` or fallback `"/models"`).
+    pub fn submit_worker_models_probe_path(
+        &mut self,
+        worker_id: &str,
+        endpoint_path: &str,
+    ) -> Option<PendingHttpResponse> {
         let (provider, owner_key_id, probe_model) = {
             let worker = self.workers.get_mut(worker_id)?;
             if worker.is_draining
                 || worker.native_metadata_reported
                 || worker.selection_load() >= worker.max_concurrent
-                || !worker.supports_endpoint("/v1/models")
+                || !worker.supports_endpoint(endpoint_path)
                 || !self.worker_notifiers.contains_key(worker_id)
             {
                 return None;
@@ -1574,7 +1585,7 @@ impl ProxyServerCore {
             owner_key_id,
             queued_at: Instant::now(),
             transport: RequestTransport {
-                endpoint_path: "/v1/models".to_string(),
+                endpoint_path: endpoint_path.to_string(),
                 method: "GET".to_string(),
                 is_streaming: false,
                 body: String::new(),

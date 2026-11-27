@@ -198,6 +198,7 @@ impl WorkerDaemonConfig {
             }
             if endpoint_path == "/props"
                 || endpoint_path.starts_with("/props?")
+                || endpoint_path == "/models"
                 || endpoint_path.starts_with("/api/")
             {
                 return format!("{root}{endpoint_path}");
@@ -1348,20 +1349,47 @@ async fn discover_backend_models(
     client: &reqwest::Client,
     config: &WorkerDaemonConfig,
 ) -> Result<(Vec<String>, ModelMetadataMap), BoxError> {
-    let response = client
-        .get(config.backend_url("/v1/models"))
-        .timeout(MODEL_DISCOVERY_TIMEOUT)
-        .send()
-        .await?;
-    let response = response.error_for_status()?;
-    let body = response.json::<serde_json::Value>().await?;
-    let Some((models, metadata)) = parse_openai_models_response(&body) else {
-        return Err(Box::new(io::Error::other(
-            "backend /v1/models response missing data array",
-        )));
-    };
+    let mut last_error: Option<BoxError> = None;
+    for path in ["/v1/models", "/models"] {
+        let response = match client
+            .get(config.backend_url(path))
+            .timeout(MODEL_DISCOVERY_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                last_error = Some(Box::new(err));
+                break;
+            }
+        };
+        let response = match response.error_for_status() {
+            Ok(resp) => resp,
+            Err(err) => {
+                last_error = Some(Box::new(err));
+                continue;
+            }
+        };
+        let body = match response.json::<serde_json::Value>().await {
+            Ok(body) => body,
+            Err(err) => {
+                last_error = Some(Box::new(err));
+                continue;
+            }
+        };
+        if let Some((models, metadata)) = parse_openai_models_response(&body) {
+            return Ok((models, metadata));
+        }
+        last_error = Some(Box::new(io::Error::other(format!(
+            "backend {path} response missing data array"
+        ))));
+    }
 
-    Ok((models, metadata))
+    Err(last_error.unwrap_or_else(|| {
+        Box::new(io::Error::other(
+            "backend /v1/models and /models discovery failed",
+        ))
+    }))
 }
 
 #[cfg(test)]

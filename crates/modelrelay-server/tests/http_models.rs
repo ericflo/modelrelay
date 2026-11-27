@@ -540,3 +540,96 @@ async fn hanging_metadata_probe_times_out_promptly_instead_of_request_timeout() 
 
     worker_task.abort();
 }
+
+#[tokio::test]
+async fn models_endpoint_legacy_probe_falls_back_from_v1_models_to_models() {
+    let core = Arc::new(Mutex::new(ProxyServerCore::new()));
+    let worker_socket_app = WorkerSocketApp::new(core.clone())
+        .with_provider("openai", WorkerSocketProviderConfig::enabled("top-secret"));
+    let app = ProxyHttpApp::new(core.clone())
+        .with_worker_socket_app(worker_socket_app)
+        .with_legacy_models_probe(true)
+        .router();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("listener local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve proxy app");
+    });
+
+    let mut req = format!("ws://{addr}/v1/worker/connect?provider=openai")
+        .into_client_request()
+        .expect("ws request");
+    req.headers_mut().insert(
+        "x-worker-secret",
+        "top-secret".parse().expect("secret header"),
+    );
+    let (mut ws, _) = connect_async(req).await.expect("connect legacy worker");
+
+    let legacy_reg = r#"{"type":"register","worker_name":"ryzen-box","models":["inkling-2-mini"],"max_concurrent":2,"protocol_version":"2026-04-bridge-v1","current_load":0}"#;
+    ws.send(Message::Text(legacy_reg.into()))
+        .await
+        .expect("send legacy register");
+    let _ = ws.next().await.expect("register ack").expect("ws text");
+
+    let worker_task = tokio::spawn(async move {
+        while let Some(Ok(Message::Text(text))) = ws.next().await {
+            if let Ok(ServerToWorkerMessage::Request(req)) = serde_json::from_str(&text) {
+                let resp = if req.endpoint_path == "/v1/models" {
+                    ResponseCompleteMessage {
+                        request_id: req.request_id,
+                        status_code: 404,
+                        headers: HeaderMap::new(),
+                        body: Some("Not Found".to_string()),
+                        token_counts: None,
+                    }
+                } else {
+                    assert_eq!(req.endpoint_path, "/models");
+                    ResponseCompleteMessage {
+                        request_id: req.request_id,
+                        status_code: 200,
+                        headers: HeaderMap::from([(
+                            "content-type".to_string(),
+                            "application/json".to_string(),
+                        )]),
+                        body: Some(
+                            json!({
+                                "object": "list",
+                                "data": [{
+                                    "id": "inkling-2-mini",
+                                    "object": "model",
+                                    "status": { "value": "loaded" },
+                                    "meta": { "n_ctx": 262_144 },
+                                    "context_window": 262_144,
+                                    "max_output_tokens": 262_136,
+                                    "supported_reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+                                }]
+                            })
+                            .to_string(),
+                        ),
+                        token_counts: None,
+                    }
+                };
+                let payload = serde_json::to_string(&WorkerToServerMessage::ResponseComplete(resp))
+                    .expect("serialize probe response");
+                ws.send(Message::Text(payload.into()))
+                    .await
+                    .expect("send probe response");
+            }
+        }
+    });
+
+    let (status, body) = get_json(addr, "/v1/models").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["data"][0]["id"], "inkling-2-mini");
+    assert_eq!(body["data"][0]["context_window"], 262_144);
+    assert_eq!(body["data"][0]["max_output_tokens"], 262_136);
+    assert_eq!(
+        body["data"][0]["supported_reasoning_efforts"],
+        json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+    );
+
+    worker_task.abort();
+}

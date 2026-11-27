@@ -309,87 +309,116 @@ async fn models_handler(State(state): State<HttpState>, headers: AxumHeaderMap) 
     .into_response()
 }
 
+enum LegacyProbeOutcome {
+    Metadata(modelrelay_protocol::ModelMetadataMap),
+    /// The worker replied cleanly, but this path returned non-2xx or unparseable JSON
+    /// (so falling back to an alternate path such as `/models` is worthwhile).
+    TryFallback,
+    /// Timeout or transport failure — do not burn another timeout on fallback paths.
+    Stop,
+}
+
+async fn run_single_legacy_models_probe(
+    core_ref: &Arc<Mutex<ProxyServerCore>>,
+    worker_id: &str,
+    endpoint_path: &str,
+) -> LegacyProbeOutcome {
+    let pending = {
+        let mut core = core_ref.lock().await;
+        core.submit_worker_models_probe_path(worker_id, endpoint_path)
+    };
+    let Some(pending) = pending else {
+        return LegacyProbeOutcome::TryFallback;
+    };
+
+    let request_id = pending.request_id.clone();
+    let mut guard = HttpRequestCancellationGuard::new(Arc::clone(core_ref), &pending);
+    let result = tokio::time::timeout(LEGACY_MODELS_PROBE_TIMEOUT, pending.response_rx).await;
+    match result {
+        Ok(Ok(Ok(response))) => {
+            guard.disarm();
+            if (200..300).contains(&response.status_code) {
+                if let Some(body) = response.body.as_deref()
+                    && let Ok(parsed) = serde_json::from_str::<Value>(body)
+                    && let Some((_, metadata)) = parse_openai_models_response(&parsed)
+                    && !metadata.is_empty()
+                {
+                    return LegacyProbeOutcome::Metadata(metadata);
+                }
+                tracing::warn!(
+                    worker_id = %worker_id,
+                    endpoint_path = %endpoint_path,
+                    status = response.status_code,
+                    "legacy worker models probe returned empty or unparseable body"
+                );
+                LegacyProbeOutcome::TryFallback
+            } else {
+                tracing::warn!(
+                    worker_id = %worker_id,
+                    endpoint_path = %endpoint_path,
+                    status = response.status_code,
+                    "legacy worker models probe returned non-2xx status"
+                );
+                LegacyProbeOutcome::TryFallback
+            }
+        }
+        Ok(Ok(Err(reason))) => {
+            guard.disarm();
+            tracing::warn!(
+                worker_id = %worker_id,
+                endpoint_path = %endpoint_path,
+                ?reason,
+                "legacy worker models probe failed"
+            );
+            LegacyProbeOutcome::Stop
+        }
+        Ok(Err(_)) => {
+            guard.disarm();
+            LegacyProbeOutcome::Stop
+        }
+        Err(_) => {
+            guard.disarm();
+            tracing::warn!(
+                worker_id = %worker_id,
+                endpoint_path = %endpoint_path,
+                request_id = %request_id,
+                "legacy worker models probe timed out"
+            );
+            let mut core = core_ref.lock().await;
+            let _ = core.cancel_request(&request_id, CancelReason::RequestTimedOut);
+            LegacyProbeOutcome::Stop
+        }
+    }
+}
+
 async fn probe_legacy_workers_metadata(state: &HttpState, owner_key_id: Option<&str>) {
-    let pending_probes = {
-        let mut core = state.core.lock().await;
-        let targets = core.legacy_metadata_probe_targets(
+    let targets = {
+        let core = state.core.lock().await;
+        core.legacy_metadata_probe_targets(
             &state.models_provider,
             owner_key_id,
             Instant::now(),
             LEGACY_MODELS_PROBE_TTL,
-        );
-        targets
-            .into_iter()
-            .filter_map(|worker_id| {
-                core.submit_worker_models_probe(&worker_id)
-                    .map(|pending| (worker_id, pending))
-            })
-            .collect::<Vec<_>>()
+        )
     };
 
-    if pending_probes.is_empty() {
+    if targets.is_empty() {
         return;
     }
 
     let core_ref = &state.core;
-    let probe_futs = pending_probes
-        .into_iter()
-        .map(|(worker_id, pending)| async move {
-            let request_id = pending.request_id.clone();
-            let mut guard = HttpRequestCancellationGuard::new(Arc::clone(core_ref), &pending);
-            let result =
-                tokio::time::timeout(LEGACY_MODELS_PROBE_TIMEOUT, pending.response_rx).await;
-            match result {
-                Ok(Ok(Ok(response))) => {
-                    guard.disarm();
-                    if (200..300).contains(&response.status_code) {
-                        if let Some(body) = response.body.as_deref()
-                            && let Ok(parsed) = serde_json::from_str::<Value>(body)
-                            && let Some((_, metadata)) = parse_openai_models_response(&parsed)
-                            && !metadata.is_empty()
-                        {
-                            return Some((worker_id, metadata));
-                        }
-                        tracing::debug!(
-                            worker_id = %worker_id,
-                            status = response.status_code,
-                            "legacy worker /v1/models probe returned empty or unparseable body"
-                        );
-                    } else {
-                        tracing::debug!(
-                            worker_id = %worker_id,
-                            status = response.status_code,
-                            "legacy worker /v1/models probe returned non-2xx status"
-                        );
-                    }
-                    None
-                }
-                Ok(Ok(Err(reason))) => {
-                    guard.disarm();
-                    tracing::debug!(
-                        worker_id = %worker_id,
-                        ?reason,
-                        "legacy worker /v1/models probe failed"
-                    );
-                    None
-                }
-                Ok(Err(_)) => {
-                    guard.disarm();
-                    None
-                }
-                Err(_) => {
-                    guard.disarm();
-                    tracing::warn!(
-                        worker_id = %worker_id,
-                        request_id = %request_id,
-                        "legacy worker /v1/models probe timed out"
-                    );
-                    let mut core = core_ref.lock().await;
-                    let _ = core.cancel_request(&request_id, CancelReason::RequestTimedOut);
-                    None
+    let probe_futs = targets.into_iter().map(|worker_id| async move {
+        match run_single_legacy_models_probe(core_ref, &worker_id, "/v1/models").await {
+            LegacyProbeOutcome::Metadata(metadata) => Some((worker_id, metadata)),
+            LegacyProbeOutcome::TryFallback => {
+                match run_single_legacy_models_probe(core_ref, &worker_id, "/models").await {
+                    LegacyProbeOutcome::Metadata(metadata) => Some((worker_id, metadata)),
+                    LegacyProbeOutcome::TryFallback | LegacyProbeOutcome::Stop => None,
                 }
             }
-        });
+            LegacyProbeOutcome::Stop => None,
+        }
+    });
 
     let results = future::join_all(probe_futs).await;
     let updates: Vec<_> = results.into_iter().flatten().collect();
