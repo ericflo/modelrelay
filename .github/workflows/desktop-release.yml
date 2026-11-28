@@ -24,7 +24,7 @@ jobs:
             label: windows
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Tauri system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -35,7 +35,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: desktop-${{ matrix.label }}
 
@@ -50,7 +50,7 @@ jobs:
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/appstore/AuthKey.p8" >> "$GITHUB_ENV"
 
       - name: Build and bundle with Tauri
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Sign updater artifacts so the desktop app's updater plugin will
