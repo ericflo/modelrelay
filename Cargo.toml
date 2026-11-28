@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["crates/upstream/glib"]
 members = [
     "crates/modelrelay-cloud",
     "crates/modelrelay-contract-tests",
@@ -39,3 +40,6 @@ modelrelay-protocol = { path = "crates/modelrelay-protocol" }
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+[patch.crates-io]
+glib = { path = "crates/upstream/glib" }
