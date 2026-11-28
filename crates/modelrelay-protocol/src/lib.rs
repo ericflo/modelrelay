@@ -311,6 +311,9 @@ pub struct TokenCounts {
     /// Total token count (prompt + completion).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u32>,
+    /// Number of prompt tokens served from the backend's KV/prefix cache, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u32>,
 }
 
 /// Reports an error from the worker, either for a specific request or a general fault.
@@ -458,6 +461,7 @@ mod tests {
                 prompt_tokens: Some(11),
                 completion_tokens: Some(7),
                 total_tokens: Some(18),
+                cached_prompt_tokens: Some(9),
             }),
         });
 
@@ -472,6 +476,24 @@ mod tests {
         assert_eq!(decoded_chunk, chunk);
         assert_eq!(decoded_complete, complete);
         assert!(complete_json.contains("\"status_code\":200"));
+        assert!(complete_json.contains("\"cached_prompt_tokens\":9"));
+
+        // Backward compatibility: legacy messages without `cached_prompt_tokens` still deserialize.
+        let legacy_json = r#"{"type":"response_complete","request_id":"req-1","status_code":200,"token_counts":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+        let legacy_decoded: WorkerToServerMessage =
+            serde_json::from_str(legacy_json).expect("deserialize legacy response_complete");
+        assert!(matches!(
+            legacy_decoded,
+            WorkerToServerMessage::ResponseComplete(ResponseCompleteMessage {
+                token_counts: Some(TokenCounts {
+                    prompt_tokens: Some(10),
+                    completion_tokens: Some(5),
+                    total_tokens: Some(15),
+                    cached_prompt_tokens: None,
+                }),
+                ..
+            })
+        ));
     }
 
     #[test]

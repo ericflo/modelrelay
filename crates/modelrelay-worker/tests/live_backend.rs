@@ -2471,3 +2471,153 @@ async fn worker_daemon_relays_backend_model_metadata_and_updates_live() {
 
     daemon_handle.abort();
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn worker_daemon_reports_verified_cached_prompt_tokens_to_routing_telemetry() {
+    let (proxy_addr, _core) = spawn_proxy_server("openai").await;
+
+    let backend_app = Router::new()
+        .route(
+            "/v1/models",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    json!({
+                        "object": "list",
+                        "data": [{ "id": "qwen3-coder", "object": "model" }]
+                    })
+                    .to_string(),
+                )
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    json!({
+                        "id": "chatcmpl-cache-test",
+                        "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+                        "usage": {
+                            "prompt_tokens": 2000,
+                            "completion_tokens": 30,
+                            "total_tokens": 2030,
+                            "prompt_tokens_details": { "cached_tokens": 1600 }
+                        }
+                    })
+                    .to_string(),
+                )
+            }),
+        )
+        .route(
+            "/v1/messages",
+            post(|| async {
+                let chunks = vec![
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                        b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":900}}}\n\n",
+                    )),
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                        b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":25}}\n\n",
+                    )),
+                ];
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(stream::iter(chunks)))
+                    .unwrap()
+            }),
+        );
+
+    let backend_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cache telemetry backend");
+    let backend_addr = backend_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(backend_listener, backend_app)
+            .await
+            .expect("serve cache telemetry backend");
+    });
+
+    let daemon = WorkerDaemon::new(WorkerDaemonConfig {
+        proxy_base_url: format!("http://{proxy_addr}"),
+        provider: "openai".to_string(),
+        worker_secret: "top-secret".to_string(),
+        worker_name: "gpu-cache-verify".to_string(),
+        models: vec!["qwen3-coder".to_string()],
+        max_concurrent: 2,
+        backend_base_url: format!("http://{backend_addr}"),
+        endpoint_prefixes: vec![],
+    });
+    let daemon_handle = tokio::spawn(async move {
+        let _ = daemon.run().await;
+    });
+
+    wait_for_registered_model(proxy_addr, "qwen3-coder").await;
+
+    // 1. Unary OpenAI Chat Completions request with prompt_tokens_details.cached_tokens.
+    let chat_req = json!({
+        "model": "qwen3-coder",
+        "messages": [{"role": "user", "content": "Hello"}]
+    })
+    .to_string();
+    let mut s1 = TcpStream::connect(proxy_addr).await.unwrap();
+    let raw1 = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        chat_req.len(),
+        chat_req
+    );
+    s1.write_all(raw1.as_bytes()).await.unwrap();
+    let mut resp1 = String::new();
+    s1.read_to_string(&mut resp1).await.unwrap();
+    assert!(resp1.starts_with("HTTP/1.1 200 OK\r\n"));
+
+    // 2. Streaming Anthropic Messages request with cache_read_input_tokens in SSE.
+    let msg_req = json!({
+        "model": "qwen3-coder",
+        "stream": true,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "Hello stream"}]
+    })
+    .to_string();
+    let mut s2 = TcpStream::connect(proxy_addr).await.unwrap();
+    let raw2 = format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        msg_req.len(),
+        msg_req
+    );
+    s2.write_all(raw2.as_bytes()).await.unwrap();
+    let mut resp2 = String::new();
+    s2.read_to_string(&mut resp2).await.unwrap();
+    assert!(resp2.starts_with("HTTP/1.1 200 OK\r\n"));
+
+    // 3. Query GET /v1/routing and verify accumulated verified cache-hit metrics!
+    let mut s3 = TcpStream::connect(proxy_addr).await.unwrap();
+    s3.write_all(b"GET /v1/routing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp3 = String::new();
+    s3.read_to_string(&mut resp3).await.unwrap();
+    assert!(resp3.starts_with("HTTP/1.1 200 OK\r\n"));
+    let (_, body3) = resp3.split_once("\r\n\r\n").unwrap();
+    let routing_json: Value = serde_json::from_str(body3).expect("valid /v1/routing JSON");
+
+    // OpenAI: 2000 prompt / 1600 cached + Anthropic: (100 + 900) = 1000 prompt / 900 cached
+    assert_eq!(routing_json["telemetry"]["verified_prompt_tokens"], 3000);
+    assert_eq!(
+        routing_json["telemetry"]["verified_cached_prompt_tokens"],
+        2500
+    );
+    assert_eq!(
+        routing_json["live_models"][0]["workers"][0]["prompt_tokens_total"],
+        3000
+    );
+    assert_eq!(
+        routing_json["live_models"][0]["workers"][0]["cached_prompt_tokens_total"],
+        2500
+    );
+
+    daemon_handle.abort();
+}

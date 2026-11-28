@@ -417,6 +417,19 @@ impl ProxyServerCore {
         self.routing_state.worker_metrics_snapshot(worker_id, model)
     }
 
+    /// Record an observed prefill throughput sample for `(worker_id, model)` to
+    /// calibrate `CostBalanced` spillover across heterogeneous machines.
+    pub fn record_worker_prefill_observation(
+        &mut self,
+        worker_id: &str,
+        model: &str,
+        uncached_bytes: usize,
+        ttft: Duration,
+    ) {
+        self.routing_state
+            .record_prefill_observation(worker_id, model, uncached_bytes, ttft);
+    }
+
     #[must_use]
     pub fn last_route_decision(&self) -> Option<&RouteDecision> {
         self.routing_state.last_decision()
@@ -1134,6 +1147,7 @@ impl ProxyServerCore {
                 cancellation,
                 has_emitted_chunk,
                 dispatched_at,
+                first_ttft,
                 response_id_captured,
                 ..
             }) = self.active_requests.get_mut(request_id)
@@ -1175,10 +1189,9 @@ impl ProxyServerCore {
                 None
             } else {
                 *has_emitted_chunk = true;
-                Some((
-                    request.model.clone(),
-                    now.saturating_duration_since(*dispatched_at),
-                ))
+                let elapsed = now.saturating_duration_since(*dispatched_at);
+                *first_ttft = Some(elapsed);
+                Some((request.model.clone(), elapsed))
             };
 
             let response_affinity_record = if !*response_id_captured
@@ -1226,6 +1239,7 @@ impl ProxyServerCore {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn complete_http_response(
         &mut self,
         worker_id: &str,
@@ -1245,21 +1259,35 @@ impl ProxyServerCore {
                 worker_id: active_worker_id,
                 has_emitted_chunk,
                 dispatched_at,
+                first_ttft,
+                matched_prefix_bytes,
                 response_id_captured,
                 ..
             }) if active_worker_id == worker_id => Some((
                 request.model.clone(),
                 request.owner_key_id.clone(),
                 request.transport.endpoint_path.clone(),
+                request.routing_hints.total_prompt_bytes,
                 *has_emitted_chunk,
                 *dispatched_at,
+                *first_ttft,
+                *matched_prefix_bytes,
                 *response_id_captured,
             )),
             _ => None,
         };
 
-        let Some((model, owner_key_id, endpoint_path, had_chunk, dispatched_at, resp_captured)) =
-            owned_meta
+        let Some((
+            model,
+            owner_key_id,
+            endpoint_path,
+            total_prompt_bytes,
+            had_chunk,
+            dispatched_at,
+            first_ttft,
+            matched_prefix_bytes,
+            resp_captured,
+        )) = owned_meta
         else {
             tracing::debug!(
                 worker_id = %worker_id,
@@ -1271,13 +1299,47 @@ impl ProxyServerCore {
 
         let now = Instant::now();
         if (200..300).contains(&response.status_code) {
-            if had_chunk {
+            let observed_ttft = if had_chunk {
                 self.routing_state.record_success(worker_id, &model);
+                first_ttft
             } else {
-                self.routing_state.record_ttft(
+                let elapsed = now.saturating_duration_since(dispatched_at);
+                self.routing_state.record_ttft(worker_id, &model, elapsed);
+                Some(elapsed)
+            };
+            if let Some(ref tc) = response.token_counts {
+                self.routing_state.record_token_usage(
                     worker_id,
                     &model,
-                    now.saturating_duration_since(dispatched_at),
+                    tc.prompt_tokens,
+                    tc.cached_prompt_tokens,
+                );
+                let can_calibrate_ttft =
+                    had_chunk || tc.completion_tokens.is_none_or(|out| out <= 16);
+                if can_calibrate_ttft && let Some(ttft) = observed_ttft {
+                    let uncached_bytes = tc.prompt_tokens.map_or_else(
+                        || total_prompt_bytes.saturating_sub(matched_prefix_bytes),
+                        |prompt| {
+                            let cached = tc.cached_prompt_tokens.unwrap_or(0);
+                            (prompt.saturating_sub(cached) as usize).saturating_mul(4)
+                        },
+                    );
+                    self.routing_state.record_prefill_observation(
+                        worker_id,
+                        &model,
+                        uncached_bytes,
+                        ttft,
+                    );
+                }
+            } else if had_chunk
+                && matched_prefix_bytes == 0
+                && let Some(ttft) = observed_ttft
+            {
+                self.routing_state.record_prefill_observation(
+                    worker_id,
+                    &model,
+                    total_prompt_bytes,
+                    ttft,
                 );
             }
             if !resp_captured
@@ -2690,6 +2752,7 @@ impl ProxyServerCore {
             (worker_id.to_string(), request.model.clone())
         };
 
+        let matched_prefix_bytes = decision.as_ref().map_or(0, |d| d.matched_prefix_bytes);
         if let Some(decision) = decision {
             let min_prefix = self.resolve_policy_for_request(&request).min_prefix_bytes;
             if self.recent_route_debug.len() >= MAX_RECENT_ROUTE_DEBUG {
@@ -2726,6 +2789,8 @@ impl ProxyServerCore {
                 cancelled_at: None,
                 has_emitted_chunk: false,
                 dispatched_at: now,
+                first_ttft: None,
+                matched_prefix_bytes,
                 response_id_captured: false,
             },
         );
@@ -3192,6 +3257,8 @@ enum ActiveRequestState {
         cancelled_at: Option<Instant>,
         has_emitted_chunk: bool,
         dispatched_at: Instant,
+        first_ttft: Option<Duration>,
+        matched_prefix_bytes: usize,
         response_id_captured: bool,
     },
 }

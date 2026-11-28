@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use modelrelay_protocol::{
     ErrorMessage, ModelMetadataMap, ModelsUpdateMessage, PongMessage, RegisterMessage,
     RequestMessage, ResponseChunkMessage, ResponseCompleteMessage, ServerToWorkerMessage,
-    WorkerToServerMessage, parse_openai_models_response,
+    TokenCounts, WorkerToServerMessage, parse_openai_models_response,
 };
 use reqwest::header::{
     ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, HOST, HeaderMap as ReqwestHeaderMap, HeaderName,
@@ -1274,6 +1274,7 @@ async fn forward_request(
     if is_streaming && status.is_success() {
         let mut response = response;
         let mut decoder = Utf8StreamDecoder::new();
+        let mut usage_tracker = SseTokenUsageTracker::default();
         loop {
             let next_chunk = timeout(STREAM_CHUNK_READ_TIMEOUT, response.chunk())
                 .await
@@ -1288,6 +1289,7 @@ async fn forward_request(
             };
             let text_chunk = decoder.push(&chunk);
             if !text_chunk.is_empty() {
+                usage_tracker.feed(&text_chunk);
                 event_tx
                     .send(DaemonEvent::Outbound(WorkerToServerMessage::ResponseChunk(
                         ResponseChunkMessage {
@@ -1302,6 +1304,7 @@ async fn forward_request(
             }
         }
         if let Some(tail) = decoder.finish() {
+            usage_tracker.feed(&tail);
             event_tx
                 .send(DaemonEvent::Outbound(WorkerToServerMessage::ResponseChunk(
                     ResponseChunkMessage {
@@ -1318,19 +1321,229 @@ async fn forward_request(
             status_code,
             headers: response_headers,
             body: Some(String::new()),
-            token_counts: None,
+            token_counts: usage_tracker.finish(),
         });
     }
 
     let body = response.text().await?;
+    let token_counts = if status.is_success() {
+        extract_token_counts_from_body(&body)
+    } else {
+        None
+    };
 
     Ok(ResponseCompleteMessage {
         request_id,
         status_code,
         headers: response_headers,
         body: Some(body),
-        token_counts: None,
+        token_counts,
     })
+}
+
+const MAX_SSE_USAGE_LINE_BYTES: usize = 64 * 1024;
+
+/// Lightweight SSE line tracker that extracts backend token usage and KV-cache
+/// hit counts (`OpenAI`, `Anthropic`, `OpenAI` Responses, and `llama.cpp`) without
+/// delaying or modifying forwarded stream chunks.
+#[derive(Default)]
+struct SseTokenUsageTracker {
+    line_buf: String,
+    skip_until_newline: bool,
+    counts: Option<TokenCounts>,
+}
+
+impl SseTokenUsageTracker {
+    fn feed(&mut self, chunk: &str) {
+        for part in chunk.split_inclusive('\n') {
+            if self.skip_until_newline {
+                if part.ends_with('\n') {
+                    self.skip_until_newline = false;
+                }
+                continue;
+            }
+            if part.ends_with('\n') {
+                if self.line_buf.is_empty() {
+                    self.inspect_line(part);
+                } else if self.line_buf.len() + part.len() <= MAX_SSE_USAGE_LINE_BYTES {
+                    self.line_buf.push_str(part);
+                    let line = std::mem::take(&mut self.line_buf);
+                    self.inspect_line(&line);
+                } else {
+                    self.line_buf.clear();
+                }
+            } else if self.line_buf.len() + part.len() <= MAX_SSE_USAGE_LINE_BYTES {
+                self.line_buf.push_str(part);
+            } else {
+                self.line_buf.clear();
+                self.skip_until_newline = true;
+            }
+        }
+    }
+
+    fn inspect_line(&mut self, raw_line: &str) {
+        let trimmed = raw_line.trim();
+        let Some(data) = trimmed.strip_prefix("data:").map(str::trim) else {
+            return;
+        };
+        if data.is_empty() || data == "[DONE]" || !maybe_has_usage_fields(data) {
+            return;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
+            && let Some(extracted) = extract_token_counts_from_json(&value)
+        {
+            self.counts = Some(merge_token_counts(self.counts.take(), extracted));
+        }
+    }
+
+    fn finish(mut self) -> Option<TokenCounts> {
+        if !self.line_buf.is_empty() {
+            let tail = std::mem::take(&mut self.line_buf);
+            self.inspect_line(&tail);
+        }
+        self.counts
+    }
+}
+
+fn maybe_has_usage_fields(payload: &str) -> bool {
+    payload.contains("\"usage\"")
+        || payload.contains("\"timings\"")
+        || payload.contains("\"cached_tokens\"")
+        || payload.contains("\"cache_read_input_tokens\"")
+}
+
+fn extract_token_counts_from_body(body: &str) -> Option<TokenCounts> {
+    if body.is_empty() || !maybe_has_usage_fields(body) {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    extract_token_counts_from_json(&value)
+}
+
+fn json_u32(val: &serde_json::Value, key: &str) -> Option<u32> {
+    val.get(key)
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+}
+
+fn extract_token_counts_from_json(root: &serde_json::Value) -> Option<TokenCounts> {
+    let usage = root
+        .get("usage")
+        .filter(|v| v.is_object())
+        .or_else(|| {
+            root.get("response")
+                .and_then(|r| r.get("usage"))
+                .filter(|v| v.is_object())
+        })
+        .or_else(|| {
+            root.get("message")
+                .and_then(|m| m.get("usage"))
+                .filter(|v| v.is_object())
+        });
+
+    let mut prompt_tokens: Option<u32> = None;
+    let mut completion_tokens: Option<u32> = None;
+    let mut total_tokens: Option<u32> = None;
+    let mut cached_prompt_tokens: Option<u32> = None;
+
+    if let Some(u) = usage {
+        if let Some(pt) = json_u32(u, "prompt_tokens") {
+            prompt_tokens = Some(pt);
+        }
+        if let Some(ct) = json_u32(u, "completion_tokens").or_else(|| json_u32(u, "output_tokens"))
+        {
+            completion_tokens = Some(ct);
+        }
+        if let Some(tt) = json_u32(u, "total_tokens") {
+            total_tokens = Some(tt);
+        }
+
+        // OpenAI Chat Completions & Responses API cached token counts.
+        cached_prompt_tokens = u
+            .get("prompt_tokens_details")
+            .and_then(|d| json_u32(d, "cached_tokens"))
+            .or_else(|| {
+                u.get("input_tokens_details")
+                    .and_then(|d| json_u32(d, "cached_tokens"))
+            })
+            .or_else(|| json_u32(u, "cached_tokens"));
+
+        // Anthropic Messages API & OpenAI Responses input_tokens handling.
+        let cache_read = json_u32(u, "cache_read_input_tokens");
+        let cache_creation = json_u32(u, "cache_creation_input_tokens");
+        if cache_read.is_some() {
+            cached_prompt_tokens = cache_read;
+        }
+        if prompt_tokens.is_none()
+            && let Some(input) = json_u32(u, "input_tokens")
+        {
+            // Anthropic separates `input_tokens` (uncached) from `cache_read_input_tokens`
+            // and `cache_creation_input_tokens`, whereas OpenAI Responses includes cached
+            // tokens inside `input_tokens`. Sum Anthropic's cache fields when present.
+            let total_input = if cache_read.is_some() || cache_creation.is_some() {
+                input
+                    .saturating_add(cache_read.unwrap_or(0))
+                    .saturating_add(cache_creation.unwrap_or(0))
+            } else {
+                input
+            };
+            prompt_tokens = Some(total_input);
+        }
+    }
+
+    // `llama.cpp` / `llama-server` native timings (`cache_n` cached + `prompt_n` newly evaluated).
+    if let Some(timings) = root.get("timings").filter(|v| v.is_object()) {
+        let cache_n = json_u32(timings, "cache_n");
+        let prompt_n = json_u32(timings, "prompt_n");
+        if cached_prompt_tokens.is_none() && cache_n.is_some() {
+            cached_prompt_tokens = cache_n;
+        }
+        if prompt_tokens.is_none() && (cache_n.is_some() || prompt_n.is_some()) {
+            prompt_tokens = Some(cache_n.unwrap_or(0).saturating_add(prompt_n.unwrap_or(0)));
+        }
+    }
+
+    if total_tokens.is_none()
+        && let (Some(p), Some(c)) = (prompt_tokens, completion_tokens)
+    {
+        total_tokens = Some(p.saturating_add(c));
+    }
+
+    if prompt_tokens.is_none()
+        && completion_tokens.is_none()
+        && total_tokens.is_none()
+        && cached_prompt_tokens.is_none()
+    {
+        return None;
+    }
+
+    Some(TokenCounts {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cached_prompt_tokens,
+    })
+}
+
+fn merge_token_counts(existing: Option<TokenCounts>, incoming: TokenCounts) -> TokenCounts {
+    let Some(prev) = existing else {
+        return incoming;
+    };
+    let prompt_tokens = incoming.prompt_tokens.or(prev.prompt_tokens);
+    let completion_tokens = incoming.completion_tokens.or(prev.completion_tokens);
+    let cached_prompt_tokens = incoming.cached_prompt_tokens.or(prev.cached_prompt_tokens);
+    let total_tokens = incoming.total_tokens.or(prev.total_tokens).or_else(|| {
+        match (prompt_tokens, completion_tokens) {
+            (Some(p), Some(c)) => Some(p.saturating_add(c)),
+            _ => None,
+        }
+    });
+    TokenCounts {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cached_prompt_tokens,
+    }
 }
 
 /// Returns a pseudo-random jitter value in the range 0–499 ms derived from the
@@ -1575,5 +1788,98 @@ mod tests {
         cfg.models = vec!["*".to_string()];
         cfg.resolve_wildcard_models().await;
         assert_eq!(cfg.models, vec!["*"]);
+    }
+
+    #[test]
+    fn extracts_openai_chat_cached_token_counts() {
+        let body = r#"{
+            "id": "chatcmpl-1",
+            "usage": {
+                "prompt_tokens": 2048,
+                "completion_tokens": 128,
+                "total_tokens": 2176,
+                "prompt_tokens_details": { "cached_tokens": 1800 }
+            }
+        }"#;
+        assert_eq!(
+            extract_token_counts_from_body(body),
+            Some(TokenCounts {
+                prompt_tokens: Some(2048),
+                completion_tokens: Some(128),
+                total_tokens: Some(2176),
+                cached_prompt_tokens: Some(1800),
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_anthropic_unary_and_streaming_cache_read_tokens() {
+        let unary = r#"{
+            "id": "msg_1",
+            "usage": {
+                "input_tokens": 200,
+                "cache_creation_input_tokens": 100,
+                "cache_read_input_tokens": 1700,
+                "output_tokens": 55
+            }
+        }"#;
+        assert_eq!(
+            extract_token_counts_from_body(unary),
+            Some(TokenCounts {
+                prompt_tokens: Some(2000),
+                completion_tokens: Some(55),
+                total_tokens: Some(2055),
+                cached_prompt_tokens: Some(1700),
+            })
+        );
+
+        let mut tracker = SseTokenUsageTracker::default();
+        tracker.feed(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":50,\"cache_read_in",
+        );
+        tracker.feed(
+            "put_tokens\":950}}}\n\nevent: content_block_delta\ndata: {\"delta\":{\"text\":\"hi\"}}\n\n",
+        );
+        tracker.feed(
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n\n",
+        );
+        assert_eq!(
+            tracker.finish(),
+            Some(TokenCounts {
+                prompt_tokens: Some(1000),
+                completion_tokens: Some(42),
+                total_tokens: Some(1042),
+                cached_prompt_tokens: Some(950),
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_openai_responses_sse_and_llama_cpp_timings() {
+        let mut tracker = SseTokenUsageTracker::default();
+        tracker.feed("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n");
+        tracker.feed(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":4000,\"output_tokens\":200,\"total_tokens\":4200,\"input_tokens_details\":{\"cached_tokens\":3500}}}}\n\ndata: [DONE]\n\n",
+        );
+        assert_eq!(
+            tracker.finish(),
+            Some(TokenCounts {
+                prompt_tokens: Some(4000),
+                completion_tokens: Some(200),
+                total_tokens: Some(4200),
+                cached_prompt_tokens: Some(3500),
+            })
+        );
+
+        let llama_body = r#"{"choices":[],"timings":{"cache_n":1536,"prompt_n":256}}"#;
+        assert_eq!(
+            extract_token_counts_from_body(llama_body),
+            Some(TokenCounts {
+                prompt_tokens: Some(1792),
+                completion_tokens: None,
+                total_tokens: None,
+                cached_prompt_tokens: Some(1536),
+            })
+        );
     }
 }

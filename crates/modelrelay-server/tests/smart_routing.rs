@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use modelrelay_protocol::{
     HeaderMap, ModelMetadataMap, ProviderRouting, RegisterMessage, ResponseCompleteMessage,
+    TokenCounts,
 };
 use modelrelay_server::{
     ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, RouteReason, RoutingPolicy,
@@ -1113,4 +1114,142 @@ async fn http_end_to_end_prefix_stickiness_via_axum() {
             .ewma_ttft_ms
             .is_some()
     );
+}
+
+#[test]
+fn cost_balanced_adapts_to_calibrated_fast_vs_slow_machine_prefill_speed() {
+    let mut core = ProxyServerCore::new();
+    core.set_default_routing_policy(RoutingPolicy {
+        strategy: RoutingStrategy::PrefixAware,
+        spillover_mode: SpilloverMode::CostBalanced,
+        ..RoutingPolicy::default()
+    });
+
+    let w_primary = core
+        .register_worker(
+            "local",
+            register_worker_msg("rtx-5090", &["qwen3"], 4, ModelMetadataMap::new()),
+        )
+        .worker_id;
+    let w_peer = core
+        .register_worker(
+            "local",
+            register_worker_msg("secondary-box", &["qwen3"], 4, ModelMetadataMap::new()),
+        )
+        .worker_id;
+
+    // Warm primary worker with a ~16 KiB shared system prompt.
+    let big_sys = "S".repeat(16_384);
+    let body_turn1 = chat_body(
+        "qwen3",
+        &json!([
+            {"role": "system", "content": big_sys},
+            {"role": "user", "content": "Turn 1"}
+        ]),
+    );
+    let (_, warm_worker) = submit_chat(&mut core, "qwen3", body_turn1);
+    let idle_peer = if warm_worker == w_primary {
+        w_peer
+    } else {
+        w_primary
+    };
+
+    // Calibrate warm worker as fast (~32 bytes/ms) and idle peer as slow (~2 bytes/ms).
+    // While warm_worker has load_ratio = 0.25 (1/4), its busy load penalty is 625ms,
+    // whereas cold-prefilling 16 KiB on the slow idle peer costs ~8,192ms -> stay sticky!
+    core.record_worker_prefill_observation(
+        &warm_worker,
+        "qwen3",
+        16_000,
+        Duration::from_millis(500),
+    );
+    core.record_worker_prefill_observation(
+        &idle_peer,
+        "qwen3",
+        16_000,
+        Duration::from_millis(8_000),
+    );
+
+    let body_turn2 = chat_body(
+        "qwen3",
+        &json!([
+            {"role": "system", "content": big_sys},
+            {"role": "user", "content": "Turn 2 while Turn 1 is still running"}
+        ]),
+    );
+    let (_, w2) = submit_chat(&mut core, "qwen3", body_turn2);
+    assert_eq!(
+        w2, warm_worker,
+        "CostBalanced must stay sticky when idle peer is calibrated slow"
+    );
+    assert_eq!(
+        core.last_route_decision().map(|d| d.reason),
+        Some(RouteReason::WarmBusySticky)
+    );
+
+    // Now re-calibrate the idle peer to be very fast (~100 bytes/ms, e.g. another RTX 5090).
+    // Cold-prefilling 16 KiB on the fast idle peer costs ~160ms vs. 1,250ms load penalty
+    // on warm_worker (now 2/4 busy) -> CostBalanced should spill to the fast idle peer!
+    for _ in 0..8 {
+        core.record_worker_prefill_observation(
+            &idle_peer,
+            "qwen3",
+            20_000,
+            Duration::from_millis(200),
+        );
+    }
+    let body_turn3 = chat_body(
+        "qwen3",
+        &json!([
+            {"role": "system", "content": big_sys},
+            {"role": "user", "content": "Turn 3 concurrent burst"}
+        ]),
+    );
+    let (_, w3) = submit_chat(&mut core, "qwen3", body_turn3);
+    assert_eq!(
+        w3, idle_peer,
+        "CostBalanced should spill once idle peer is calibrated fast"
+    );
+    assert_eq!(
+        core.last_route_decision().map(|d| d.reason),
+        Some(RouteReason::ConcurrentSpillover)
+    );
+}
+
+#[test]
+fn verified_token_usage_updates_telemetry_and_worker_metrics() {
+    let mut core = ProxyServerCore::new();
+    let w1 = core
+        .register_worker(
+            "local",
+            register_worker_msg("rtx-5090", &["qwen3"], 2, ModelMetadataMap::new()),
+        )
+        .worker_id;
+
+    let body = chat_body("qwen3", &json!([{"role": "user", "content": "hello"}]));
+    let (req_id, _) = submit_chat(&mut core, "qwen3", body);
+
+    assert!(core.complete_http_response(
+        &w1,
+        ResponseCompleteMessage {
+            request_id: req_id,
+            status_code: 200,
+            headers: HeaderMap::new(),
+            body: Some("{}".to_string()),
+            token_counts: Some(TokenCounts {
+                prompt_tokens: Some(4000),
+                completion_tokens: Some(120),
+                total_tokens: Some(4120),
+                cached_prompt_tokens: Some(3600),
+            }),
+        },
+    ));
+
+    let telemetry = core.routing_telemetry();
+    assert_eq!(telemetry.verified_prompt_tokens, 4000);
+    assert_eq!(telemetry.verified_cached_prompt_tokens, 3600);
+
+    let metrics = core.worker_routing_metrics(&w1, "qwen3").unwrap();
+    assert_eq!(metrics.prompt_tokens_total, 4000);
+    assert_eq!(metrics.cached_prompt_tokens_total, 3600);
 }

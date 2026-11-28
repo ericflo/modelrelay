@@ -41,6 +41,15 @@ const TTFT_EWMA_ALPHA: f64 = 0.25;
 /// used by `CostBalanced` spillover when no calibrated rate is available yet.
 const DEFAULT_PREFILL_BYTES_PER_MS: f64 = 16.0;
 
+/// Lower and upper sanity bounds for calibrated prefill throughput (bytes/ms,
+/// roughly 60 tok/s to 64,000 tok/s) so outlier latencies cannot corrupt EWMA estimates.
+const MIN_PREFILL_BYTES_PER_MS: f64 = 0.25;
+const MAX_PREFILL_BYTES_PER_MS: f64 = 256.0;
+
+/// Minimum uncached prompt bytes and TTFT required before updating prefill calibration.
+const MIN_CALIBRATION_UNCACHED_BYTES: usize = 1024;
+const MIN_CALIBRATION_TTFT_MS: f64 = 5.0;
+
 /// Concurrency contention penalty per unit load ratio (in ms) for `CostBalanced` mode.
 const COST_BALANCED_LOAD_PENALTY_MS: f64 = 2_500.0;
 
@@ -427,6 +436,7 @@ impl From<RoutingTelemetrySnapshot> for RoutingTelemetryDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WorkerModelMetricsSnapshot {
     pub ewma_ttft_ms: Option<f64>,
+    pub ewma_prefill_bytes_per_ms: Option<f64>,
     pub consecutive_errors: u32,
     pub total_dispatches: u64,
     pub eviction_epoch: u64,
@@ -439,6 +449,7 @@ pub struct WorkerModelMetricsSnapshot {
 #[derive(Debug, Clone, Default)]
 struct WorkerModelMetrics {
     ewma_ttft_ms: Option<f64>,
+    ewma_prefill_bytes_per_ms: Option<f64>,
     consecutive_errors: u32,
     last_error_at: Option<Instant>,
     last_dispatched_seq: u64,
@@ -466,6 +477,20 @@ impl WorkerModelMetrics {
         self.last_error_at = None;
     }
 
+    #[allow(clippy::cast_precision_loss)]
+    fn record_prefill_observation(&mut self, uncached_bytes: usize, ttft: Duration) {
+        let ms = ttft.as_secs_f64() * 1000.0;
+        if uncached_bytes < MIN_CALIBRATION_UNCACHED_BYTES || ms < MIN_CALIBRATION_TTFT_MS {
+            return;
+        }
+        let observed = ((uncached_bytes as f64) / ms)
+            .clamp(MIN_PREFILL_BYTES_PER_MS, MAX_PREFILL_BYTES_PER_MS);
+        self.ewma_prefill_bytes_per_ms = Some(match self.ewma_prefill_bytes_per_ms {
+            Some(prev) => prev * (1.0 - TTFT_EWMA_ALPHA) + observed * TTFT_EWMA_ALPHA,
+            None => observed,
+        });
+    }
+
     fn record_success(&mut self) {
         self.consecutive_errors = 0;
         self.last_error_at = None;
@@ -479,6 +504,7 @@ impl WorkerModelMetrics {
     fn snapshot(&self) -> WorkerModelMetricsSnapshot {
         WorkerModelMetricsSnapshot {
             ewma_ttft_ms: self.ewma_ttft_ms,
+            ewma_prefill_bytes_per_ms: self.ewma_prefill_bytes_per_ms,
             consecutive_errors: self.consecutive_errors,
             total_dispatches: self.total_dispatches,
             eviction_epoch: self.eviction_epoch,
@@ -1280,12 +1306,14 @@ impl RoutingState {
                             hints.total_prompt_bytes,
                             warm_match.effective_matched_bytes,
                             warm_busy.load_ratio(),
+                            self.worker_prefill_bytes_per_ms(&warm_busy.worker_id, model),
                             self.worker_is_penalized(&warm_busy.worker_id, model, now),
                         );
                         let idle_cost = estimate_cost_balanced_ms(
                             hints.total_prompt_bytes,
                             spill_match.effective_matched_bytes,
                             0.0,
+                            self.worker_prefill_bytes_per_ms(&spill_target.worker_id, model),
                             self.worker_is_penalized(&spill_target.worker_id, model, now),
                         );
                         if busy_cost < idle_cost {
@@ -1908,6 +1936,35 @@ impl RoutingState {
         }
     }
 
+    /// Record a calibrated prefill throughput observation (`uncached_bytes / ttft`)
+    /// so `CostBalanced` spillover adapts to heterogeneous hardware speeds.
+    pub fn record_prefill_observation(
+        &mut self,
+        worker_id: &str,
+        model: &str,
+        uncached_bytes: usize,
+        ttft: Duration,
+    ) {
+        let key = WorkerModelKey {
+            worker_id: worker_id.to_string(),
+            model: model.to_string(),
+        };
+        self.worker_metrics
+            .entry(key)
+            .or_default()
+            .record_prefill_observation(uncached_bytes, ttft);
+    }
+
+    fn worker_prefill_bytes_per_ms(&self, worker_id: &str, model: &str) -> f64 {
+        self.worker_metrics
+            .get(&WorkerModelKey {
+                worker_id: worker_id.to_string(),
+                model: model.to_string(),
+            })
+            .and_then(|m| m.ewma_prefill_bytes_per_ms)
+            .unwrap_or(DEFAULT_PREFILL_BYTES_PER_MS)
+    }
+
     fn worker_is_penalized(&self, worker_id: &str, model: &str, now: Instant) -> bool {
         self.worker_metrics
             .get(&WorkerModelKey {
@@ -1966,10 +2023,12 @@ fn estimate_cost_balanced_ms(
     total_prompt_bytes: usize,
     effective_matched_bytes: usize,
     load_ratio: f64,
+    prefill_bytes_per_ms: f64,
     penalized: bool,
 ) -> f64 {
     let uncached = total_prompt_bytes.saturating_sub(effective_matched_bytes) as f64;
-    let prefill_ms = uncached / DEFAULT_PREFILL_BYTES_PER_MS;
+    let rate = prefill_bytes_per_ms.clamp(MIN_PREFILL_BYTES_PER_MS, MAX_PREFILL_BYTES_PER_MS);
+    let prefill_ms = uncached / rate;
     let load_ms = load_ratio * COST_BALANCED_LOAD_PENALTY_MS;
     let error_ms = if penalized { 10_000.0 } else { 0.0 };
     prefill_ms + load_ms + error_ms
