@@ -1,9 +1,12 @@
 use std::fmt::Write;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
+use modelrelay_protocol::admin_api::{RoutingStateResponse, UpdateRoutingConfigRequest};
+use modelrelay_web::templates::{RoutingPanelConfig, render_routing_panel};
 use tower_sessions::Session;
 
 use crate::state::CloudState;
@@ -73,7 +76,8 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
         Err(r) => return r,
     };
 
-    let csrf_field = csrf::hidden_field(&session).await;
+    let csrf_token = csrf::get_or_create_token(&session).await;
+    let csrf_field = format!(r#"<input type="hidden" name="_csrf" value="{csrf_token}">"#);
 
     let user = sqlx::query_as::<_, UserRow>(
         "SELECT id, email, stripe_customer_id, is_admin FROM users WHERE id = $1",
@@ -107,14 +111,31 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
         .await
         .unwrap_or_default();
 
-        let html = admin_dashboard_html(&user.email, &state.public_relay_url, &keys, &csrf_field);
+        let routing_panel = render_routing_panel(&RoutingPanelConfig {
+            get_url: "/dashboard/routing".to_string(),
+            save_url: "/dashboard/routing".to_string(),
+            save_method: "POST".to_string(),
+            csrf_token: Some(csrf_token),
+            use_oss_admin_auth: false,
+            show_workers_table: false,
+            sync_worker_kpi_id: None,
+        });
+        let html = admin_dashboard_html(
+            &user.email,
+            &state.public_relay_url,
+            &keys,
+            &csrf_field,
+            &routing_panel.html,
+        );
+        let extra_css = format!("{}\n{}", dashboard_css(), routing_panel.css);
+        let extra_js = format!("{}\n{}", dashboard_shared_js(), routing_panel.js);
         Html(modelrelay_web::templates::page_shell_custom(
             "Dashboard",
             "/dashboard",
             &html,
             true,
-            dashboard_css(),
-            dashboard_shared_js(),
+            &extra_css,
+            &extra_js,
         ))
         .into_response()
     } else {
@@ -149,6 +170,17 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
         };
 
         let has_stripe_customer = user.stripe_customer_id.is_some();
+        let routing_panel = api_key_display.as_ref().map(|_| {
+            render_routing_panel(&RoutingPanelConfig {
+                get_url: "/dashboard/routing".to_string(),
+                save_url: "/dashboard/routing".to_string(),
+                save_method: "POST".to_string(),
+                csrf_token: Some(csrf_token),
+                use_oss_admin_auth: false,
+                show_workers_table: true,
+                sync_worker_kpi_id: Some("sub-kpi-workers".to_string()),
+            })
+        });
         let html = subscriber_dashboard_html(
             &user.email,
             &state.public_relay_url,
@@ -156,14 +188,23 @@ pub async fn page(session: Session, State(state): State<Arc<CloudState>>) -> Res
             has_stripe_customer,
             api_key_display.as_deref(),
             &csrf_field,
+            routing_panel.as_ref().map_or("", |p| p.html.as_str()),
+        );
+        let extra_css = routing_panel.as_ref().map_or_else(
+            || dashboard_css().to_string(),
+            |p| format!("{}\n{}", dashboard_css(), p.css),
+        );
+        let extra_js = routing_panel.as_ref().map_or_else(
+            || dashboard_shared_js().to_string(),
+            |p| format!("{}\n{}", dashboard_shared_js(), p.js),
         );
         Html(modelrelay_web::templates::page_shell_custom(
             "Dashboard",
             "/dashboard",
             &html,
             true,
-            dashboard_css(),
-            dashboard_shared_js(),
+            &extra_css,
+            &extra_js,
         ))
         .into_response()
     }
@@ -575,6 +616,233 @@ pub async fn stats(session: Session, State(state): State<Arc<CloudState>>) -> Re
     }
 }
 
+// ─── GET / POST /dashboard/routing ──────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct RoutingErrorPayload {
+    error: String,
+}
+
+#[derive(serde::Deserialize)]
+struct UpstreamErrorDetail {
+    message: String,
+}
+
+#[derive(serde::Deserialize)]
+struct UpstreamErrorEnvelope {
+    error: UpstreamErrorDetail,
+}
+
+fn percent_encode_query_value(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
+async fn resolve_dashboard_routing_scope(
+    state: &CloudState,
+    user_id: uuid::Uuid,
+) -> Result<Option<String>, Response> {
+    if user_is_admin(state, user_id).await {
+        return Ok(None);
+    }
+    let Some(ref pool) = state.db else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(RoutingErrorPayload {
+                error: "database unavailable".to_string(),
+            }),
+        )
+            .into_response());
+    };
+    let key_id: Option<String> = sqlx::query_scalar(
+        "SELECT key_id FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    key_id.map(Some).ok_or_else(|| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(RoutingErrorPayload {
+                error: "an active API key is required to manage smart routing".to_string(),
+            }),
+        )
+            .into_response()
+    })
+}
+
+fn build_server_routing_url(admin_url: &str, owner_key_id: Option<&str>) -> String {
+    let base = format!("{}/admin/routing", admin_url.trim_end_matches('/'));
+    match owner_key_id {
+        Some(key_id) => format!("{base}?owner_key_id={}", percent_encode_query_value(key_id)),
+        None => base,
+    }
+}
+
+/// `GET /dashboard/routing` — typed proxy to the relay server's unified
+/// routing state endpoint, scoped to the signed-in user's API key (or global
+/// scope for administrators).
+pub async fn routing_get(session: Session, State(state): State<Arc<CloudState>>) -> Response {
+    let user_id = match require_user(&session).await {
+        Ok(id) => id,
+        Err(r) => return r,
+    };
+
+    let owner_key_id = match resolve_dashboard_routing_scope(&state, user_id).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
+
+    let (Some(admin_url), Some(admin_token)) = (&state.admin_url, &state.admin_token) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(RoutingErrorPayload {
+                error: "relay routing API not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    let url = build_server_routing_url(admin_url, owner_key_id.as_deref());
+    match state
+        .http_client
+        .get(&url)
+        .bearer_auth(admin_token)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json::<RoutingStateResponse>().await {
+            Ok(snapshot) => Json(snapshot).into_response(),
+            Err(e) => {
+                tracing::error!("routing_get proxy parse error: {e}");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(RoutingErrorPayload {
+                        error: "invalid routing state from relay server".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        },
+        Ok(resp) => {
+            let status = resp.status();
+            tracing::warn!("routing_get proxy upstream error: {status}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(RoutingErrorPayload {
+                    error: format!("relay server returned HTTP {}", status.as_u16()),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("routing_get proxy request error: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(RoutingErrorPayload {
+                    error: "could not reach relay server".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `POST /dashboard/routing` — CSRF-protected typed proxy to update the signed-in
+/// user's persisted routing configuration on the relay server.
+pub async fn routing_save(
+    session: Session,
+    State(state): State<Arc<CloudState>>,
+    Json(payload): Json<UpdateRoutingConfigRequest>,
+) -> Response {
+    let user_id = match require_user(&session).await {
+        Ok(id) => id,
+        Err(r) => return r,
+    };
+
+    let owner_key_id = match resolve_dashboard_routing_scope(&state, user_id).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
+
+    let (Some(admin_url), Some(admin_token)) = (&state.admin_url, &state.admin_token) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(RoutingErrorPayload {
+                error: "relay routing API not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    let url = build_server_routing_url(admin_url, owner_key_id.as_deref());
+    match state
+        .http_client
+        .put(&url)
+        .bearer_auth(admin_token)
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json::<RoutingStateResponse>().await {
+            Ok(snapshot) => Json(snapshot).into_response(),
+            Err(e) => {
+                tracing::error!("routing_save proxy parse error: {e}");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(RoutingErrorPayload {
+                        error: "invalid routing response from relay server".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        },
+        Ok(resp) if resp.status() == StatusCode::BAD_REQUEST => {
+            let msg = resp.json::<UpstreamErrorEnvelope>().await.map_or_else(
+                |_| "invalid routing configuration".to_string(),
+                |e| e.error.message,
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(RoutingErrorPayload { error: msg }),
+            )
+                .into_response()
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            tracing::warn!("routing_save proxy upstream error: {status}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(RoutingErrorPayload {
+                    error: format!("relay server rejected update (HTTP {})", status.as_u16()),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("routing_save proxy request error: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(RoutingErrorPayload {
+                    error: "could not reach relay server".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn load_cloud_config(
     session: Option<Session>,
     state: &CloudState,
@@ -810,6 +1078,7 @@ fn admin_dashboard_html(
     relay_url: &str,
     keys: &[ApiKeyRow],
     csrf_field: &str,
+    routing_panel_html: &str,
 ) -> String {
     let email_escaped = html_escape(email);
     let relay_escaped = html_escape(relay_url);
@@ -950,11 +1219,13 @@ fn admin_dashboard_html(
                         el.appendChild(wrap);
                         return;
                       }}
+                      var rtMap={{}};
+                      (window.__mrLastRoutingWorkers||[]).forEach(function(rw){{rtMap[rw.worker_id]=rw;}});
                       var tbl=document.createElement('table');
                       tbl.className='workers-table';
                       var thead=document.createElement('thead');
                       var hr=document.createElement('tr');
-                      ['Worker','Models','Load','Status'].forEach(function(col){{var th=document.createElement('th');th.textContent=col;hr.appendChild(th);}});
+                      ['Worker','Models','Load','Avg TTFT','Warm','Status'].forEach(function(col){{var th=document.createElement('th');th.textContent=col;hr.appendChild(th);}});
                       thead.appendChild(hr); tbl.appendChild(thead);
                       var tbody=document.createElement('tbody');
                       ws.forEach(function(w){{
@@ -977,12 +1248,17 @@ fn admin_dashboard_html(
                         lt.appendChild(lf); lw.appendChild(lt);
                         lw.appendChild(document.createTextNode(inflight+'/'+maxc));
                         tdLoad.appendChild(lw);
+                        var rw=rtMap[w.worker_id];
+                        var tdTtft=document.createElement('td');
+                        tdTtft.textContent=(rw&&rw.avg_ttft_ms!=null)?Math.round(rw.avg_ttft_ms)+'ms':'\u2014';
+                        var tdWarm=document.createElement('td');
+                        tdWarm.textContent=rw?String(rw.warm_prefix_count||0):'\u2014';
                         var tdSt=document.createElement('td');
                         var b=document.createElement('span');
                         b.className=w.is_draining?'badge badge-warn':'badge badge-active';
                         b.textContent=w.is_draining?'Draining':'Active';
                         tdSt.appendChild(b);
-                        tr.appendChild(tdName); tr.appendChild(tdModels); tr.appendChild(tdLoad); tr.appendChild(tdSt);
+                        tr.appendChild(tdName); tr.appendChild(tdModels); tr.appendChild(tdLoad); tr.appendChild(tdTtft); tr.appendChild(tdWarm); tr.appendChild(tdSt);
                         tbody.appendChild(tr);
                       }});
                       tbl.appendChild(tbody);
@@ -1025,6 +1301,11 @@ fn admin_dashboard_html(
         </div>"#
     );
 
+    if !routing_panel_html.is_empty() {
+        out.push_str("<div class=\"sec-label\">Smart Multi-Worker Routing</div>");
+        out.push_str(routing_panel_html);
+    }
+
     // ── Quick Connect Strip ──
     if let Some(key) = first_key {
         let curl_cmd = html_escape(&format!(
@@ -1057,6 +1338,7 @@ fn subscriber_dashboard_html(
     has_stripe_customer: bool,
     api_key: Option<&str>,
     csrf_field: &str,
+    routing_panel_html: &str,
 ) -> String {
     let email_escaped = html_escape(email);
     let relay_escaped = html_escape(relay_url);
@@ -1307,6 +1589,11 @@ fn subscriber_dashboard_html(
         </div>"#
     );
 
+    if !routing_panel_html.is_empty() {
+        out.push_str("<div class=\"sec-label\">Fleet &amp; Smart Routing</div>");
+        out.push_str(routing_panel_html);
+    }
+
     // ── Quick Links ──
     out.push_str(
         r#"<div class="sec-label">Next Steps</div>
@@ -1399,5 +1686,51 @@ mod tests {
         assert!(masked.starts_with("mr_live_12"));
         assert!(masked.ends_with("cdef"));
         assert!(!masked.contains("567890ab"));
+    }
+
+    #[test]
+    fn both_admin_and_subscriber_dashboards_mount_shared_routing_panel() {
+        let panel = render_routing_panel(&RoutingPanelConfig {
+            get_url: "/dashboard/routing".to_string(),
+            save_url: "/dashboard/routing".to_string(),
+            save_method: "POST".to_string(),
+            csrf_token: Some("tok-test".to_string()),
+            use_oss_admin_auth: false,
+            show_workers_table: true,
+            sync_worker_kpi_id: Some("sub-kpi-workers".to_string()),
+        });
+        let admin_html = admin_dashboard_html(
+            "admin@example.com",
+            "https://api.modelrelay.io",
+            &[],
+            "",
+            &panel.html,
+        );
+        let sub_html = subscriber_dashboard_html(
+            "user@example.com",
+            "https://api.modelrelay.io",
+            None,
+            false,
+            Some("mr_live_1234567890abcdef"),
+            "",
+            &panel.html,
+        );
+        for html in [&admin_html, &sub_html] {
+            assert!(html.contains("Smart Multi-Worker Routing"));
+            assert!(html.contains("+ Tie Models Together"));
+            assert!(html.contains("mr-rt-telemetry"));
+        }
+    }
+
+    #[test]
+    fn build_server_routing_url_encodes_owner_scope() {
+        assert_eq!(
+            build_server_routing_url("http://127.0.0.1:8080/", None),
+            "http://127.0.0.1:8080/admin/routing"
+        );
+        assert_eq!(
+            build_server_routing_url("http://127.0.0.1:8080", Some("key_abc+123")),
+            "http://127.0.0.1:8080/admin/routing?owner_key_id=key_abc%2B123"
+        );
     }
 }

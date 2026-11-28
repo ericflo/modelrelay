@@ -1,9 +1,11 @@
 mod dashboard;
 mod integrate;
+mod routing;
 mod setup;
 
 pub use dashboard::dashboard_page;
 pub use integrate::{integrate_page, integrate_page_with_config};
+pub use routing::{RoutingPanelAssets, RoutingPanelConfig, render_routing_panel};
 pub use setup::{setup_wizard_page, setup_wizard_page_with_config, setup_wizard_page_with_urls};
 
 /// Canonical dynamic Pi Coding Agent provider extension (`~/.pi/agent/extensions/modelrelay.ts`),

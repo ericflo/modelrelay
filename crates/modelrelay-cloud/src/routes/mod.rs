@@ -86,6 +86,10 @@ pub fn router(state: Arc<CloudState>) -> Router {
         .route("/dashboard/keys/{id}/revoke", post(dashboard::keys_revoke))
         .route("/dashboard/workers", get(dashboard::workers))
         .route("/dashboard/stats", get(dashboard::stats))
+        .route(
+            "/dashboard/routing",
+            get(dashboard::routing_get).post(dashboard::routing_save),
+        )
         .route("/setup", get(dashboard::setup))
         .route("/integrate", get(dashboard::integrate))
         .route("/webhook/stripe", post(webhook::handle))

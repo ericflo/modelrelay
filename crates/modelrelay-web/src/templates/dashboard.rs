@@ -1,4 +1,4 @@
-use super::page_shell_custom;
+use super::{RoutingPanelConfig, page_shell_custom, render_routing_panel};
 
 /// Build the live OSS admin dashboard page (used by `modelrelay-web` standalone
 /// and mounted under `/admin/dashboard`).
@@ -178,13 +178,18 @@ pub fn dashboard_page() -> String {
         el.innerHTML = '<div class="empty-state">No workers connected.<br><a href="/setup" class="btn btn-sm" style="margin-top:10px;">Connect a worker &rarr;</a></div>';
         return;
       }
-      let html = '<table class="data"><thead><tr><th>Worker</th><th>Models</th><th>Load</th><th>Status</th></tr></thead><tbody>';
+      const rtMap = {};
+      (window.__mrLastRoutingWorkers || []).forEach(rw => { rtMap[rw.worker_id] = rw; });
+      let html = '<table class="data"><thead><tr><th>Worker</th><th>Models</th><th>Load</th><th>Avg TTFT</th><th>Warm Prefixes</th><th>Status</th></tr></thead><tbody>';
       for (const w of workers) {
         const models = (w.models || []).map(m => '<span class="model-tag">' + (m === '*' ? 'All models' : escHtml(m)) + '</span>').join('');
         const pct = w.max_concurrent ? Math.min(100, Math.round(((w.in_flight_count || 0) / w.max_concurrent) * 100)) : 0;
         const load = '<span class="load-bar"><span class="load-track"><span class="load-fill" style="width:' + pct + '%"></span></span>' + (w.in_flight_count || 0) + '/' + (w.max_concurrent || 0) + '</span>';
+        const rw = rtMap[w.worker_id];
+        const ttft = (rw && rw.avg_ttft_ms != null) ? Math.round(rw.avg_ttft_ms) + 'ms' : '—';
+        const warm = rw ? String(rw.warm_prefix_count || 0) : '—';
         const status = w.is_draining ? '<span class="badge badge-warn">Draining</span>' : '<span class="badge badge-active">Active</span>';
-        html += '<tr><td>' + escHtml(w.worker_name || w.worker_id) + '</td><td>' + models + '</td><td>' + load + '</td><td>' + status + '</td></tr>';
+        html += '<tr><td>' + escHtml(w.worker_name || w.worker_id) + '</td><td>' + models + '</td><td>' + load + '</td><td>' + ttft + '</td><td>' + warm + '</td><td>' + status + '</td></tr>';
       }
       el.innerHTML = html + '</tbody></table>';
     } catch (_) {
@@ -281,18 +286,33 @@ pub fn dashboard_page() -> String {
     }
   };
 
-  function pollAll() { return Promise.all([pollHealth(), pollWorkers(), pollStats(), pollKeys()]); }
+  function pollAll() {
+    const tasks = [pollHealth(), pollWorkers(), pollStats(), pollKeys()];
+    if (typeof window.__mrPollRouting === 'function') tasks.push(window.__mrPollRouting());
+    return Promise.all(tasks);
+  }
   initConfig();
   pollAll();
   setInterval(pollAll, POLL_MS);
 })();
     "#;
 
-    let body = r#"
+    let routing_panel = render_routing_panel(&RoutingPanelConfig {
+        get_url: String::new(),
+        save_url: String::new(),
+        save_method: "PUT".to_string(),
+        csrf_token: None,
+        use_oss_admin_auth: true,
+        show_workers_table: false,
+        sync_worker_kpi_id: None,
+    });
+
+    let body = format!(
+        r#"
     <div class="dash-top">
       <div>
         <h1>Relay Admin Dashboard</h1>
-        <p>Live worker telemetry, queue depth, and API key management for your ModelRelay server.</p>
+        <p>Live worker telemetry, smart multi-worker routing, queue depth, and API key management for your ModelRelay server.</p>
       </div>
       <div class="dash-actions">
         <a href="/setup" class="btn btn-sm">+ Connect Worker</a>
@@ -321,6 +341,8 @@ pub fn dashboard_page() -> String {
       <div id="workers-body"><div class="empty-state">Loading&hellip;</div></div>
     </div>
 
+    {}
+
     <div class="panel">
       <div class="panel-head"><h2>Queue Depth</h2></div>
       <div id="stats-body"><div class="empty-state">Loading&hellip;</div></div>
@@ -335,17 +357,33 @@ pub fn dashboard_page() -> String {
       <div id="new-key-secret"></div>
       <div id="keys-body"><div class="empty-state">Loading&hellip;</div></div>
     </div>
-    "#;
+    "#,
+        routing_panel.html
+    );
 
-    let extra_css = format!("<style>{dashboard_css}</style>");
-    let extra_body_end = format!("<script>{dashboard_js}</script>");
+    let extra_css = format!("<style>{dashboard_css}</style>\n{}", routing_panel.css);
+    let extra_body_end = format!("<script>{dashboard_js}</script>\n{}", routing_panel.js);
 
     page_shell_custom(
         "Dashboard",
         "/dashboard",
-        body,
+        &body,
         true,
         &extra_css,
         &extra_body_end,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oss_dashboard_embeds_shared_smart_routing_panel() {
+        let html = dashboard_page();
+        assert!(html.contains("Smart Multi-Worker Routing"));
+        assert!(html.contains("+ Tie Models Together"));
+        assert!(html.contains("mr-rt-telemetry"));
+        assert!(html.contains(r#""useOssAdminAuth":true"#));
+    }
 }

@@ -1326,3 +1326,85 @@ async fn custom_public_urls_override_landing_agents_md_and_pi_extension() {
         );
     }
 }
+
+#[tokio::test]
+async fn dashboard_routing_enforces_session_auth_and_csrf() {
+    // 1. Without a session layer, GET and POST return 503 via session_guard.
+    let (status_no_sess, _) = get("/dashboard/routing").await;
+    assert_eq!(status_no_sess, StatusCode::SERVICE_UNAVAILABLE);
+
+    let (post_no_sess, _) =
+        post("/dashboard/routing", "application/json", r#"{"config":{}}"#).await;
+    assert_eq!(post_no_sess, StatusCode::SERVICE_UNAVAILABLE);
+
+    // 2. With a session layer and no logged-in user, GET redirects to /login.
+    let (status_unauth, _) = get_with_session("/dashboard/routing").await;
+    assert_eq!(status_unauth, StatusCode::SEE_OTHER);
+
+    // 3. With a session layer, POST without X-CSRF-Token is rejected with 403.
+    let router = app_with_session();
+    let resp_no_csrf = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/routing")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"config":{}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_no_csrf.status(), StatusCode::FORBIDDEN);
+
+    // 4. Obtain a valid session cookie + CSRF token from /login and verify
+    // POST /dashboard/routing with X-CSRF-Token passes CSRF middleware and hits require_user (303).
+    let login_resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = login_resp
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let login_html = String::from_utf8(
+        login_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let csrf_marker = r#"name="_csrf" value=""#;
+    let start = login_html.find(csrf_marker).unwrap() + csrf_marker.len();
+    let end = login_html[start..].find('"').unwrap() + start;
+    let csrf_token = &login_html[start..end];
+
+    let resp_with_csrf = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dashboard/routing")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .header("x-csrf-token", csrf_token)
+                .body(Body::from(r#"{"config":{}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_with_csrf.status(), StatusCode::SEE_OTHER);
+}
