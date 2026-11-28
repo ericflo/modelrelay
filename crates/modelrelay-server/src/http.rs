@@ -29,8 +29,8 @@ use tower_http::cors::CorsLayer;
 
 use crate::{
     AdminWorkerInfo, CancelReason, HttpResponseEvent, PendingHttpResponse,
-    PendingStreamingHttpResponse, ProxyServerCore, RequestFailureReason, WorkerSocketApp,
-    api_keys::ApiKeyStore,
+    PendingStreamingHttpResponse, ProxyServerCore, RequestFailureReason, RequestRoutingHints,
+    WorkerSocketApp, api_keys::ApiKeyStore, prefix,
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
@@ -626,38 +626,6 @@ async fn check_client_api_key(
     }
 }
 
-/// Resiliently parse `model`, `stream`, and `provider` from a JSON request body.
-/// Tolerates `"stream": null` and non-object `"provider"` values (e.g., string
-/// shorthands) without failing the entire parse.
-fn parse_proxy_body_metadata(body: &str) -> (Option<String>, bool, Option<ProviderRouting>) {
-    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(body) else {
-        return (None, false, None);
-    };
-
-    let model = map
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned);
-
-    let is_streaming = map.get("stream").and_then(Value::as_bool).unwrap_or(false);
-
-    let provider_routing = match map.get("provider") {
-        Some(Value::Object(_)) => map
-            .get("provider")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<ProviderRouting>(value).ok()),
-        Some(Value::String(name)) if !name.trim().is_empty() => Some(ProviderRouting {
-            only: Some(vec![name.trim().to_string()]),
-            ..Default::default()
-        }),
-        _ => None,
-    };
-
-    (model, is_streaming, provider_routing)
-}
-
 fn extract_query_param(query: Option<&str>, key: &str) -> Option<String> {
     query?.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
@@ -735,7 +703,11 @@ async fn wildcard_handler(
         .map_or_else(|| uri.path().to_string(), ToString::to_string);
     let method_str = method.as_str().to_string();
 
-    let (model, is_streaming, provider_routing) = parse_proxy_body_metadata(&body);
+    let parsed = prefix::parse_proxy_request(&method_str, &endpoint_path, &headers, &body);
+    let model = parsed.model;
+    let is_streaming = parsed.is_streaming;
+    let provider_routing = parsed.provider_routing;
+    let routing_hints = parsed.routing_hints;
 
     // Fall back to X-Model header or `?model=<id>` query parameter (e.g. llama.cpp `/props?model=...`).
     let model = model
@@ -785,13 +757,14 @@ async fn wildcard_handler(
             endpoint_path,
             method_str,
             provider_routing,
+            routing_hints,
         )
         .await;
     }
 
     let pending = {
         let mut core = state.core.lock().await;
-        match core.submit_http_response_request_for_owner(
+        match core.submit_http_response_request_with_hints(
             &state.models_provider,
             model,
             &endpoint_path,
@@ -800,6 +773,7 @@ async fn wildcard_handler(
             forwarded_request_headers(&headers, state.require_api_keys),
             provider_routing,
             owner_key_id,
+            routing_hints,
         ) {
             Ok(pending) => pending,
             Err(failure) => return availability_failure_response(failure.reason),
@@ -857,6 +831,7 @@ async fn stream_worker_backed_http_response(
     endpoint_path: String,
     method: String,
     provider_routing: Option<ProviderRouting>,
+    routing_hints: RequestRoutingHints,
 ) -> Response {
     if !state.provider_enabled {
         return availability_failure_response(RequestFailureReason::ProviderDisabled);
@@ -864,7 +839,7 @@ async fn stream_worker_backed_http_response(
 
     let mut pending = {
         let mut core = state.core.lock().await;
-        match core.submit_http_streaming_request_for_owner(
+        match core.submit_http_streaming_request_with_hints(
             &state.models_provider,
             model,
             &endpoint_path,
@@ -873,6 +848,7 @@ async fn stream_worker_backed_http_response(
             forwarded_request_headers(&headers, state.require_api_keys),
             provider_routing,
             owner_key_id,
+            routing_hints,
         ) {
             Ok(pending) => pending,
             Err(failure) => return availability_failure_response(failure.reason),

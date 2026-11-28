@@ -1,5 +1,7 @@
 pub mod api_keys;
 pub mod http;
+pub mod prefix;
+pub mod routing;
 pub mod worker_socket;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -17,6 +19,11 @@ use tokio::sync::{Notify, mpsc, oneshot};
 pub use api_keys::PostgresApiKeyStore;
 pub use api_keys::{ApiKeyMetadata, ApiKeyStore, InMemoryApiKeyStore, StoreError};
 pub use http::ProxyHttpApp;
+pub use prefix::{ParsedProxyRequest, PrefixCheckpoint, RequestRoutingHints};
+pub use routing::{
+    ModelLoadedState, RouteDecision, RouteReason, RoutingPolicy, RoutingStrategy,
+    RoutingTelemetrySnapshot, SpilloverMode, WorkerModelMetricsSnapshot,
+};
 pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
 
 const MAX_REQUEUE_COUNT: usize = 3;
@@ -33,6 +40,8 @@ pub struct ProxyServerCore {
     provider_queues: HashMap<String, VecDeque<RequestRecord>>,
     provider_queue_policies: HashMap<String, ProviderQueuePolicy>,
     default_queue_policy: ProviderQueuePolicy,
+    default_routing_policy: RoutingPolicy,
+    routing_state: routing::RoutingState,
     selection_cursors: HashMap<SelectionKey, String>,
     active_requests: HashMap<String, ActiveRequestState>,
     pending_worker_requests: HashMap<String, VecDeque<RequestMessage>>,
@@ -51,6 +60,44 @@ impl ProxyServerCore {
             next_worker_id: 1,
             ..Self::default()
         }
+    }
+
+    /// Override the default routing policy used for models without an explicit
+    /// policy override. Defaults to `RoutingStrategy::PrefixAware` with
+    /// `SpilloverMode::SpillOnBusy`.
+    pub fn set_default_routing_policy(&mut self, policy: RoutingPolicy) {
+        self.default_routing_policy = policy;
+    }
+
+    #[must_use]
+    pub fn default_routing_policy(&self) -> &RoutingPolicy {
+        &self.default_routing_policy
+    }
+
+    #[must_use]
+    pub fn routing_telemetry(&self) -> RoutingTelemetrySnapshot {
+        self.routing_state.telemetry_snapshot()
+    }
+
+    #[must_use]
+    pub fn worker_routing_metrics(
+        &self,
+        worker_id: &str,
+        model: &str,
+    ) -> Option<WorkerModelMetricsSnapshot> {
+        self.routing_state.worker_metrics_snapshot(worker_id, model)
+    }
+
+    #[must_use]
+    pub fn last_route_decision(&self) -> Option<&RouteDecision> {
+        self.routing_state.last_decision()
+    }
+
+    /// Expire stale prefix trie entries, disconnected worker records, and
+    /// expired session/response affinity entries.
+    pub fn sweep_routing_state(&mut self, now: Instant) {
+        self.routing_state
+            .sweep_expired(now, self.default_routing_policy.prefix_ttl);
     }
 
     pub fn configure_provider_queue(
@@ -315,12 +362,46 @@ impl ProxyServerCore {
         provider_routing: Option<ProviderRouting>,
         owner_key_id: Option<String>,
     ) -> SubmissionOutcome {
+        let endpoint_path = endpoint_path.into();
+        let method = method.into();
+        let body = body.into();
+        let routing_hints =
+            prefix::extract_routing_hints_from_transport(&method, &endpoint_path, &headers, &body);
+        self.submit_transport_request_with_hints(
+            provider,
+            model,
+            endpoint_path,
+            method,
+            is_streaming,
+            body,
+            headers,
+            provider_routing,
+            owner_key_id,
+            routing_hints,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_transport_request_with_hints(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        method: impl Into<String>,
+        is_streaming: bool,
+        body: impl Into<String>,
+        headers: HeaderMap,
+        provider_routing: Option<ProviderRouting>,
+        owner_key_id: Option<String>,
+        routing_hints: RequestRoutingHints,
+    ) -> SubmissionOutcome {
+        let now = Instant::now();
         let request = RequestRecord {
             request_id: format!("request-{}", self.next_request_id),
             provider: provider.into(),
             model: model.into(),
             owner_key_id,
-            queued_at: Instant::now(),
+            queued_at: now,
             transport: RequestTransport {
                 endpoint_path: endpoint_path.into(),
                 method: method.into(),
@@ -329,6 +410,7 @@ impl ProxyServerCore {
                 headers,
             },
             provider_routing,
+            routing_hints,
             requeue_count: 0,
         };
         self.next_request_id += 1;
@@ -339,16 +421,19 @@ impl ProxyServerCore {
             },
         );
 
-        if let Some(worker_id) = self.find_eligible_worker_id(&request) {
+        if let Some(decision) = self.find_eligible_worker_decision(&request, now) {
+            let worker_id = decision.worker_id.clone();
             tracing::debug!(
                 request_id = %request.request_id,
                 worker_id = %worker_id,
                 model = %request.model,
                 endpoint = %request.transport.endpoint_path,
                 streaming = request.transport.is_streaming,
+                route_reason = ?decision.reason,
+                matched_prefix_bytes = decision.matched_prefix_bytes,
                 "request dispatched"
             );
-            self.assign_to_worker(&worker_id, request.clone());
+            self.assign_to_worker_with_decision(&worker_id, request.clone(), Some(decision), now);
             return SubmissionOutcome::Dispatched(DispatchAssignment {
                 request_id: request.request_id,
                 worker_id,
@@ -493,8 +578,45 @@ impl ProxyServerCore {
         provider_routing: Option<ProviderRouting>,
         owner_key_id: Option<String>,
     ) -> Result<PendingHttpResponse, RequestFailure> {
+        let endpoint_path = endpoint_path.into();
+        let method = method.into();
+        let body = body.into();
+        let routing_hints =
+            prefix::extract_routing_hints_from_transport(&method, &endpoint_path, &headers, &body);
+        self.submit_http_response_request_with_hints(
+            provider,
+            model,
+            endpoint_path,
+            method,
+            body,
+            headers,
+            provider_routing,
+            owner_key_id,
+            routing_hints,
+        )
+    }
+
+    /// Submits an HTTP-backed request with pre-extracted [`RequestRoutingHints`]
+    /// (computed outside the `ProxyServerCore` mutex).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestFailure`] when the underlying transport submission is rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_http_response_request_with_hints(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        method: impl Into<String>,
+        body: impl Into<String>,
+        headers: HeaderMap,
+        provider_routing: Option<ProviderRouting>,
+        owner_key_id: Option<String>,
+        routing_hints: RequestRoutingHints,
+    ) -> Result<PendingHttpResponse, RequestFailure> {
         let (response_tx, response_rx) = oneshot::channel();
-        let outcome = self.submit_transport_request_for_owner(
+        let outcome = self.submit_transport_request_with_hints(
             provider,
             model,
             endpoint_path,
@@ -504,6 +626,7 @@ impl ProxyServerCore {
             headers,
             provider_routing,
             owner_key_id,
+            routing_hints,
         );
 
         let request_id = match outcome {
@@ -569,8 +692,45 @@ impl ProxyServerCore {
         provider_routing: Option<ProviderRouting>,
         owner_key_id: Option<String>,
     ) -> Result<PendingStreamingHttpResponse, RequestFailure> {
+        let endpoint_path = endpoint_path.into();
+        let method = method.into();
+        let body = body.into();
+        let routing_hints =
+            prefix::extract_routing_hints_from_transport(&method, &endpoint_path, &headers, &body);
+        self.submit_http_streaming_request_with_hints(
+            provider,
+            model,
+            endpoint_path,
+            method,
+            body,
+            headers,
+            provider_routing,
+            owner_key_id,
+            routing_hints,
+        )
+    }
+
+    /// Submits an HTTP-backed streaming request with pre-extracted [`RequestRoutingHints`]
+    /// (computed outside the `ProxyServerCore` mutex).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestFailure`] when the underlying transport submission is rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_http_streaming_request_with_hints(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        endpoint_path: impl Into<String>,
+        method: impl Into<String>,
+        body: impl Into<String>,
+        headers: HeaderMap,
+        provider_routing: Option<ProviderRouting>,
+        owner_key_id: Option<String>,
+        routing_hints: RequestRoutingHints,
+    ) -> Result<PendingStreamingHttpResponse, RequestFailure> {
         let (event_tx, event_rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        let outcome = self.submit_transport_request_for_owner(
+        let outcome = self.submit_transport_request_with_hints(
             provider,
             model,
             endpoint_path,
@@ -580,6 +740,7 @@ impl ProxyServerCore {
             headers,
             provider_routing,
             owner_key_id,
+            routing_hints,
         );
 
         let request_id = match outcome {
@@ -610,52 +771,114 @@ impl ProxyServerCore {
         worker_id: &str,
         request_id: &str,
     ) -> Option<Option<mpsc::Sender<HttpResponseEvent>>> {
+        self.prepare_stream_chunk_sender_inner(worker_id, request_id, None)
+    }
+
+    /// Same as [`Self::prepare_stream_chunk_sender`], additionally inspecting the
+    /// chunk on `/v1/responses` streams to capture the `OpenAI` Responses API
+    /// `response.id` for `previous_response_id` stickiness.
+    pub fn prepare_stream_chunk_sender_with_chunk(
+        &mut self,
+        worker_id: &str,
+        request_id: &str,
+        chunk: &str,
+    ) -> Option<Option<mpsc::Sender<HttpResponseEvent>>> {
+        self.prepare_stream_chunk_sender_inner(worker_id, request_id, Some(chunk))
+    }
+
+    #[allow(clippy::option_option)]
+    fn prepare_stream_chunk_sender_inner(
+        &mut self,
+        worker_id: &str,
+        request_id: &str,
+        chunk: Option<&str>,
+    ) -> Option<Option<mpsc::Sender<HttpResponseEvent>>> {
         if !self.workers.contains_key(worker_id) {
             return None;
         }
 
-        let Some(ActiveRequestState::InFlight {
-            worker_id: active_worker_id,
-            cancellation,
-            has_emitted_chunk,
-            ..
-        }) = self.active_requests.get_mut(request_id)
-        else {
-            tracing::debug!(
-                worker_id = %worker_id,
-                request_id = %request_id,
-                "dropping late response chunk for inactive request"
-            );
-            return Some(None);
+        let now = Instant::now();
+        let (ttft_record, response_affinity_record, sender) = {
+            let Some(ActiveRequestState::InFlight {
+                request,
+                worker_id: active_worker_id,
+                cancellation,
+                has_emitted_chunk,
+                dispatched_at,
+                response_id_captured,
+                ..
+            }) = self.active_requests.get_mut(request_id)
+            else {
+                tracing::debug!(
+                    worker_id = %worker_id,
+                    request_id = %request_id,
+                    "dropping late response chunk for inactive request"
+                );
+                return Some(None);
+            };
+
+            if active_worker_id != worker_id {
+                tracing::debug!(
+                    worker_id = %worker_id,
+                    active_worker_id = %active_worker_id,
+                    request_id = %request_id,
+                    "dropping chunk from non-owner worker"
+                );
+                return Some(None);
+            }
+
+            if cancellation.is_some() {
+                tracing::debug!(
+                    worker_id = %worker_id,
+                    request_id = %request_id,
+                    "dropping chunk for cancelled request"
+                );
+                return Some(None);
+            }
+
+            let Some(PendingHttpResponseSender::Streaming(sender)) =
+                self.pending_http_response_senders.get(request_id)
+            else {
+                return Some(None);
+            };
+
+            let ttft_record = if *has_emitted_chunk {
+                None
+            } else {
+                *has_emitted_chunk = true;
+                Some((
+                    request.model.clone(),
+                    now.saturating_duration_since(*dispatched_at),
+                ))
+            };
+
+            let response_affinity_record = if !*response_id_captured
+                && request.transport.endpoint_path.starts_with("/v1/responses")
+                && let Some(chunk_text) = chunk
+                && let Some(resp_id) = routing::extract_responses_api_id(chunk_text)
+            {
+                *response_id_captured = true;
+                Some((request.owner_key_id.clone(), resp_id))
+            } else {
+                None
+            };
+
+            (ttft_record, response_affinity_record, sender.clone())
         };
 
-        if active_worker_id != worker_id {
-            tracing::debug!(
-                worker_id = %worker_id,
-                active_worker_id = %active_worker_id,
-                request_id = %request_id,
-                "dropping chunk from non-owner worker"
+        if let Some((model, elapsed)) = ttft_record {
+            self.routing_state.record_ttft(worker_id, &model, elapsed);
+        }
+        if let Some((owner_key_id, resp_id)) = response_affinity_record {
+            self.routing_state.record_response_affinity(
+                owner_key_id.as_deref(),
+                resp_id,
+                worker_id,
+                now,
             );
-            return Some(None);
         }
 
-        if cancellation.is_some() {
-            tracing::debug!(
-                worker_id = %worker_id,
-                request_id = %request_id,
-                "dropping chunk for cancelled request"
-            );
-            return Some(None);
-        }
-
-        let Some(PendingHttpResponseSender::Streaming(sender)) =
-            self.pending_http_response_senders.get(request_id)
-        else {
-            return Some(None);
-        };
-
-        *has_emitted_chunk = true;
-        Some(Some(sender.clone()))
+        Some(Some(sender))
     }
 
     pub fn stream_http_response_chunk(
@@ -664,7 +887,7 @@ impl ProxyServerCore {
         request_id: &str,
         chunk: String,
     ) -> bool {
-        match self.prepare_stream_chunk_sender(worker_id, request_id) {
+        match self.prepare_stream_chunk_sender_with_chunk(worker_id, request_id, &chunk) {
             Some(Some(sender)) => {
                 let _ = sender.try_send(HttpResponseEvent::Chunk(chunk));
                 true
@@ -687,21 +910,61 @@ impl ProxyServerCore {
 
         // Verify ownership BEFORE removing pending_http_response_senders so a
         // stray completion from a non-owner worker cannot steal an active client.
-        let owned_by_worker = matches!(
-            self.active_requests.get(&request_id),
+        let owned_meta = match self.active_requests.get(&request_id) {
             Some(ActiveRequestState::InFlight {
+                request,
                 worker_id: active_worker_id,
+                has_emitted_chunk,
+                dispatched_at,
+                response_id_captured,
                 ..
-            }) if active_worker_id == worker_id
-        );
+            }) if active_worker_id == worker_id => Some((
+                request.model.clone(),
+                request.owner_key_id.clone(),
+                request.transport.endpoint_path.clone(),
+                *has_emitted_chunk,
+                *dispatched_at,
+                *response_id_captured,
+            )),
+            _ => None,
+        };
 
-        if !owned_by_worker {
+        let Some((model, owner_key_id, endpoint_path, had_chunk, dispatched_at, resp_captured)) =
+            owned_meta
+        else {
             tracing::debug!(
                 worker_id = %worker_id,
                 request_id = %request_id,
                 "ignoring response_complete for unknown or non-owned request"
             );
             return true;
+        };
+
+        let now = Instant::now();
+        if (200..300).contains(&response.status_code) {
+            if had_chunk {
+                self.routing_state.record_success(worker_id, &model);
+            } else {
+                self.routing_state.record_ttft(
+                    worker_id,
+                    &model,
+                    now.saturating_duration_since(dispatched_at),
+                );
+            }
+            if !resp_captured
+                && endpoint_path.starts_with("/v1/responses")
+                && let Some(body) = response.body.as_deref()
+                && let Some(resp_id) = routing::extract_responses_api_id(body)
+            {
+                self.routing_state.record_response_affinity(
+                    owner_key_id.as_deref(),
+                    resp_id,
+                    worker_id,
+                    now,
+                );
+            }
+        } else if response.status_code >= 500 {
+            self.routing_state.record_error(worker_id, &model, now);
         }
 
         let sender = self.pending_http_response_senders.remove(&request_id);
@@ -743,15 +1006,16 @@ impl ProxyServerCore {
             return true;
         };
 
-        let owned_by_worker = matches!(
-            self.active_requests.get(request_id),
+        let owned_model = match self.active_requests.get(request_id) {
             Some(ActiveRequestState::InFlight {
+                request,
                 worker_id: active_worker_id,
                 ..
-            }) if active_worker_id == worker_id
-        );
+            }) if active_worker_id == worker_id => Some(request.model.clone()),
+            _ => None,
+        };
 
-        if !owned_by_worker {
+        let Some(model) = owned_model else {
             tracing::debug!(
                 worker_id = %worker_id,
                 request_id = %request_id,
@@ -759,7 +1023,10 @@ impl ProxyServerCore {
                 "ignoring worker error for inactive request"
             );
             return true;
-        }
+        };
+
+        self.routing_state
+            .record_error(worker_id, &model, Instant::now());
 
         tracing::warn!(
             worker_id = %worker_id,
@@ -1575,12 +1842,13 @@ impl ProxyServerCore {
         self.next_request_id += 1;
         let mut headers = HeaderMap::new();
         headers.insert("accept".to_string(), "application/json".to_string());
+        let now = Instant::now();
         let request = RequestRecord {
             request_id: request_id.clone(),
             provider,
             model: probe_model,
             owner_key_id,
-            queued_at: Instant::now(),
+            queued_at: now,
             transport: RequestTransport {
                 endpoint_path: endpoint_path.to_string(),
                 method: "GET".to_string(),
@@ -1589,12 +1857,13 @@ impl ProxyServerCore {
                 headers,
             },
             provider_routing: None,
+            routing_hints: RequestRoutingHints::default(),
             requeue_count: 0,
         };
         let (tx, rx) = oneshot::channel();
         self.pending_http_response_senders
             .insert(request_id.clone(), PendingHttpResponseSender::Unary(tx));
-        self.assign_to_worker(worker_id, request);
+        self.assign_to_worker_with_decision(worker_id, request, None, now);
 
         Some(PendingHttpResponse {
             request_id,
@@ -1723,152 +1992,229 @@ impl ProxyServerCore {
             return None;
         }
         let worker = self.workers.get(worker_id)?.clone();
+        let now = Instant::now();
 
-        // Search all provider queues, enforcing model, endpoint, tenant owner,
-        // and ProviderRouting constraints (only/ignore/allow_fallbacks).
-        let mut best_provider = None;
-        let mut best_index = None;
-        let mut best_queued_at = None;
-        for (queue_provider, queue) in &self.provider_queues {
-            if let Some(idx) = queue
-                .iter()
-                .position(|request| worker_matches_request(&worker, request, false))
-            {
-                let queued_at = queue[idx].queued_at;
-                if best_queued_at.is_none_or(|best| queued_at < best) {
-                    best_provider = Some(queue_provider.clone());
-                    best_index = Some(idx);
-                    best_queued_at = Some(queued_at);
-                }
-            }
-        }
-
-        // Second pass for queued requests that allow fallback from `only`.
-        if best_provider.is_none() {
+        // Collect compatible queued candidates across all provider queues,
+        // enforcing model, endpoint, tenant owner, and ProviderRouting
+        // constraints (strict pass first, fallback pass second).
+        let mut compatible: Vec<(String, usize, Instant)> = Vec::new();
+        for allow_fallback_pass in [false, true] {
             for (queue_provider, queue) in &self.provider_queues {
-                if let Some(idx) = queue
-                    .iter()
-                    .position(|request| worker_matches_request(&worker, request, true))
-                {
-                    let queued_at = queue[idx].queued_at;
-                    if best_queued_at.is_none_or(|best| queued_at < best) {
-                        best_provider = Some(queue_provider.clone());
-                        best_index = Some(idx);
-                        best_queued_at = Some(queued_at);
+                for (idx, request) in queue.iter().enumerate() {
+                    if worker_matches_request(&worker, request, allow_fallback_pass) {
+                        compatible.push((queue_provider.clone(), idx, request.queued_at));
                     }
                 }
             }
+            if !compatible.is_empty() {
+                break;
+            }
         }
 
-        let provider_key = best_provider?;
-        let queue_index = best_index?;
-        let queue = self.provider_queues.get_mut(&provider_key)?;
-        let request = queue.remove(queue_index)?;
+        if compatible.is_empty() {
+            return None;
+        }
 
-        self.assign_to_worker(worker_id, request.clone());
+        // Order earliest-queued first so FIFO ordering & anti-starvation are preserved.
+        compatible.sort_by(|a, b| {
+            a.2.cmp(&b.2)
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.cmp(&b.1))
+        });
+
+        let (oldest_provider, oldest_idx, oldest_queued_at) = compatible[0].clone();
+        let queue_timeout_cap = self
+            .queue_policy(&oldest_provider)
+            .queue_timeout_ticks
+            .map(|secs| Duration::from_secs((secs / 2).max(1)))
+            .map_or(routing::QUEUE_ANTI_STARVATION_CAP, |half| {
+                half.min(routing::QUEUE_ANTI_STARVATION_CAP)
+            });
+        let oldest_starving = now.saturating_duration_since(oldest_queued_at) >= queue_timeout_cap;
+
+        let policy = self.default_routing_policy.clone();
+        let (chosen_provider, chosen_index, matched_bytes, reason) =
+            if policy.prefix_aware_queue && !oldest_starving && compatible.len() > 1 {
+                let lookahead = compatible.len().min(routing::PREFIX_QUEUE_LOOKAHEAD);
+                let mut best_match_bytes = 0_usize;
+                let mut best_pos = 0_usize;
+                for (pos, (prov, idx, _)) in compatible.iter().take(lookahead).enumerate() {
+                    if let Some(req) = self.provider_queues.get(prov).and_then(|q| q.get(*idx)) {
+                        if req.routing_hints.is_empty() {
+                            continue;
+                        }
+                        let effective = self.routing_state.match_prefix_for_single_worker(
+                            req.owner_key_id.as_deref(),
+                            &req.model,
+                            &req.routing_hints,
+                            worker_id,
+                            worker.max_concurrent,
+                            now,
+                            policy.prefix_ttl,
+                        );
+                        if effective >= policy.min_prefix_bytes && effective > best_match_bytes {
+                            best_match_bytes = effective;
+                            best_pos = pos;
+                        }
+                    }
+                }
+                if best_match_bytes >= policy.min_prefix_bytes {
+                    let (prov, idx, _) = compatible[best_pos].clone();
+                    (prov, idx, best_match_bytes, RouteReason::QueuedPrefixMatch)
+                } else {
+                    (oldest_provider, oldest_idx, 0, RouteReason::QueuedFifo)
+                }
+            } else {
+                (oldest_provider, oldest_idx, 0, RouteReason::QueuedFifo)
+            };
+
+        let queue = self.provider_queues.get_mut(&chosen_provider)?;
+        let request = queue.remove(chosen_index)?;
+
+        let decision = RouteDecision {
+            worker_id: worker_id.to_string(),
+            reason,
+            matched_prefix_bytes: matched_bytes,
+            effective_matched_bytes: matched_bytes,
+        };
+        self.assign_to_worker_with_decision(worker_id, request.clone(), Some(decision), now);
         Some(DispatchAssignment {
             request_id: request.request_id,
             worker_id: worker_id.to_string(),
         })
     }
 
-    fn find_eligible_worker_id(&mut self, request: &RequestRecord) -> Option<String> {
-        if let Some(routing) = &request.provider_routing {
-            return self.find_eligible_worker_id_with_routing(request, routing);
-        }
-        if let Some(id) =
-            self.find_eligible_worker_id_for_provider(Some(&request.provider), request, false)
+    fn resolve_policy_for_request(&self, request: &RequestRecord) -> RoutingPolicy {
+        let mut policy = self.default_routing_policy.clone();
+        if policy.allow_client_overrides
+            && let Some(sort) = request
+                .provider_routing
+                .as_ref()
+                .and_then(|r| r.sort.as_deref())
+            && let Some(override_strategy) = RoutingStrategy::from_sort_override(sort)
         {
-            return Some(id);
+            policy.strategy = override_strategy;
         }
-        self.find_eligible_worker_id_for_provider(None, request, false)
+        policy
     }
 
-    fn find_eligible_worker_id_with_routing(
+    fn build_candidate(
+        &self,
+        worker_id: &str,
+        order_idx: usize,
+        model: &str,
+    ) -> Option<routing::CandidateWorker> {
+        let worker = self.workers.get(worker_id)?;
+        Some(routing::CandidateWorker {
+            worker_id: worker_id.to_string(),
+            worker_name: worker.worker_name.clone(),
+            provider: worker.provider.clone(),
+            worker_order_index: order_idx,
+            selection_load: worker.selection_load(),
+            max_concurrent: worker.max_concurrent,
+            context_window: worker.model_context_window(model),
+            loaded_state: worker.model_loaded_state(model),
+        })
+    }
+
+    fn find_eligible_worker_decision(
+        &mut self,
+        request: &RequestRecord,
+        now: Instant,
+    ) -> Option<RouteDecision> {
+        let policy = self.resolve_policy_for_request(request);
+        if let Some(routing) = request.provider_routing.clone() {
+            return self
+                .find_eligible_worker_decision_with_routing(request, &routing, &policy, now);
+        }
+        if let Some(decision) = self.find_eligible_worker_decision_for_provider(
+            Some(&request.provider),
+            request,
+            false,
+            &policy,
+            now,
+        ) {
+            return Some(decision);
+        }
+        self.find_eligible_worker_decision_for_provider(None, request, false, &policy, now)
+    }
+
+    fn find_eligible_worker_decision_with_routing(
         &mut self,
         request: &RequestRecord,
         routing: &ProviderRouting,
-    ) -> Option<String> {
-        let eligible_workers: Vec<(String, usize, String)> = self
+        policy: &RoutingPolicy,
+        now: Instant,
+    ) -> Option<RouteDecision> {
+        let eligible_workers: Vec<routing::CandidateWorker> = self
             .worker_order
             .iter()
-            .filter_map(|worker_id| {
+            .enumerate()
+            .filter_map(|(order_idx, worker_id)| {
                 let worker = self.workers.get(worker_id)?;
                 if worker.selection_load() >= worker.max_concurrent
                     || !worker_matches_request(worker, request, false)
                 {
                     return None;
                 }
-                Some((
-                    worker_id.clone(),
-                    worker.selection_load(),
-                    worker.provider.clone(),
-                ))
+                self.build_candidate(worker_id, order_idx, &request.model)
             })
             .collect();
 
         if eligible_workers.is_empty() {
             if routing.allow_fallbacks.unwrap_or(true) {
-                if let Some(id) = self.find_eligible_worker_id_for_provider(
+                if let Some(decision) = self.find_eligible_worker_decision_for_provider(
                     Some(&request.provider),
                     request,
                     true,
+                    policy,
+                    now,
                 ) {
-                    return Some(id);
+                    return Some(decision);
                 }
-                return self.find_eligible_worker_id_for_provider(None, request, true);
+                return self
+                    .find_eligible_worker_decision_for_provider(None, request, true, policy, now);
             }
             return None;
         }
 
-        let sort_round_robin = routing
-            .sort
-            .as_deref()
-            .is_some_and(|s| s.eq_ignore_ascii_case("round_robin"));
-
         if let Some(order) = &routing.order {
             for preferred in order {
-                let preferred_workers: Vec<(String, usize)> = eligible_workers
+                let preferred_workers: Vec<routing::CandidateWorker> = eligible_workers
                     .iter()
-                    .filter(|(_, _, prov)| prov == preferred)
-                    .map(|(id, load, _)| (id.clone(), *load))
+                    .filter(|c| &c.provider == preferred)
+                    .cloned()
                     .collect();
                 if !preferred_workers.is_empty() {
                     return self.pick_from_candidates(
                         preferred,
-                        &request.model,
+                        request,
                         &preferred_workers,
-                        sort_round_robin,
+                        policy,
+                        now,
                     );
                 }
             }
         }
 
-        let candidates: Vec<(String, usize)> = eligible_workers
-            .into_iter()
-            .map(|(id, load, _)| (id, load))
-            .collect();
-        self.pick_from_candidates(
-            &request.provider,
-            &request.model,
-            &candidates,
-            sort_round_robin,
-        )
+        self.pick_from_candidates(&request.provider, request, &eligible_workers, policy, now)
     }
 
-    fn find_eligible_worker_id_for_provider(
+    fn find_eligible_worker_decision_for_provider(
         &mut self,
         provider_filter: Option<&str>,
         request: &RequestRecord,
         allow_fallback_pass: bool,
-    ) -> Option<String> {
-        let candidates: Vec<(String, usize)> = self
+        policy: &RoutingPolicy,
+        now: Instant,
+    ) -> Option<RouteDecision> {
+        let candidates: Vec<routing::CandidateWorker> = self
             .worker_order
             .iter()
-            .filter_map(|worker_id| {
+            .enumerate()
+            .filter_map(|(order_idx, worker_id)| {
                 let worker = self.workers.get(worker_id)?;
-                let selection_load = worker.selection_load();
-                let has_capacity = selection_load < worker.max_concurrent;
+                let has_capacity = worker.selection_load() < worker.max_concurrent;
                 let provider_matches =
                     provider_filter.is_none_or(|provider| worker.provider == provider);
 
@@ -1876,7 +2222,7 @@ impl ProxyServerCore {
                     && has_capacity
                     && worker_matches_request(worker, request, allow_fallback_pass)
                 {
-                    Some((worker_id.clone(), selection_load))
+                    self.build_candidate(worker_id, order_idx, &request.model)
                 } else {
                     None
                 }
@@ -1888,68 +2234,61 @@ impl ProxyServerCore {
         }
 
         let effective_provider = provider_filter.unwrap_or("_any");
-        self.pick_from_candidates(effective_provider, &request.model, &candidates, false)
+        self.pick_from_candidates(effective_provider, request, &candidates, policy, now)
     }
 
     fn pick_from_candidates(
         &mut self,
         effective_provider: &str,
-        model: &str,
-        candidates: &[(String, usize)],
-        pure_round_robin: bool,
-    ) -> Option<String> {
-        if candidates.is_empty() {
-            return None;
-        }
+        request: &RequestRecord,
+        candidates: &[routing::CandidateWorker],
+        policy: &RoutingPolicy,
+        now: Instant,
+    ) -> Option<RouteDecision> {
+        let selection_cursors = &mut self.selection_cursors;
+        let worker_order = &self.worker_order;
+        let model = &request.model;
 
-        let pool: Vec<&str> = if pure_round_robin {
-            candidates.iter().map(|(id, _)| id.as_str()).collect()
-        } else {
-            let lowest_load = candidates.iter().map(|(_, load)| *load).min()?;
-            candidates
-                .iter()
-                .filter(|(_, load)| *load == lowest_load)
-                .map(|(id, _)| id.as_str())
-                .collect()
-        };
-
-        let key = SelectionKey::new(effective_provider, model);
-        let last_worker_id = self.selection_cursors.get(&key).map(String::as_str);
-
-        // Find the next candidate strictly after `last_worker_id` in `self.worker_order`.
-        let chosen = if let Some(last_id) = last_worker_id {
-            let last_pos = self.worker_order.iter().position(|id| id == last_id);
-            match last_pos {
-                Some(pos) => pool
-                    .iter()
-                    .find(|cand| {
-                        self.worker_order
-                            .iter()
-                            .position(|id| id == *cand)
-                            .is_some_and(|cand_pos| cand_pos > pos)
-                    })
-                    .or_else(|| pool.first())
-                    .copied()?,
-                None => *pool.first()?,
-            }
-        } else {
-            *pool.first()?
-        };
-
-        let chosen_owned = chosen.to_string();
-        if self.selection_cursors.len() >= MAX_SELECTION_CURSORS
-            && !self.selection_cursors.contains_key(&key)
-        {
-            self.selection_cursors.clear();
-        }
-        self.selection_cursors.insert(key, chosen_owned.clone());
-        Some(chosen_owned)
+        self.routing_state.select_worker(
+            request.owner_key_id.as_deref(),
+            model,
+            candidates,
+            &request.routing_hints,
+            policy,
+            now,
+            |pool| {
+                pick_round_robin_worker(
+                    selection_cursors,
+                    worker_order,
+                    effective_provider,
+                    model,
+                    pool,
+                )
+            },
+        )
     }
 
-    fn assign_to_worker(&mut self, worker_id: &str, request: RequestRecord) {
+    fn assign_to_worker_with_decision(
+        &mut self,
+        worker_id: &str,
+        request: RequestRecord,
+        decision: Option<RouteDecision>,
+        now: Instant,
+    ) {
         if let Some(worker) = self.workers.get_mut(worker_id) {
             worker.in_flight_requests.push(request.request_id.clone());
             worker.reported_load = worker.reported_load.saturating_add(1);
+        }
+        if let Some(decision) = decision {
+            self.routing_state.record_dispatch(
+                request.owner_key_id.as_deref(),
+                &request.model,
+                worker_id,
+                &request.routing_hints,
+                decision,
+                self.default_routing_policy.min_prefix_bytes,
+                now,
+            );
         }
         self.pending_worker_requests
             .entry(worker_id.to_string())
@@ -1963,6 +2302,8 @@ impl ProxyServerCore {
                 cancellation: None,
                 cancelled_at: None,
                 has_emitted_chunk: false,
+                dispatched_at: now,
+                response_id_captured: false,
             },
         );
         self.notify_worker(worker_id);
@@ -2031,8 +2372,45 @@ impl ProxyServerCore {
             .retain(|signal| signal.worker_id != worker_id);
         self.worker_models_refresh_signals
             .retain(|signal| signal.worker_id != worker_id);
+        self.routing_state.on_worker_disconnected(worker_id);
         Some(worker)
     }
+}
+
+fn pick_round_robin_worker(
+    selection_cursors: &mut HashMap<SelectionKey, String>,
+    worker_order: &[String],
+    effective_provider: &str,
+    model: &str,
+    pool: &[&routing::CandidateWorker],
+) -> Option<String> {
+    if pool.is_empty() {
+        return None;
+    }
+
+    let key = SelectionKey::new(effective_provider, model);
+    let last_worker_id = selection_cursors.get(&key).map(String::as_str);
+
+    let chosen = if let Some(last_id) = last_worker_id {
+        let last_pos = worker_order.iter().position(|id| id == last_id);
+        match last_pos {
+            Some(pos) => pool
+                .iter()
+                .find(|cand| cand.worker_order_index > pos)
+                .or_else(|| pool.first())
+                .copied()?,
+            None => *pool.first()?,
+        }
+    } else {
+        *pool.first()?
+    };
+
+    let chosen_owned = chosen.worker_id.clone();
+    if selection_cursors.len() >= MAX_SELECTION_CURSORS && !selection_cursors.contains_key(&key) {
+        selection_cursors.clear();
+    }
+    selection_cursors.insert(key, chosen_owned.clone());
+    Some(chosen_owned)
 }
 
 fn worker_matches_request(
@@ -2281,6 +2659,19 @@ impl WorkerState {
             .iter()
             .any(|prefix| path.starts_with(prefix.as_str()))
     }
+
+    fn model_context_window(&self, model: &str) -> Option<usize> {
+        self.model_metadata
+            .get(model)
+            .and_then(routing::extract_model_context_window)
+    }
+
+    fn model_loaded_state(&self, model: &str) -> ModelLoadedState {
+        self.model_metadata.get(model).map_or(
+            ModelLoadedState::Unknown,
+            routing::extract_model_loaded_state,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2292,6 +2683,7 @@ struct RequestRecord {
     queued_at: Instant,
     transport: RequestTransport,
     provider_routing: Option<ProviderRouting>,
+    routing_hints: RequestRoutingHints,
     requeue_count: usize,
 }
 
@@ -2329,6 +2721,8 @@ enum ActiveRequestState {
         cancellation: Option<CancelReason>,
         cancelled_at: Option<Instant>,
         has_emitted_chunk: bool,
+        dispatched_at: Instant,
+        response_id_captured: bool,
     },
 }
 

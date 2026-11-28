@@ -695,7 +695,9 @@ async fn handle_worker_message(
         Ok(WorkerToServerMessage::ResponseChunk(ResponseChunkMessage { request_id, chunk })) => {
             let sender = {
                 let mut core = state.core.lock().await;
-                let Some(sender) = core.prepare_stream_chunk_sender(worker_id, &request_id) else {
+                let Some(sender) =
+                    core.prepare_stream_chunk_sender_with_chunk(worker_id, &request_id, &chunk)
+                else {
                     return WorkerMessageOutcome::ProtocolError;
                 };
                 sender

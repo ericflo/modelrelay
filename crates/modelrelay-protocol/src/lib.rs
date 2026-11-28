@@ -84,7 +84,7 @@ pub struct ProviderRouting {
     /// Whether to fall back to non-listed providers when preferred ones are unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_fallbacks: Option<bool>,
-    /// Sorting strategy for eligible workers (e.g. `"load"`, `"round_robin"`).
+    /// Sorting strategy for eligible workers (e.g. `"prefix"`, `"load"`, `"priority"`, `"round_robin"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
 }

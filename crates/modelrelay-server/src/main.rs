@@ -437,6 +437,7 @@ fn spawn_maintenance_loop(core: Arc<Mutex<ProxyServerCore>>) {
                 let failures = guard.expire_queue_timeouts(now);
                 let reaped = guard.expire_cancelled_requests(now, CANCELLED_REQUEST_REAP_GRACE);
                 let _ = guard.expire_graceful_shutdown(now);
+                guard.sweep_routing_state(now);
                 (failures, reaped)
             };
             for failure in &failures {
