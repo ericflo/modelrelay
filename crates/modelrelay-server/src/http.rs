@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{
         HeaderMap as AxumHeaderMap, HeaderName, HeaderValue, Method, StatusCode,
         header::{
@@ -18,19 +18,23 @@ use axum::{
     routing::{delete, get},
 };
 use futures_util::{future, stream};
-use modelrelay_protocol::admin_api::{AdminKeysResponse, CreateKeyRequest, CreateKeyResponse};
+use modelrelay_protocol::admin_api::{
+    AdminKeysResponse, CreateKeyRequest, CreateKeyResponse, RoutingTelemetryDto,
+    UpdateRoutingConfigRequest,
+};
 use modelrelay_protocol::{
     HeaderMap, ProviderRouting, ResponseCompleteMessage, parse_openai_models_response,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
 use crate::{
-    AdminWorkerInfo, CancelReason, HttpResponseEvent, PendingHttpResponse,
-    PendingStreamingHttpResponse, ProxyServerCore, RequestFailureReason, RequestRoutingHints,
-    WorkerSocketApp, api_keys::ApiKeyStore, prefix,
+    AdminWorkerInfo, CancelReason, HttpResponseEvent, InMemoryRoutingConfigStore,
+    PendingHttpResponse, PendingStreamingHttpResponse, ProxyServerCore, RequestFailureReason,
+    RequestRoutingHints, RouteDebugInfo, RoutingConfigStore, RoutingStoreError, WorkerSocketApp,
+    api_keys::ApiKeyStore, prefix, validate_and_normalize_config,
 };
 
 const OPENAI_MODELS_PROVIDER: &str = "openai";
@@ -52,6 +56,7 @@ pub struct ProxyHttpApp {
     admin_token: Option<String>,
     require_api_keys: bool,
     api_key_store: Arc<dyn ApiKeyStore>,
+    routing_config_store: Arc<dyn RoutingConfigStore>,
     request_timeout: Option<Duration>,
     max_body_bytes: usize,
     public_cors: Option<CorsLayer>,
@@ -70,12 +75,19 @@ impl ProxyHttpApp {
             admin_token: None,
             require_api_keys: false,
             api_key_store: Arc::new(crate::api_keys::InMemoryApiKeyStore::new()),
+            routing_config_store: Arc::new(InMemoryRoutingConfigStore::new()),
             request_timeout: None,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             public_cors: None,
             admin_cors: None,
             legacy_models_probe: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_routing_config_store(mut self, store: Arc<dyn RoutingConfigStore>) -> Self {
+        self.routing_config_store = store;
+        self
     }
 
     #[must_use]
@@ -165,6 +177,7 @@ impl ProxyHttpApp {
             admin_token: self.admin_token,
             require_api_keys: self.require_api_keys,
             api_key_store: self.api_key_store,
+            routing_config_store: self.routing_config_store,
             request_timeout: self.request_timeout,
             legacy_models_probe: self.legacy_models_probe,
         };
@@ -172,6 +185,13 @@ impl ProxyHttpApp {
         let mut admin_router = Router::new()
             .route("/admin/workers", get(admin_workers_handler))
             .route("/admin/stats", get(admin_stats_handler))
+            .route(
+                "/admin/routing",
+                get(admin_routing_get_handler)
+                    .put(admin_routing_update_handler)
+                    .post(admin_routing_update_handler),
+            )
+            .route("/admin/routing/stats", get(admin_routing_stats_handler))
             .route(
                 "/admin/keys",
                 get(admin_keys_handler).post(admin_keys_create_handler),
@@ -187,6 +207,13 @@ impl ProxyHttpApp {
             .route("/health", get(health_handler))
             .route("/v1/models", get(models_handler))
             .route("/models", get(models_handler))
+            .route(
+                "/v1/routing",
+                get(public_routing_get_handler)
+                    .put(public_routing_update_handler)
+                    .post(public_routing_update_handler),
+            )
+            .route("/v1/routing/stats", get(public_routing_stats_handler))
             .fallback(wildcard_handler)
             .layer(DefaultBodyLimit::max(self.max_body_bytes))
             .with_state(state);
@@ -213,6 +240,7 @@ struct HttpState {
     admin_token: Option<String>,
     require_api_keys: bool,
     api_key_store: Arc<dyn ApiKeyStore>,
+    routing_config_store: Arc<dyn RoutingConfigStore>,
     request_timeout: Option<Duration>,
     legacy_models_probe: bool,
 }
@@ -541,6 +569,171 @@ async fn admin_keys_revoke_handler(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RoutingScopeQuery {
+    #[serde(default)]
+    owner_key_id: Option<String>,
+}
+
+fn normalized_query_owner(query: &RoutingScopeQuery) -> Option<String> {
+    query
+        .owner_key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+async fn resolve_public_routing_owner(
+    state: &HttpState,
+    headers: &AxumHeaderMap,
+    query: &RoutingScopeQuery,
+) -> Result<Option<String>, Response> {
+    if check_admin_auth(state, headers).is_ok() {
+        return Ok(normalized_query_owner(query));
+    }
+
+    if state.require_api_keys {
+        return check_client_api_key(state, headers).await;
+    }
+
+    // Self-hosted mode without API key enforcement: if an admin token is configured,
+    // require either the admin token (checked above) or a valid API key.
+    if state.admin_token.is_some() {
+        if let Ok(Some(token)) = extract_client_api_key(headers)
+            && let Ok(Some(key_id)) = state.api_key_store.validate_key(token).await
+        {
+            return Ok(Some(key_id));
+        }
+        return Err(StatusCode::FORBIDDEN.into_response());
+    }
+
+    Ok(None)
+}
+
+async fn admin_routing_get_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+    Query(query): Query<RoutingScopeQuery>,
+) -> Response {
+    if let Err(status) = check_admin_auth(&state, &headers) {
+        return status.into_response();
+    }
+    let owner_key_id = normalized_query_owner(&query);
+    let snapshot = {
+        let core = state.core.lock().await;
+        core.routing_state_snapshot(&state.models_provider, owner_key_id.as_deref())
+    };
+    Json(snapshot).into_response()
+}
+
+async fn admin_routing_update_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+    Query(query): Query<RoutingScopeQuery>,
+    Json(body): Json<UpdateRoutingConfigRequest>,
+) -> Response {
+    if let Err(status) = check_admin_auth(&state, &headers) {
+        return status.into_response();
+    }
+    let owner_key_id = normalized_query_owner(&query);
+    apply_routing_config_update(&state, owner_key_id, body).await
+}
+
+async fn admin_routing_stats_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+) -> Response {
+    if let Err(status) = check_admin_auth(&state, &headers) {
+        return status.into_response();
+    }
+    let telemetry = RoutingTelemetryDto::from(state.core.lock().await.routing_telemetry());
+    Json(telemetry).into_response()
+}
+
+async fn public_routing_get_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+    Query(query): Query<RoutingScopeQuery>,
+) -> Response {
+    let owner_key_id = match resolve_public_routing_owner(&state, &headers, &query).await {
+        Ok(owner) => owner,
+        Err(resp) => return resp,
+    };
+    let snapshot = {
+        let core = state.core.lock().await;
+        core.routing_state_snapshot(&state.models_provider, owner_key_id.as_deref())
+    };
+    Json(snapshot).into_response()
+}
+
+async fn public_routing_update_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+    Query(query): Query<RoutingScopeQuery>,
+    Json(body): Json<UpdateRoutingConfigRequest>,
+) -> Response {
+    let owner_key_id = match resolve_public_routing_owner(&state, &headers, &query).await {
+        Ok(owner) => owner,
+        Err(resp) => return resp,
+    };
+    apply_routing_config_update(&state, owner_key_id, body).await
+}
+
+async fn public_routing_stats_handler(
+    State(state): State<HttpState>,
+    headers: AxumHeaderMap,
+    Query(query): Query<RoutingScopeQuery>,
+) -> Response {
+    if let Err(resp) = resolve_public_routing_owner(&state, &headers, &query).await {
+        return resp;
+    }
+    let telemetry = RoutingTelemetryDto::from(state.core.lock().await.routing_telemetry());
+    Json(telemetry).into_response()
+}
+
+async fn apply_routing_config_update(
+    state: &HttpState,
+    owner_key_id: Option<String>,
+    body: UpdateRoutingConfigRequest,
+) -> Response {
+    let validated = match validate_and_normalize_config(body.config) {
+        Ok(cfg) => cfg,
+        Err(RoutingStoreError::InvalidConfig(msg)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "invalid_request",
+                        "message": msg,
+                    }
+                })),
+            )
+                .into_response();
+        }
+        Err(RoutingStoreError::Internal(msg)) => {
+            tracing::error!("routing config validation error: {msg}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    if let Err(err) = state
+        .routing_config_store
+        .save_config(owner_key_id.as_deref(), &validated)
+        .await
+    {
+        tracing::error!("failed to persist routing config: {err}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let snapshot = {
+        let mut core = state.core.lock().await;
+        core.set_routing_config_for_owner(owner_key_id.clone(), validated);
+        core.routing_state_snapshot(&state.models_provider, owner_key_id.as_deref())
+    };
+    Json(snapshot).into_response()
+}
+
 /// Extract client API key from `Authorization: Bearer <key>` or `x-api-key: <key>`
 /// (supporting Anthropic SDKs and `OpenAI` SDKs equally).
 fn extract_client_api_key(headers: &AxumHeaderMap) -> Result<Option<&str>, &'static str> {
@@ -762,8 +955,11 @@ async fn wildcard_handler(
         .await;
     }
 
-    let pending = {
+    let client_debug = client_requested_debug_headers(&headers);
+    let (pending, expose_debug) = {
         let mut core = state.core.lock().await;
+        let expose_debug =
+            client_debug || core.should_expose_debug_headers(owner_key_id.as_deref());
         match core.submit_http_response_request_with_hints(
             &state.models_provider,
             model,
@@ -775,7 +971,7 @@ async fn wildcard_handler(
             owner_key_id,
             routing_hints,
         ) {
-            Ok(pending) => pending,
+            Ok(pending) => (pending, expose_debug),
             Err(failure) => return availability_failure_response(failure.reason),
         }
     };
@@ -801,7 +997,18 @@ async fn wildcard_handler(
     match wait_result {
         Some(Ok(Ok(response))) => {
             cancellation_guard.disarm();
-            response_complete_to_http_response(response)
+            let route_debug = if expose_debug {
+                state
+                    .core
+                    .lock()
+                    .await
+                    .take_request_route_debug(&request_id)
+            } else {
+                None
+            };
+            let mut http_resp = response_complete_to_http_response(response);
+            attach_route_debug_headers(&mut http_resp, route_debug.as_ref());
+            http_resp
         }
         Some(Ok(Err(reason))) => {
             cancellation_guard.disarm();
@@ -837,8 +1044,11 @@ async fn stream_worker_backed_http_response(
         return availability_failure_response(RequestFailureReason::ProviderDisabled);
     }
 
-    let mut pending = {
+    let client_debug = client_requested_debug_headers(&headers);
+    let (mut pending, expose_debug) = {
         let mut core = state.core.lock().await;
+        let expose_debug =
+            client_debug || core.should_expose_debug_headers(owner_key_id.as_deref());
         match core.submit_http_streaming_request_with_hints(
             &state.models_provider,
             model,
@@ -850,7 +1060,7 @@ async fn stream_worker_backed_http_response(
             owner_key_id,
             routing_hints,
         ) {
-            Ok(pending) => pending,
+            Ok(pending) => (pending, expose_debug),
             Err(failure) => return availability_failure_response(failure.reason),
         }
     };
@@ -866,16 +1076,40 @@ async fn stream_worker_backed_http_response(
     };
 
     match first_event {
-        Some(Some(HttpResponseEvent::Chunk(first_chunk))) => streaming_http_response(
-            first_chunk,
-            pending,
-            cancellation_guard,
-            state.core,
-            state.request_timeout,
-        ),
+        Some(Some(HttpResponseEvent::Chunk(first_chunk))) => {
+            let route_debug = if expose_debug {
+                state
+                    .core
+                    .lock()
+                    .await
+                    .take_request_route_debug(&request_id)
+            } else {
+                None
+            };
+            let mut resp = streaming_http_response(
+                first_chunk,
+                pending,
+                cancellation_guard,
+                state.core,
+                state.request_timeout,
+            );
+            attach_route_debug_headers(&mut resp, route_debug.as_ref());
+            resp
+        }
         Some(Some(HttpResponseEvent::Complete(response))) => {
             cancellation_guard.disarm();
-            response_complete_to_http_response(response)
+            let route_debug = if expose_debug {
+                state
+                    .core
+                    .lock()
+                    .await
+                    .take_request_route_debug(&request_id)
+            } else {
+                None
+            };
+            let mut resp = response_complete_to_http_response(response);
+            attach_route_debug_headers(&mut resp, route_debug.as_ref());
+            resp
         }
         Some(Some(HttpResponseEvent::Failure(reason))) => {
             cancellation_guard.disarm();
@@ -896,6 +1130,36 @@ async fn stream_worker_backed_http_response(
             tracing::warn!(request_id = %request_id, "streaming request timed out before first chunk");
             gateway_timeout_json_response("Request timed out waiting for first streaming chunk")
         }
+    }
+}
+
+fn client_requested_debug_headers(headers: &AxumHeaderMap) -> bool {
+    headers
+        .get("x-modelrelay-debug")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true")
+        })
+}
+
+fn attach_route_debug_headers(response: &mut Response, debug: Option<&RouteDebugInfo>) {
+    let Some(debug) = debug else {
+        return;
+    };
+    let headers = response.headers_mut();
+    if let Ok(val) = HeaderValue::from_str(&debug.worker_name) {
+        headers.insert(HeaderName::from_static("x-modelrelay-worker"), val);
+    }
+    headers.insert(
+        HeaderName::from_static("x-modelrelay-route-reason"),
+        HeaderValue::from_static(debug.reason.as_str()),
+    );
+    if let Ok(val) = HeaderValue::from_str(&debug.matched_prefix_bytes.to_string()) {
+        headers.insert(
+            HeaderName::from_static("x-modelrelay-prefix-match-bytes"),
+            val,
+        );
     }
 }
 

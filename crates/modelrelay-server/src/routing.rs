@@ -7,6 +7,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use modelrelay_protocol::admin_api::{
+    RoutingPolicyConfig, RoutingStrategyDto, RoutingTelemetryDto, SpilloverModeDto,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -134,6 +137,82 @@ impl Default for RoutingPolicy {
     }
 }
 
+impl From<RoutingStrategyDto> for RoutingStrategy {
+    fn from(dto: RoutingStrategyDto) -> Self {
+        match dto {
+            RoutingStrategyDto::PrefixAware => Self::PrefixAware,
+            RoutingStrategyDto::PriorityFailover => Self::PriorityFailover,
+            RoutingStrategyDto::LeastLoaded => Self::LeastLoaded,
+            RoutingStrategyDto::RoundRobin => Self::RoundRobin,
+        }
+    }
+}
+
+impl From<RoutingStrategy> for RoutingStrategyDto {
+    fn from(strategy: RoutingStrategy) -> Self {
+        match strategy {
+            RoutingStrategy::PrefixAware => Self::PrefixAware,
+            RoutingStrategy::PriorityFailover => Self::PriorityFailover,
+            RoutingStrategy::LeastLoaded => Self::LeastLoaded,
+            RoutingStrategy::RoundRobin => Self::RoundRobin,
+        }
+    }
+}
+
+impl From<SpilloverModeDto> for SpilloverMode {
+    fn from(dto: SpilloverModeDto) -> Self {
+        match dto {
+            SpilloverModeDto::SpillOnBusy => Self::SpillOnBusy,
+            SpilloverModeDto::CostBalanced => Self::CostBalanced,
+            SpilloverModeDto::StrictSticky => Self::StrictSticky,
+        }
+    }
+}
+
+impl From<SpilloverMode> for SpilloverModeDto {
+    fn from(mode: SpilloverMode) -> Self {
+        match mode {
+            SpilloverMode::SpillOnBusy => Self::SpillOnBusy,
+            SpilloverMode::CostBalanced => Self::CostBalanced,
+            SpilloverMode::StrictSticky => Self::StrictSticky,
+        }
+    }
+}
+
+impl From<&RoutingPolicyConfig> for RoutingPolicy {
+    fn from(cfg: &RoutingPolicyConfig) -> Self {
+        Self {
+            strategy: cfg.strategy.into(),
+            spillover_mode: cfg.spillover_mode.into(),
+            min_prefix_bytes: cfg.min_prefix_bytes,
+            prefix_ttl: Duration::from_secs(cfg.prefix_ttl_secs.max(1)),
+            prefix_aware_queue: cfg.prefix_aware_queue,
+            respect_context_window: cfg.respect_context_window,
+            prefer_loaded_models: cfg.prefer_loaded_models,
+            allow_client_overrides: cfg.allow_client_overrides,
+            worker_priority: cfg.worker_priority.clone(),
+            sticky_after_overflow: cfg.sticky_after_overflow,
+        }
+    }
+}
+
+impl From<&RoutingPolicy> for RoutingPolicyConfig {
+    fn from(policy: &RoutingPolicy) -> Self {
+        Self {
+            strategy: policy.strategy.into(),
+            spillover_mode: policy.spillover_mode.into(),
+            min_prefix_bytes: policy.min_prefix_bytes,
+            prefix_ttl_secs: policy.prefix_ttl.as_secs().max(1),
+            prefix_aware_queue: policy.prefix_aware_queue,
+            respect_context_window: policy.respect_context_window,
+            prefer_loaded_models: policy.prefer_loaded_models,
+            allow_client_overrides: policy.allow_client_overrides,
+            worker_priority: policy.worker_priority.clone(),
+            sticky_after_overflow: policy.sticky_after_overflow,
+        }
+    }
+}
+
 /// Why the router selected a particular worker for a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,6 +229,35 @@ pub enum RouteReason {
     RoundRobin,
     QueuedPrefixMatch,
     QueuedFifo,
+}
+
+impl RouteReason {
+    /// Wire header label used for `X-ModelRelay-Route-Reason`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleCandidate => "single_candidate",
+            Self::PrefixHit => "prefix_hit",
+            Self::SessionHit => "session_hit",
+            Self::ConcurrentSpillover => "concurrent_spillover",
+            Self::WarmBusySticky => "warm_busy_sticky",
+            Self::ColdSpread => "cold_spread",
+            Self::PriorityPrimary => "priority_primary",
+            Self::PriorityOverflow => "priority_overflow",
+            Self::LeastLoaded => "least_loaded",
+            Self::RoundRobin => "round_robin",
+            Self::QueuedPrefixMatch => "queued_prefix_match",
+            Self::QueuedFifo => "queued_fifo",
+        }
+    }
+}
+
+/// Diagnostic routing metadata attached to responses when debug headers are enabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteDebugInfo {
+    pub worker_name: String,
+    pub reason: RouteReason,
+    pub matched_prefix_bytes: usize,
 }
 
 /// Outcome returned by the smart router for observability and testing.
@@ -170,6 +278,17 @@ pub enum ModelLoadedState {
     Unknown = 1,
     /// Explicitly reported as currently loaded in VRAM on this worker.
     Loaded = 2,
+}
+
+impl ModelLoadedState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unloaded => "unloaded",
+            Self::Unknown => "unknown",
+            Self::Loaded => "loaded",
+        }
+    }
 }
 
 /// Snapshot of an eligible worker passed into the candidate selector.
@@ -276,6 +395,32 @@ pub struct RoutingTelemetrySnapshot {
     pub context_guard_skips: u64,
     pub total_matched_prefix_bytes: u64,
     pub tracked_prefix_nodes: usize,
+    pub verified_cached_prompt_tokens: u64,
+    pub verified_prompt_tokens: u64,
+}
+
+impl From<RoutingTelemetrySnapshot> for RoutingTelemetryDto {
+    fn from(snap: RoutingTelemetrySnapshot) -> Self {
+        Self {
+            total_routed: snap.total_routed,
+            prefix_hits: snap.prefix_hits,
+            session_hits: snap.session_hits,
+            concurrent_spillovers: snap.concurrent_spillovers,
+            warm_busy_stickies: snap.warm_busy_stickies,
+            cold_spreads: snap.cold_spreads,
+            priority_primaries: snap.priority_primaries,
+            priority_overflows: snap.priority_overflows,
+            least_loaded_routes: snap.least_loaded_routes,
+            round_robin_routes: snap.round_robin_routes,
+            queued_prefix_matches: snap.queued_prefix_matches,
+            queued_fifo_dispatches: snap.queued_fifo_dispatches,
+            context_guard_skips: snap.context_guard_skips,
+            total_matched_prefix_bytes: snap.total_matched_prefix_bytes,
+            tracked_prefix_nodes: snap.tracked_prefix_nodes,
+            verified_cached_prompt_tokens: snap.verified_cached_prompt_tokens,
+            verified_prompt_tokens: snap.verified_prompt_tokens,
+        }
+    }
 }
 
 /// Snapshot of per-`(worker, model)` speed and health metrics.
@@ -285,6 +430,8 @@ pub struct WorkerModelMetricsSnapshot {
     pub consecutive_errors: u32,
     pub total_dispatches: u64,
     pub eviction_epoch: u64,
+    pub cached_prompt_tokens_total: u64,
+    pub prompt_tokens_total: u64,
 }
 
 /// Per-`(worker_id, model)` runtime telemetry used for speed tie-breaking,
@@ -297,6 +444,8 @@ struct WorkerModelMetrics {
     last_dispatched_seq: u64,
     total_dispatches: u64,
     eviction_epoch: u64,
+    cached_prompt_tokens_total: u64,
+    prompt_tokens_total: u64,
 }
 
 impl WorkerModelMetrics {
@@ -333,6 +482,8 @@ impl WorkerModelMetrics {
             consecutive_errors: self.consecutive_errors,
             total_dispatches: self.total_dispatches,
             eviction_epoch: self.eviction_epoch,
+            cached_prompt_tokens_total: self.cached_prompt_tokens_total,
+            prompt_tokens_total: self.prompt_tokens_total,
         }
     }
 }
@@ -1690,6 +1841,73 @@ impl RoutingState {
         self.last_decision.as_ref()
     }
 
+    /// Average EWMA TTFT across all models tracked for `worker_id`.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn worker_avg_ttft_ms(&self, worker_id: &str) -> Option<f64> {
+        let mut sum = 0.0_f64;
+        let mut count = 0_usize;
+        for (key, metrics) in &self.worker_metrics {
+            if key.worker_id == worker_id
+                && let Some(ms) = metrics.ewma_ttft_ms
+            {
+                sum += ms;
+                count += 1;
+            }
+        }
+        (count > 0).then(|| sum / (count as f64))
+    }
+
+    /// Count active prefix trie nodes referencing `worker_id` (scoped optionally to `owner_key_id`).
+    #[must_use]
+    pub fn worker_warm_prefix_count(&self, worker_id: &str, owner_key_id: Option<&str>) -> usize {
+        if self.disconnected_workers.contains(worker_id) {
+            return 0;
+        }
+        let mut count = 0_usize;
+        for (key, trie) in &self.tries {
+            if owner_key_id.is_some() && key.owner_key_id.as_deref() != owner_key_id {
+                continue;
+            }
+            for node in trie.nodes.values() {
+                if node.workers.contains_key(worker_id) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Record backend-reported verified prompt & cached prompt token counts (Phase 4).
+    pub fn record_token_usage(
+        &mut self,
+        worker_id: &str,
+        model: &str,
+        prompt_tokens: Option<u32>,
+        cached_prompt_tokens: Option<u32>,
+    ) {
+        let key = WorkerModelKey {
+            worker_id: worker_id.to_string(),
+            model: model.to_string(),
+        };
+        let metrics = self.worker_metrics.entry(key).or_default();
+        if let Some(prompt) = prompt_tokens {
+            let p = u64::from(prompt);
+            metrics.prompt_tokens_total = metrics.prompt_tokens_total.saturating_add(p);
+            self.telemetry.verified_prompt_tokens =
+                self.telemetry.verified_prompt_tokens.saturating_add(p);
+        }
+        if let Some(cached) = cached_prompt_tokens {
+            let c = u64::from(cached);
+            metrics.cached_prompt_tokens_total =
+                metrics.cached_prompt_tokens_total.saturating_add(c);
+            self.telemetry.verified_cached_prompt_tokens = self
+                .telemetry
+                .verified_cached_prompt_tokens
+                .saturating_add(c);
+        }
+    }
+
     fn worker_is_penalized(&self, worker_id: &str, model: &str, now: Instant) -> bool {
         self.worker_metrics
             .get(&WorkerModelKey {
@@ -1812,4 +2030,25 @@ pub fn extract_responses_api_id(payload: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Rewrite the top-level `"model"` field in a JSON request body when dispatching
+/// a unified pooled model request to a worker whose native model ID differs.
+#[must_use]
+pub fn rewrite_request_body_model(body: &str, target_model: &str) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+    let Ok(mut val) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    if let Some(obj) = val.as_object_mut()
+        && obj.contains_key("model")
+    {
+        obj.insert("model".to_string(), Value::String(target_model.to_string()));
+        if let Ok(rewritten) = serde_json::to_string(&val) {
+            return rewritten;
+        }
+    }
+    body.to_string()
 }

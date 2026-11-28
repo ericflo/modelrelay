@@ -2,12 +2,18 @@ pub mod api_keys;
 pub mod http;
 pub mod prefix;
 pub mod routing;
+pub mod routing_store;
 pub mod worker_socket;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use modelrelay_protocol::admin_api::{
+    LiveModelGroupView, LiveModelWorkerInfo, ModelGroupMode, ModelGroupTarget,
+    ModelRoutingGroupConfig, RoutingPolicyConfig, RoutingStateResponse, RoutingTelemetryDto,
+    RoutingWorkerSummary, TenantRoutingConfig,
+};
 use modelrelay_protocol::{
     HeaderMap, MAX_MODEL_METADATA_BYTES, MAX_MODEL_METADATA_ENTRIES, ModelMetadataMap,
     ModelsUpdateMessage, PongMessage, ProviderRouting, RegisterAck, RegisterMessage,
@@ -21,14 +27,21 @@ pub use api_keys::{ApiKeyMetadata, ApiKeyStore, InMemoryApiKeyStore, StoreError}
 pub use http::ProxyHttpApp;
 pub use prefix::{ParsedProxyRequest, PrefixCheckpoint, RequestRoutingHints};
 pub use routing::{
-    ModelLoadedState, RouteDecision, RouteReason, RoutingPolicy, RoutingStrategy,
+    ModelLoadedState, RouteDebugInfo, RouteDecision, RouteReason, RoutingPolicy, RoutingStrategy,
     RoutingTelemetrySnapshot, SpilloverMode, WorkerModelMetricsSnapshot,
+};
+#[cfg(feature = "postgres")]
+pub use routing_store::PostgresRoutingConfigStore;
+pub use routing_store::{
+    FileRoutingConfigStore, InMemoryRoutingConfigStore, RoutingConfigStore, RoutingStoreError,
+    validate_and_normalize_config,
 };
 pub use worker_socket::{WorkerSocketApp, WorkerSocketProviderConfig};
 
 const MAX_REQUEUE_COUNT: usize = 3;
 const STREAM_CHANNEL_CAPACITY: usize = 64;
 const MAX_SELECTION_CURSORS: usize = 4_096;
+const MAX_RECENT_ROUTE_DEBUG: usize = 4_096;
 
 #[derive(Debug, Default)]
 pub struct ProxyServerCore {
@@ -41,7 +54,9 @@ pub struct ProxyServerCore {
     provider_queue_policies: HashMap<String, ProviderQueuePolicy>,
     default_queue_policy: ProviderQueuePolicy,
     default_routing_policy: RoutingPolicy,
+    routing_configs: HashMap<Option<String>, TenantRoutingConfig>,
     routing_state: routing::RoutingState,
+    recent_route_debug: HashMap<String, RouteDebugInfo>,
     selection_cursors: HashMap<SelectionKey, String>,
     active_requests: HashMap<String, ActiveRequestState>,
     pending_worker_requests: HashMap<String, VecDeque<RequestMessage>>,
@@ -72,6 +87,320 @@ impl ProxyServerCore {
     #[must_use]
     pub fn default_routing_policy(&self) -> &RoutingPolicy {
         &self.default_routing_policy
+    }
+
+    /// Replace the in-memory routing config for a specific owner scope (`None` = global).
+    pub fn set_routing_config_for_owner(
+        &mut self,
+        owner_key_id: Option<String>,
+        config: TenantRoutingConfig,
+    ) {
+        if owner_key_id.is_none() {
+            self.default_routing_policy = RoutingPolicy::from(&config.default_policy);
+        }
+        self.routing_configs.insert(owner_key_id, config);
+    }
+
+    /// Bulk-load persisted per-owner routing configs (typically at server startup).
+    pub fn load_routing_configs(&mut self, configs: HashMap<Option<String>, TenantRoutingConfig>) {
+        if let Some(global) = configs.get(&None) {
+            self.default_routing_policy = RoutingPolicy::from(&global.default_policy);
+        }
+        self.routing_configs = configs;
+    }
+
+    /// Return the configured [`TenantRoutingConfig`] for `owner_key_id` (falling back
+    /// to global config's default policy if no owner-specific config has been saved yet).
+    #[must_use]
+    pub fn routing_config_for_owner(&self, owner_key_id: Option<&str>) -> TenantRoutingConfig {
+        let key = owner_key_id.map(ToOwned::to_owned);
+        if let Some(cfg) = self.routing_configs.get(&key) {
+            return cfg.clone();
+        }
+        if key.is_some()
+            && let Some(global) = self.routing_configs.get(&None)
+        {
+            return TenantRoutingConfig {
+                default_policy: global.default_policy.clone(),
+                expose_debug_headers: global.expose_debug_headers,
+                ..TenantRoutingConfig::default()
+            };
+        }
+        TenantRoutingConfig {
+            default_policy: RoutingPolicyConfig::from(&self.default_routing_policy),
+            ..TenantRoutingConfig::default()
+        }
+    }
+
+    /// Whether diagnostic `X-ModelRelay-*` response headers should be attached for `owner_key_id`.
+    #[must_use]
+    pub fn should_expose_debug_headers(&self, owner_key_id: Option<&str>) -> bool {
+        let key = owner_key_id.map(ToOwned::to_owned);
+        if let Some(cfg) = self.routing_configs.get(&key) {
+            return cfg.expose_debug_headers;
+        }
+        self.routing_configs
+            .get(&None)
+            .is_some_and(|cfg| cfg.expose_debug_headers)
+    }
+
+    /// Pop diagnostic route metadata recorded when `request_id` was dispatched.
+    pub fn take_request_route_debug(&mut self, request_id: &str) -> Option<RouteDebugInfo> {
+        self.recent_route_debug.remove(request_id)
+    }
+
+    /// Build a complete live dashboard snapshot for `owner_key_id`: persisted config,
+    /// automatic exact-model groups + unified pool views, visible workers with EWMA TTFT
+    /// and warm prefix counts, and routing telemetry counters.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn routing_state_snapshot(
+        &self,
+        provider: &str,
+        owner_key_id: Option<&str>,
+    ) -> RoutingStateResponse {
+        let config = self.routing_config_for_owner(owner_key_id);
+        let mut exact_models: Vec<String> = Vec::new();
+        let mut seen_models: HashSet<String> = HashSet::new();
+        let mut worker_summaries: Vec<RoutingWorkerSummary> = Vec::new();
+
+        for exact_only in [true, false] {
+            for worker_id in &self.worker_order {
+                let Some(worker) = self.workers.get(worker_id) else {
+                    continue;
+                };
+                if !worker.visible_to_owner(owner_key_id) {
+                    continue;
+                }
+                if exact_only && worker.provider != provider {
+                    continue;
+                }
+                if !exact_only && worker.provider == provider {
+                    continue;
+                }
+                for model in &worker.models {
+                    if model != "*" && seen_models.insert(model.clone()) {
+                        exact_models.push(model.clone());
+                    }
+                }
+                worker_summaries.push(RoutingWorkerSummary {
+                    worker_id: worker_id.clone(),
+                    worker_name: worker.worker_name.clone(),
+                    provider: worker.provider.clone(),
+                    models: worker.models.clone(),
+                    in_flight_count: worker.in_flight_requests.len(),
+                    max_concurrent: worker.max_concurrent,
+                    is_draining: worker.is_draining,
+                    avg_ttft_ms: self.routing_state.worker_avg_ttft_ms(worker_id),
+                    warm_prefix_count: self
+                        .routing_state
+                        .worker_warm_prefix_count(worker_id, owner_key_id),
+                });
+            }
+        }
+
+        let mut live_models: Vec<LiveModelGroupView> = Vec::new();
+        let mut emitted_pool_ids: HashSet<String> = HashSet::new();
+
+        // 1. Unified pooled models first so tied multi-machine aliases appear prominently.
+        for group in self.active_groups_for_owner(owner_key_id) {
+            if group.mode != ModelGroupMode::UnifiedPool {
+                continue;
+            }
+            let Some(pool_id) = group.pool_model_id.as_deref() else {
+                continue;
+            };
+            if !emitted_pool_ids.insert(pool_id.to_string()) {
+                continue;
+            }
+            let workers = self.live_workers_for_model(owner_key_id, pool_id, Some(&group.targets));
+            live_models.push(LiveModelGroupView {
+                model_id: pool_id.to_string(),
+                is_unified_pool: true,
+                group_id: Some(group.id.clone()),
+                group_name: Some(group.name.clone()),
+                has_custom_override: false,
+                effective_policy: group.policy.clone(),
+                workers,
+            });
+        }
+
+        // 2. Automatic exact model IDs advertised by connected workers.
+        for model_id in exact_models {
+            if emitted_pool_ids.contains(&model_id) {
+                continue;
+            }
+            let (effective_policy, group_id, group_name, has_custom_override) =
+                self.resolve_policy_metadata_for_model(owner_key_id, &model_id);
+            let workers = self.live_workers_for_model(owner_key_id, &model_id, None);
+            live_models.push(LiveModelGroupView {
+                model_id,
+                is_unified_pool: false,
+                group_id,
+                group_name,
+                has_custom_override,
+                effective_policy,
+                workers,
+            });
+        }
+
+        RoutingStateResponse {
+            config,
+            live_models,
+            workers: worker_summaries,
+            telemetry: RoutingTelemetryDto::from(self.routing_state.telemetry_snapshot()),
+        }
+    }
+
+    fn live_workers_for_model(
+        &self,
+        owner_key_id: Option<&str>,
+        logical_model: &str,
+        pool_targets: Option<&[ModelGroupTarget]>,
+    ) -> Vec<LiveModelWorkerInfo> {
+        let mut out = Vec::new();
+        for worker_id in &self.worker_order {
+            let Some(worker) = self.workers.get(worker_id) else {
+                continue;
+            };
+            if !worker.visible_to_owner(owner_key_id) {
+                continue;
+            }
+            let Some(native_model) =
+                resolve_worker_native_model(worker, logical_model, pool_targets)
+            else {
+                continue;
+            };
+            let metrics = self
+                .routing_state
+                .worker_metrics_snapshot(worker_id, logical_model)
+                .or_else(|| {
+                    self.routing_state
+                        .worker_metrics_snapshot(worker_id, &native_model)
+                });
+            out.push(LiveModelWorkerInfo {
+                worker_id: worker_id.clone(),
+                worker_name: worker.worker_name.clone(),
+                provider: worker.provider.clone(),
+                native_model_id: native_model.clone(),
+                in_flight: worker.in_flight_requests.len(),
+                max_concurrent: worker.max_concurrent,
+                is_draining: worker.is_draining,
+                loaded_state: worker
+                    .model_loaded_state(&native_model)
+                    .as_str()
+                    .to_string(),
+                context_window: worker.model_context_window(&native_model),
+                ewma_ttft_ms: metrics.as_ref().and_then(|m| m.ewma_ttft_ms),
+                consecutive_errors: metrics.as_ref().map_or(0, |m| m.consecutive_errors),
+                total_dispatches: metrics.as_ref().map_or(0, |m| m.total_dispatches),
+                cached_prompt_tokens_total: metrics
+                    .as_ref()
+                    .map_or(0, |m| m.cached_prompt_tokens_total),
+                prompt_tokens_total: metrics.as_ref().map_or(0, |m| m.prompt_tokens_total),
+            });
+        }
+        out
+    }
+
+    fn active_groups_for_owner(&self, owner_key_id: Option<&str>) -> Vec<ModelRoutingGroupConfig> {
+        let key = owner_key_id.map(ToOwned::to_owned);
+        if let Some(cfg) = self.routing_configs.get(&key) {
+            let mut groups = cfg.groups.clone();
+            if key.is_some()
+                && let Some(global) = self.routing_configs.get(&None)
+            {
+                let owned_ids: HashSet<String> = groups.iter().map(|g| g.id.clone()).collect();
+                for g in &global.groups {
+                    if !owned_ids.contains(&g.id) {
+                        groups.push(g.clone());
+                    }
+                }
+            }
+            return groups;
+        }
+        self.routing_configs
+            .get(&None)
+            .map(|cfg| cfg.groups.clone())
+            .unwrap_or_default()
+    }
+
+    fn find_unified_pool_for_model(
+        &self,
+        owner_key_id: Option<&str>,
+        requested_model: &str,
+    ) -> Option<ModelRoutingGroupConfig> {
+        for scope in [owner_key_id.map(ToOwned::to_owned), None] {
+            if let Some(cfg) = self.routing_configs.get(&scope)
+                && let Some(group) = cfg.groups.iter().find(|g| {
+                    g.mode == ModelGroupMode::UnifiedPool
+                        && g.pool_model_id.as_deref() == Some(requested_model)
+                })
+            {
+                return Some(group.clone());
+            }
+            if scope.is_none() {
+                break;
+            }
+        }
+        None
+    }
+
+    fn resolve_policy_metadata_for_model(
+        &self,
+        owner_key_id: Option<&str>,
+        model: &str,
+    ) -> (RoutingPolicyConfig, Option<String>, Option<String>, bool) {
+        let scopes: Vec<Option<String>> = match owner_key_id {
+            Some(k) => vec![Some(k.to_string()), None],
+            None => vec![None],
+        };
+
+        for scope in &scopes {
+            let Some(cfg) = self.routing_configs.get(scope) else {
+                continue;
+            };
+            // 1. Exact UnifiedPool group match.
+            if let Some(group) = cfg.groups.iter().find(|g| {
+                g.mode == ModelGroupMode::UnifiedPool && g.pool_model_id.as_deref() == Some(model)
+            }) {
+                return (
+                    group.policy.clone(),
+                    Some(group.id.clone()),
+                    Some(group.name.clone()),
+                    false,
+                );
+            }
+            // 2. Exact per-model override.
+            if let Some(override_policy) = cfg.model_overrides.get(model) {
+                return (override_policy.clone(), None, None, true);
+            }
+            // 3. Exact SharedPolicy group membership.
+            if let Some(group) = cfg.groups.iter().find(|g| {
+                g.mode == ModelGroupMode::SharedPolicy
+                    && g.targets.iter().any(|t| t.model_id == model)
+            }) {
+                return (
+                    group.policy.clone(),
+                    Some(group.id.clone()),
+                    Some(group.name.clone()),
+                    false,
+                );
+            }
+        }
+
+        // 4. Fallback to scope default_policy -> global default_policy -> core default.
+        for scope in &scopes {
+            if let Some(cfg) = self.routing_configs.get(scope) {
+                return (cfg.default_policy.clone(), None, None, false);
+            }
+        }
+        (
+            RoutingPolicyConfig::from(&self.default_routing_policy),
+            None,
+            None,
+            false,
+        )
     }
 
     #[must_use]
@@ -1682,6 +2011,7 @@ impl ProxyServerCore {
     /// metadata such as context length, max output tokens, reasoning efforts, and
     /// modalities) across all workers visible to `owner_key_id`.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn provider_model_entries_for_owner(
         &self,
         provider: &str,
@@ -1721,6 +2051,49 @@ impl ProxyServerCore {
                             if slot.get().is_none() && meta.is_some() {
                                 slot.insert(meta);
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also expose active UnifiedPool models visible to this owner scope,
+        // inheriting metadata (context window, reasoning efforts, etc.) from the
+        // first connected target worker so clients like Pi discover full capabilities.
+        for group in self.active_groups_for_owner(owner_key_id) {
+            if group.mode != ModelGroupMode::UnifiedPool {
+                continue;
+            }
+            let Some(pool_id) = group.pool_model_id.as_deref() else {
+                continue;
+            };
+            let mut matched_any = false;
+            let mut inherited_meta: Option<serde_json::Map<String, serde_json::Value>> = None;
+            for worker_id in &self.worker_order {
+                let Some(worker) = self.workers.get(worker_id) else {
+                    continue;
+                };
+                if !worker.visible_to_owner(owner_key_id) {
+                    continue;
+                }
+                if let Some(native) =
+                    resolve_worker_native_model(worker, pool_id, Some(&group.targets))
+                {
+                    matched_any = true;
+                    if inherited_meta.is_none() {
+                        inherited_meta = worker.model_metadata.get(&native).cloned();
+                    }
+                }
+            }
+            if matched_any {
+                match model_metadata.entry(pool_id.to_string()) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        model_order.push(pool_id.to_string());
+                        slot.insert(inherited_meta);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        if slot.get().is_none() && inherited_meta.is_some() {
+                            slot.insert(inherited_meta);
                         }
                     }
                 }
@@ -1995,13 +2368,25 @@ impl ProxyServerCore {
         let now = Instant::now();
 
         // Collect compatible queued candidates across all provider queues,
-        // enforcing model, endpoint, tenant owner, and ProviderRouting
-        // constraints (strict pass first, fallback pass second).
+        // enforcing model (including unified pools), endpoint, tenant owner, and
+        // ProviderRouting constraints (strict pass first, fallback pass second).
         let mut compatible: Vec<(String, usize, Instant)> = Vec::new();
         for allow_fallback_pass in [false, true] {
             for (queue_provider, queue) in &self.provider_queues {
                 for (idx, request) in queue.iter().enumerate() {
-                    if worker_matches_request(&worker, request, allow_fallback_pass) {
+                    let pool = self.find_unified_pool_for_model(
+                        request.owner_key_id.as_deref(),
+                        &request.model,
+                    );
+                    let targets = pool.as_ref().map(|g| g.targets.as_slice());
+                    if worker_matches_request_with_target(
+                        &worker,
+                        request,
+                        allow_fallback_pass,
+                        targets,
+                    )
+                    .is_some()
+                    {
                         compatible.push((queue_provider.clone(), idx, request.queued_at));
                     }
                 }
@@ -2032,41 +2417,45 @@ impl ProxyServerCore {
             });
         let oldest_starving = now.saturating_duration_since(oldest_queued_at) >= queue_timeout_cap;
 
-        let policy = self.default_routing_policy.clone();
-        let (chosen_provider, chosen_index, matched_bytes, reason) =
-            if policy.prefix_aware_queue && !oldest_starving && compatible.len() > 1 {
-                let lookahead = compatible.len().min(routing::PREFIX_QUEUE_LOOKAHEAD);
-                let mut best_match_bytes = 0_usize;
-                let mut best_pos = 0_usize;
-                for (pos, (prov, idx, _)) in compatible.iter().take(lookahead).enumerate() {
-                    if let Some(req) = self.provider_queues.get(prov).and_then(|q| q.get(*idx)) {
-                        if req.routing_hints.is_empty() {
-                            continue;
-                        }
-                        let effective = self.routing_state.match_prefix_for_single_worker(
-                            req.owner_key_id.as_deref(),
-                            &req.model,
-                            &req.routing_hints,
-                            worker_id,
-                            worker.max_concurrent,
-                            now,
-                            policy.prefix_ttl,
-                        );
-                        if effective >= policy.min_prefix_bytes && effective > best_match_bytes {
-                            best_match_bytes = effective;
-                            best_pos = pos;
-                        }
+        let (chosen_provider, chosen_index, matched_bytes, reason) = if !oldest_starving
+            && compatible.len() > 1
+        {
+            let lookahead = compatible.len().min(routing::PREFIX_QUEUE_LOOKAHEAD);
+            let mut best_match_bytes = 0_usize;
+            let mut best_pos = 0_usize;
+            for (pos, (prov, idx, _)) in compatible.iter().take(lookahead).enumerate() {
+                if let Some(req) = self.provider_queues.get(prov).and_then(|q| q.get(*idx)) {
+                    if req.routing_hints.is_empty() {
+                        continue;
+                    }
+                    let req_policy = self.resolve_policy_for_request(req);
+                    if !req_policy.prefix_aware_queue {
+                        continue;
+                    }
+                    let effective = self.routing_state.match_prefix_for_single_worker(
+                        req.owner_key_id.as_deref(),
+                        &req.model,
+                        &req.routing_hints,
+                        worker_id,
+                        worker.max_concurrent,
+                        now,
+                        req_policy.prefix_ttl,
+                    );
+                    if effective >= req_policy.min_prefix_bytes && effective > best_match_bytes {
+                        best_match_bytes = effective;
+                        best_pos = pos;
                     }
                 }
-                if best_match_bytes >= policy.min_prefix_bytes {
-                    let (prov, idx, _) = compatible[best_pos].clone();
-                    (prov, idx, best_match_bytes, RouteReason::QueuedPrefixMatch)
-                } else {
-                    (oldest_provider, oldest_idx, 0, RouteReason::QueuedFifo)
-                }
+            }
+            if best_match_bytes > 0 {
+                let (prov, idx, _) = compatible[best_pos].clone();
+                (prov, idx, best_match_bytes, RouteReason::QueuedPrefixMatch)
             } else {
                 (oldest_provider, oldest_idx, 0, RouteReason::QueuedFifo)
-            };
+            }
+        } else {
+            (oldest_provider, oldest_idx, 0, RouteReason::QueuedFifo)
+        };
 
         let queue = self.provider_queues.get_mut(&chosen_provider)?;
         let request = queue.remove(chosen_index)?;
@@ -2085,7 +2474,9 @@ impl ProxyServerCore {
     }
 
     fn resolve_policy_for_request(&self, request: &RequestRecord) -> RoutingPolicy {
-        let mut policy = self.default_routing_policy.clone();
+        let (cfg_policy, _, _, _) =
+            self.resolve_policy_metadata_for_model(request.owner_key_id.as_deref(), &request.model);
+        let mut policy = RoutingPolicy::from(&cfg_policy);
         if policy.allow_client_overrides
             && let Some(sort) = request
                 .provider_routing
@@ -2102,7 +2493,7 @@ impl ProxyServerCore {
         &self,
         worker_id: &str,
         order_idx: usize,
-        model: &str,
+        native_model: &str,
     ) -> Option<routing::CandidateWorker> {
         let worker = self.workers.get(worker_id)?;
         Some(routing::CandidateWorker {
@@ -2112,8 +2503,8 @@ impl ProxyServerCore {
             worker_order_index: order_idx,
             selection_load: worker.selection_load(),
             max_concurrent: worker.max_concurrent,
-            context_window: worker.model_context_window(model),
-            loaded_state: worker.model_loaded_state(model),
+            context_window: worker.model_context_window(native_model),
+            loaded_state: worker.model_loaded_state(native_model),
         })
     }
 
@@ -2146,18 +2537,22 @@ impl ProxyServerCore {
         policy: &RoutingPolicy,
         now: Instant,
     ) -> Option<RouteDecision> {
+        let pool =
+            self.find_unified_pool_for_model(request.owner_key_id.as_deref(), &request.model);
+        let targets = pool.as_ref().map(|g| g.targets.as_slice());
+
         let eligible_workers: Vec<routing::CandidateWorker> = self
             .worker_order
             .iter()
             .enumerate()
             .filter_map(|(order_idx, worker_id)| {
                 let worker = self.workers.get(worker_id)?;
-                if worker.selection_load() >= worker.max_concurrent
-                    || !worker_matches_request(worker, request, false)
-                {
+                if worker.selection_load() >= worker.max_concurrent {
                     return None;
                 }
-                self.build_candidate(worker_id, order_idx, &request.model)
+                let native_model =
+                    worker_matches_request_with_target(worker, request, false, targets)?;
+                self.build_candidate(worker_id, order_idx, &native_model)
             })
             .collect();
 
@@ -2208,6 +2603,10 @@ impl ProxyServerCore {
         policy: &RoutingPolicy,
         now: Instant,
     ) -> Option<RouteDecision> {
+        let pool =
+            self.find_unified_pool_for_model(request.owner_key_id.as_deref(), &request.model);
+        let targets = pool.as_ref().map(|g| g.targets.as_slice());
+
         let candidates: Vec<routing::CandidateWorker> = self
             .worker_order
             .iter()
@@ -2218,14 +2617,16 @@ impl ProxyServerCore {
                 let provider_matches =
                     provider_filter.is_none_or(|provider| worker.provider == provider);
 
-                if provider_matches
-                    && has_capacity
-                    && worker_matches_request(worker, request, allow_fallback_pass)
-                {
-                    self.build_candidate(worker_id, order_idx, &request.model)
-                } else {
-                    None
+                if !provider_matches || !has_capacity {
+                    return None;
                 }
+                let native_model = worker_matches_request_with_target(
+                    worker,
+                    request,
+                    allow_fallback_pass,
+                    targets,
+                )?;
+                self.build_candidate(worker_id, order_idx, &native_model)
             })
             .collect();
 
@@ -2275,25 +2676,47 @@ impl ProxyServerCore {
         decision: Option<RouteDecision>,
         now: Instant,
     ) {
-        if let Some(worker) = self.workers.get_mut(worker_id) {
+        let pool =
+            self.find_unified_pool_for_model(request.owner_key_id.as_deref(), &request.model);
+        let targets = pool.as_ref().map(|g| g.targets.as_slice());
+
+        let (worker_name, target_model) = if let Some(worker) = self.workers.get_mut(worker_id) {
             worker.in_flight_requests.push(request.request_id.clone());
             worker.reported_load = worker.reported_load.saturating_add(1);
-        }
+            let resolved = resolve_worker_native_model(worker, &request.model, targets)
+                .unwrap_or_else(|| request.model.clone());
+            (worker.worker_name.clone(), resolved)
+        } else {
+            (worker_id.to_string(), request.model.clone())
+        };
+
         if let Some(decision) = decision {
+            let min_prefix = self.resolve_policy_for_request(&request).min_prefix_bytes;
+            if self.recent_route_debug.len() >= MAX_RECENT_ROUTE_DEBUG {
+                self.recent_route_debug.clear();
+            }
+            self.recent_route_debug.insert(
+                request.request_id.clone(),
+                RouteDebugInfo {
+                    worker_name,
+                    reason: decision.reason,
+                    matched_prefix_bytes: decision.matched_prefix_bytes,
+                },
+            );
             self.routing_state.record_dispatch(
                 request.owner_key_id.as_deref(),
                 &request.model,
                 worker_id,
                 &request.routing_hints,
                 decision,
-                self.default_routing_policy.min_prefix_bytes,
+                min_prefix,
                 now,
             );
         }
         self.pending_worker_requests
             .entry(worker_id.to_string())
             .or_default()
-            .push_back(request.to_worker_request());
+            .push_back(request.to_worker_request_for_model(&target_model));
         self.active_requests.insert(
             request.request_id.clone(),
             ActiveRequestState::InFlight {
@@ -2320,9 +2743,13 @@ impl ProxyServerCore {
             .provider_routing
             .as_ref()
             .is_some_and(|r| r.allow_fallbacks.unwrap_or(true));
+        let pool =
+            self.find_unified_pool_for_model(request.owner_key_id.as_deref(), &request.model);
+        let targets = pool.as_ref().map(|g| g.targets.as_slice());
         self.workers.values().any(|worker| {
-            worker_matches_request(worker, request, false)
-                || (allow_fallback && worker_matches_request(worker, request, true))
+            worker_matches_request_with_target(worker, request, false, targets).is_some()
+                || (allow_fallback
+                    && worker_matches_request_with_target(worker, request, true, targets).is_some())
         })
     }
 
@@ -2331,14 +2758,14 @@ impl ProxyServerCore {
     /// (because every matching model worker excludes it via `endpoint_prefixes`).
     /// Fast-failing avoids queuing unsupported probe/API routes for `queue_timeout`.
     fn has_model_worker_rejecting_endpoint(&self, request: &RequestRecord) -> bool {
+        let pool =
+            self.find_unified_pool_for_model(request.owner_key_id.as_deref(), &request.model);
+        let targets = pool.as_ref().map(|g| g.targets.as_slice());
         !self.has_compatible_worker(request)
             && self.workers.values().any(|worker| {
                 !worker.is_draining
                     && worker.visible_to_owner(request.owner_key_id.as_deref())
-                    && worker
-                        .models
-                        .iter()
-                        .any(|supported| supported == "*" || supported == &request.model)
+                    && resolve_worker_native_model(worker, &request.model, targets).is_some()
                     && !worker.supports_endpoint(&request.transport.endpoint_path)
             })
     }
@@ -2413,26 +2840,54 @@ fn pick_round_robin_worker(
     Some(chosen_owned)
 }
 
-fn worker_matches_request(
+/// Resolve which native model ID on `worker` satisfies `requested_model`,
+/// checking exact model match, wildcard `"*"`, and optional `UnifiedPool` targets.
+fn resolve_worker_native_model(
+    worker: &WorkerState,
+    requested_model: &str,
+    pool_targets: Option<&[ModelGroupTarget]>,
+) -> Option<String> {
+    if let Some(targets) = pool_targets {
+        for target in targets {
+            if let Some(ref req_name) = target.worker_name
+                && req_name != &worker.worker_name
+            {
+                continue;
+            }
+            if worker
+                .models
+                .iter()
+                .any(|supported| supported == "*" || supported == &target.model_id)
+            {
+                return Some(target.model_id.clone());
+            }
+        }
+    }
+    if worker
+        .models
+        .iter()
+        .any(|supported| supported == "*" || supported == requested_model)
+    {
+        return Some(requested_model.to_string());
+    }
+    None
+}
+
+fn worker_matches_request_with_target(
     worker: &WorkerState,
     request: &RequestRecord,
     allow_fallback_pass: bool,
-) -> bool {
+    pool_targets: Option<&[ModelGroupTarget]>,
+) -> Option<String> {
     if worker.is_draining {
-        return false;
+        return None;
     }
     if !worker.visible_to_owner(request.owner_key_id.as_deref()) {
-        return false;
+        return None;
     }
-    if !worker
-        .models
-        .iter()
-        .any(|supported| supported == "*" || supported == &request.model)
-    {
-        return false;
-    }
+    let native_model = resolve_worker_native_model(worker, &request.model, pool_targets)?;
     if !worker.supports_endpoint(&request.transport.endpoint_path) {
-        return false;
+        return None;
     }
 
     if let Some(routing) = &request.provider_routing {
@@ -2440,19 +2895,19 @@ fn worker_matches_request(
         if let Some(ignore) = &routing.ignore
             && ignore.iter().any(|p| p == &worker.provider)
         {
-            return false;
+            return None;
         }
         if let Some(only) = &routing.only
             && !only.iter().any(|p| p == &worker.provider)
         {
             if allow_fallback_pass && routing.allow_fallbacks.unwrap_or(true) {
-                return true;
+                return Some(native_model);
             }
-            return false;
+            return None;
         }
     }
 
-    true
+    Some(native_model)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2697,15 +3152,30 @@ struct RequestTransport {
 }
 
 impl RequestRecord {
-    fn to_worker_request(&self) -> RequestMessage {
+    fn to_worker_request_for_model(&self, target_model: &str) -> RequestMessage {
+        if target_model == self.model {
+            return RequestMessage {
+                request_id: self.request_id.clone(),
+                model: self.model.clone(),
+                endpoint_path: self.transport.endpoint_path.clone(),
+                method: self.transport.method.clone(),
+                is_streaming: self.transport.is_streaming,
+                body: self.transport.body.clone(),
+                headers: self.transport.headers.clone(),
+            };
+        }
+        let mut headers = self.transport.headers.clone();
+        if headers.contains_key("x-model") {
+            headers.insert("x-model".to_string(), target_model.to_string());
+        }
         RequestMessage {
             request_id: self.request_id.clone(),
-            model: self.model.clone(),
+            model: target_model.to_string(),
             endpoint_path: self.transport.endpoint_path.clone(),
             method: self.transport.method.clone(),
             is_streaming: self.transport.is_streaming,
-            body: self.transport.body.clone(),
-            headers: self.transport.headers.clone(),
+            body: routing::rewrite_request_body_model(&self.transport.body, target_model),
+            headers,
         }
     }
 }

@@ -6,12 +6,13 @@ use axum::http::{HeaderName, HeaderValue, Method};
 use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
 use modelrelay_server::{
-    ApiKeyStore, InMemoryApiKeyStore, ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore,
-    WorkerSocketApp, WorkerSocketProviderConfig,
+    ApiKeyStore, FileRoutingConfigStore, InMemoryApiKeyStore, InMemoryRoutingConfigStore,
+    ProviderQueuePolicy, ProxyHttpApp, ProxyServerCore, RoutingConfigStore, WorkerSocketApp,
+    WorkerSocketProviderConfig,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders};
 use tracing_subscriber::EnvFilter;
 
 const CANCELLED_REQUEST_REAP_GRACE: Duration = Duration::from_secs(5);
@@ -83,6 +84,11 @@ struct Args {
     /// If unset, keys are stored in memory (single-pod only, lost on restart).
     #[arg(long, env = "DATABASE_URL")]
     database_url: Option<String>,
+
+    /// Optional JSON file path for persisting routing group configurations in self-hosted
+    /// deployments without `DATABASE_URL`.
+    #[arg(long, env = "ROUTING_CONFIG_PATH")]
+    routing_config: Option<String>,
 
     /// Existing native API key to hash-import into a rebuilt `PostgreSQL` store.
     /// The raw key is never persisted. A matching revoked key fails startup.
@@ -157,11 +163,24 @@ async fn main() {
         guard.configure_provider_queue(&args.provider, default_policy);
     }
 
-    let api_key_store = build_api_key_store(
+    let (api_key_store, routing_config_store) = build_stores(
         args.database_url.as_deref(),
         args.bootstrap_api_key.as_deref(),
+        args.routing_config.as_deref(),
     )
     .await;
+
+    match routing_config_store.load_all().await {
+        Ok(configs) => {
+            if !configs.is_empty() {
+                tracing::info!(scopes = configs.len(), "loaded persisted routing configs");
+            }
+            core.lock().await.load_routing_configs(configs);
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load persisted routing configs; using defaults");
+        }
+    }
 
     let mut worker_socket_app = WorkerSocketApp::new(Arc::clone(&core))
         .with_api_key_store(Arc::clone(&api_key_store))
@@ -184,6 +203,7 @@ async fn main() {
         .with_admin_token(args.admin_token)
         .with_require_api_keys(args.require_api_keys)
         .with_api_key_store(api_key_store)
+        .with_routing_config_store(routing_config_store)
         .with_request_timeout(request_timeout)
         .with_max_body_bytes(max_body_bytes)
         .with_public_cors(public_cors)
@@ -227,8 +247,10 @@ async fn main() {
     .expect("server error");
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_cors_layers(configured_origins: Option<&str>) -> (Option<CorsLayer>, Option<CorsLayer>) {
-    let public_methods = AllowMethods::list([Method::GET, Method::POST, Method::OPTIONS]);
+    let public_methods =
+        AllowMethods::list([Method::GET, Method::POST, Method::PUT, Method::OPTIONS]);
     let public_headers = AllowHeaders::list([
         HeaderName::from_static("accept"),
         HeaderName::from_static("authorization"),
@@ -236,6 +258,7 @@ fn build_cors_layers(configured_origins: Option<&str>) -> (Option<CorsLayer>, Op
         HeaderName::from_static("x-api-key"),
         HeaderName::from_static("x-model"),
         HeaderName::from_static("x-provider"),
+        HeaderName::from_static("x-modelrelay-debug"),
         HeaderName::from_static("anthropic-version"),
         HeaderName::from_static("anthropic-beta"),
         HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
@@ -244,6 +267,7 @@ fn build_cors_layers(configured_origins: Option<&str>) -> (Option<CorsLayer>, Op
         HeaderName::from_static("x-client-request-id"),
         HeaderName::from_static("x-session-affinity"),
         HeaderName::from_static("session_id"),
+        HeaderName::from_static("x-session-id"),
         HeaderName::from_static("x-stainless-lang"),
         HeaderName::from_static("x-stainless-package-version"),
         HeaderName::from_static("x-stainless-os"),
@@ -254,6 +278,11 @@ fn build_cors_layers(configured_origins: Option<&str>) -> (Option<CorsLayer>, Op
         HeaderName::from_static("x-stainless-timeout"),
         HeaderName::from_static("x-stainless-helper-method"),
     ]);
+    let public_expose = ExposeHeaders::list([
+        HeaderName::from_static("x-modelrelay-worker"),
+        HeaderName::from_static("x-modelrelay-route-reason"),
+        HeaderName::from_static("x-modelrelay-prefix-match-bytes"),
+    ]);
 
     match configured_origins.map(str::trim) {
         Some("" | "none") => (None, None),
@@ -261,12 +290,14 @@ fn build_cors_layers(configured_origins: Option<&str>) -> (Option<CorsLayer>, Op
             let public = CorsLayer::new()
                 .allow_origin(AllowOrigin::any())
                 .allow_methods(public_methods)
-                .allow_headers(public_headers);
+                .allow_headers(public_headers)
+                .expose_headers(public_expose);
             let admin = CorsLayer::new()
                 .allow_origin(AllowOrigin::any())
                 .allow_methods(AllowMethods::list([
                     Method::GET,
                     Method::POST,
+                    Method::PUT,
                     Method::DELETE,
                     Method::OPTIONS,
                 ]))
@@ -295,12 +326,14 @@ fn build_cors_layers(configured_origins: Option<&str>) -> (Option<CorsLayer>, Op
                 let public = CorsLayer::new()
                     .allow_origin(AllowOrigin::list(origins.clone()))
                     .allow_methods(public_methods)
-                    .allow_headers(public_headers);
+                    .allow_headers(public_headers)
+                    .expose_headers(public_expose);
                 let admin = CorsLayer::new()
                     .allow_origin(AllowOrigin::list(origins))
                     .allow_methods(AllowMethods::list([
                         Method::GET,
                         Method::POST,
+                        Method::PUT,
                         Method::DELETE,
                         Method::OPTIONS,
                     ]))
@@ -317,7 +350,8 @@ fn build_cors_layers(configured_origins: Option<&str>) -> (Option<CorsLayer>, Op
             let public = CorsLayer::new()
                 .allow_origin(AllowOrigin::any())
                 .allow_methods(public_methods)
-                .allow_headers(public_headers);
+                .allow_headers(public_headers)
+                .expose_headers(public_expose);
             (Some(public), None)
         }
     }
@@ -356,10 +390,11 @@ fn display_timeout(seconds: u64) -> String {
     }
 }
 
-async fn build_api_key_store(
+async fn build_stores(
     database_url: Option<&str>,
     bootstrap_api_key: Option<&str>,
-) -> Arc<dyn ApiKeyStore> {
+    routing_config_path: Option<&str>,
+) -> (Arc<dyn ApiKeyStore>, Arc<dyn RoutingConfigStore>) {
     match database_url {
         #[cfg(feature = "postgres")]
         Some(url) => {
@@ -368,16 +403,17 @@ async fn build_api_key_store(
                 .run(&pool)
                 .await
                 .expect("failed to run server migrations");
-            let store = modelrelay_server::PostgresApiKeyStore::new(pool);
+            let key_store = modelrelay_server::PostgresApiKeyStore::new(pool.clone());
             if let Some(raw_key) = bootstrap_api_key {
-                store
+                key_store
                     .ensure_imported_key("recovered-bootstrap-key", raw_key)
                     .await
                     .expect("failed to import MODELRELAY_BOOTSTRAP_API_KEY");
                 tracing::info!("recovery API key is present in the persistent store");
             }
-            tracing::info!("api key store: postgres-backed");
-            Arc::new(store)
+            let routing_store = modelrelay_server::PostgresRoutingConfigStore::new(pool);
+            tracing::info!("stores: api keys + routing configs postgres-backed");
+            (Arc::new(key_store), Arc::new(routing_store))
         }
         #[cfg(not(feature = "postgres"))]
         Some(_) => {
@@ -392,7 +428,14 @@ async fn build_api_key_store(
                 "DATABASE_URL not set \u{2014} using in-memory API key store \
                  (single-pod only, keys lost on restart)"
             );
-            Arc::new(InMemoryApiKeyStore::new())
+            let routing_store: Arc<dyn RoutingConfigStore> = match routing_config_path {
+                Some(path) if !path.trim().is_empty() => {
+                    tracing::info!(path = %path, "routing config store: json file-backed");
+                    Arc::new(FileRoutingConfigStore::new(path.trim()))
+                }
+                _ => Arc::new(InMemoryRoutingConfigStore::new()),
+            };
+            (Arc::new(InMemoryApiKeyStore::new()), routing_store)
         }
     }
 }
