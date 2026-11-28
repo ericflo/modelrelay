@@ -1,6 +1,6 @@
 steps:
   - name: publish-immutable-images
-    image: localhost:32000/epsilon-buildkit:main-20261119070655-a24d45762658@sha256:85e0c6ae37f5d1f29225442ee1ca8ff626ada7aed01319ca6a3ef627a1f2c3c3
+    image: localhost:32000/epsilon-buildkit:main-20261128010825-1bc545742cc7@sha256:36b2e87404bfc2253c02e54ece0e3ed3eb72aa89f0dfa701d065064a28915ac5
     when:
       - evaluate: 'CI_PIPELINE_EVENT == "push" && CI_COMMIT_BRANCH == CI_REPO_DEFAULT_BRANCH'
     commands:
