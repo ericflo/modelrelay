@@ -1,0 +1,292 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Pi Coding Agent Setup - ModelRelay</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Central HTTP LLM proxy that routes inference requests to authenticated remote workers over WebSocket.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="index.html">Introduction</a></li><li class="chapter-item expanded affix "><a href="api-reference.html">API Reference (api.modelrelay.io)</a></li><li class="chapter-item expanded affix "><a href="pi-setup.html" class="active">Pi Coding Agent Setup</a></li><li class="chapter-item expanded affix "><a href="architecture.html">Architecture</a></li><li class="chapter-item expanded affix "><a href="protocol-walkthrough.html">Protocol Walkthrough</a></li><li class="chapter-item expanded affix "><a href="behavior-contract.html">Behavior Contract</a></li><li class="chapter-item expanded affix "><a href="verification.html">Verification</a></li><li class="chapter-item expanded affix "><a href="runbook.html">Operational Runbook</a></li><li class="chapter-item expanded affix "><a href="tls.html">TLS Setup</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">ModelRelay</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/ericflo/modelrelay" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/ericflo/modelrelay/edit/main/docs/pi-setup.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="pi-coding-agent-setup"><a class="header" href="#pi-coding-agent-setup">Pi Coding Agent Setup</a></h1>
+<p>Configure ModelRelay as a zero-config dynamic <strong>provider</strong> in the <a href="https://pi.dev">Pi coding agent</a> (<code>@earendil-works/pi-coding-agent</code>) with your API token stored cleanly in <code>~/.pi/agent/auth.json</code>.</p>
+<p>ModelRelay preserves your local server's full <code>/v1/models</code> metadata end-to-end, so Pi automatically picks up:</p>
+<ul>
+<li><strong>Live models</strong> via <code>GET https://api.modelrelay.io/v1/models</code> whenever you swap models on your GPU workers.</li>
+<li><strong>Context windows &amp; output limits</strong> (<code>context_length</code>, <code>context_window</code>, <code>max_model_len</code> for <strong>vLLM</strong>, <code>meta.n_ctx</code> &amp; <code>/props</code> runtime <code>n_ctx</code> for <strong>llama.cpp</strong>, <code>loaded_instances[].config.context_length</code> / <code>loaded_context_length</code> for <strong>LM Studio</strong>, <code>num_ctx</code> / <code>model_info.*.context_length</code> for <strong>Ollama</strong>, plus <code>max_output_tokens</code> / <code>max_completion_tokens</code>).</li>
+<li><strong>Thinking levels &amp; reasoning efforts</strong> (<code>reasoning_efforts</code>, <code>supported_reasoning_efforts</code>, <code>thinkingLevelMap</code>, <code>reasoning</code>, <code>capabilities.reasoning</code>, <strong>llama.cpp</strong> <code>/props</code> <code>chat_template</code>, <strong>vLLM</strong> <code>enable_thinking</code> / <code>gpt-oss</code> / <code>DeepSeek-V3.1</code>, <strong>LM Studio</strong> <code>/api/v1/models</code> <code>capabilities.reasoning</code>, and <strong>Ollama</strong> <code>/api/show</code> <code>thinking</code>) plus vision modalities — with <strong>zero <code>models.json</code> config required</strong>.</li>
+<li><strong>Clean credential storage</strong> in <code>~/.pi/agent/auth.json</code> (or interactively via <code>/login modelrelay</code>, or via a secret manager <code>!command</code>).</li>
+</ul>
+<h2 id="1-install-pi"><a class="header" href="#1-install-pi">1. Install Pi</a></h2>
+<pre><code class="language-bash"># macOS / Linux
+curl -fsSL https://pi.dev/install.sh | sh
+</code></pre>
+<p>Windows PowerShell: <code>powershell -c "irm https://pi.dev/install.ps1 | iex"</code> — or via npm: <code>npm install -g --ignore-scripts @earendil-works/pi-coding-agent</code>.</p>
+<h2 id="2-enable-live-v1models-discovery-1-command"><a class="header" href="#2-enable-live-v1models-discovery-1-command">2. Enable Live <code>/v1/models</code> Discovery (1 Command)</a></h2>
+<p>Pi's built-in <code>models.json</code> only supports static model lists and does not poll <code>/v1/models</code>. Install our small hosted provider file (<code>https://modelrelay.io/pi/modelrelay.ts</code>) with one command so Pi pulls live models, context windows, and reasoning efforts dynamically:</p>
+<pre><code class="language-bash">curl -fsSL https://modelrelay.io/pi/modelrelay.ts \
+  --create-dirs -o ~/.pi/agent/extensions/modelrelay.ts
+</code></pre>
+<p>Self-hosting a custom relay URL? Keep the same file and set <code>export MODELRELAY_BASE_URL=https://relay.example.com/v1</code> (or set <code>providers.modelrelay.baseUrl</code> in <code>~/.pi/agent/models.json</code>).</p>
+<h2 id="3-add-your-api-token-to-piagentauthjson"><a class="header" href="#3-add-your-api-token-to-piagentauthjson">3. Add Your API Token to <code>~/.pi/agent/auth.json</code></a></h2>
+<p>Add a <code>"modelrelay"</code> entry to <code>~/.pi/agent/auth.json</code> (<code>chmod 600 ~/.pi/agent/auth.json</code>), or launch Pi and run <code>/login modelrelay</code>:</p>
+<pre><code class="language-json">{
+  "modelrelay": {
+    "type": "api_key",
+    "key": "mr_live_your_api_key"
+  }
+}
+</code></pre>
+<h2 id="4-launch-pi--pick-a-model"><a class="header" href="#4-launch-pi--pick-a-model">4. Launch Pi &amp; Pick a Model</a></h2>
+<pre><code class="language-bash">pi   # starts interactive Pi and refreshes ModelRelay models automatically
+# After the first interactive startup or /model open, CLI commands see the saved catalog too:
+pi --list-models modelrelay
+</code></pre>
+<p>Inside Pi, run <code>/model</code> to refresh and select any model advertised by your workers (<code>Ctrl+S</code> saves a default), and run <code>/thinking</code> (or <code>Shift+Tab</code>) to cycle through the exact reasoning efforts advertised by your server.</p>
+<blockquote>
+<p><strong>Note (Pi 1.6+):</strong> <code>pi update --models</code> only updates built-in providers and does not load <code>~/.pi/agent/extensions/modelrelay.ts</code>. Likewise, <code>pi --list-models</code> and <code>pi -p</code> read the last saved <code>~/.pi/agent/models-store.json</code> cache — open interactive <code>pi</code> or <code>/model</code> whenever you want to refresh your live ModelRelay catalog.</p>
+</blockquote>
+<h2 id="zero-extension-static-alternative-piagentmodelsjson"><a class="header" href="#zero-extension-static-alternative-piagentmodelsjson">Zero-Extension Static Alternative (<code>~/.pi/agent/models.json</code>)</a></h2>
+<p>If you only serve a fixed model ID and prefer zero extensions, skip Step 2 and declare it statically in <code>~/.pi/agent/models.json</code>:</p>
+<pre><code class="language-json">{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "modelrelay": {
+      "baseUrl": "https://api.modelrelay.io/v1",
+      "api": "openai-completions",
+      "apiKey": "$MODELRELAY_API_KEY",
+      "models": [
+        {
+          "id": "qwen3.5-27b",
+          "reasoning": true,
+          "contextWindow": 131072,
+          "maxTokens": 32768
+        }
+      ]
+    }
+  }
+}
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="api-reference.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="architecture.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="api-reference.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="architecture.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
