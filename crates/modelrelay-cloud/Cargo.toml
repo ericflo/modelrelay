@@ -20,14 +20,15 @@ reqwest = { workspace = true }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 sqlx = { workspace = true }
-tower-sessions = "0.14"
-tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"] }
+tower-sessions = "0.15"
+tower-sessions-sqlx-store = { version = "0.16", features = ["postgres"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { workspace = true }
 hmac = "0.13"
 sha2 = "0.11"
 hex = "0.4"
 argon2 = "0.5"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 
 [[bin]]
 name = "reprovision-server-keys"

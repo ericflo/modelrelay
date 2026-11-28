@@ -5,13 +5,13 @@ use std::sync::Arc;
 use argon2::PasswordHasher;
 #[cfg(test)]
 use argon2::password_hash::SaltString;
-#[cfg(test)]
-use argon2::password_hash::rand_core::OsRng;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::Form;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
+#[cfg(test)]
+use rand_core::OsRng;
 use serde::Deserialize;
 use tower_sessions::Session;
 

@@ -19,13 +19,13 @@ use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use argon2::password_hash::rand_core::{OsRng, RngCore};
 use axum::Form;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, PRAGMA};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
+use rand_core::{OsRng, RngCore};
 use reqwest::Url;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
